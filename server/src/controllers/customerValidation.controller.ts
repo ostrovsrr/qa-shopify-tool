@@ -5,10 +5,17 @@ import {
   deleteValidationRun,
   getValidationHistory,
   getValidationResult,
+  updateValidationMetadata,
   validateCustomerCsv,
 } from '../services/customerValidation.service';
 
 const uuidSchema = z.string().uuid('Invalid validation ID format.');
+
+const updateMetadataSchema = z.object({
+  ticketNumber: z.string().max(100).nullable().optional(),
+  ticketName: z.string().max(255).nullable().optional(),
+  comments: z.string().max(2000).nullable().optional(),
+});
 
 export async function uploadHandler(
   req: Request,
@@ -83,6 +90,33 @@ export async function getHistoryHandler(
   try {
     const history = await getValidationHistory();
     res.json(history);
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function updateMetadataHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const idParsed = uuidSchema.safeParse(req.params.validationId);
+    if (!idParsed.success) {
+      res.status(400).json({ error: idParsed.error.errors[0].message });
+      return;
+    }
+    const bodyParsed = updateMetadataSchema.safeParse(req.body);
+    if (!bodyParsed.success) {
+      res.status(400).json({ error: bodyParsed.error.errors[0].message });
+      return;
+    }
+    const updated = await updateValidationMetadata(idParsed.data, bodyParsed.data);
+    if (!updated) {
+      res.status(404).json({ error: 'Validation run not found.' });
+      return;
+    }
+    res.json(updated);
   } catch (err) {
     next(err);
   }

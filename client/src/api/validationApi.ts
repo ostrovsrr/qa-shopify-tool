@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { ValidationHistoryItem, ValidationResult } from '../types';
+import { UpdateMetadataPayload, ValidationHistoryItem, ValidationResult } from '../types';
 
 const api = axios.create({
   baseURL: '/api',
@@ -25,6 +25,17 @@ export function getReportDownloadUrl(validationId: string): string {
 
 export async function fetchHistory(): Promise<ValidationHistoryItem[]> {
   const { data } = await api.get<ValidationHistoryItem[]>('/customer-validation/history');
+  return data;
+}
+
+export async function updateValidationMetadata(
+  validationId: string,
+  payload: UpdateMetadataPayload,
+): Promise<ValidationHistoryItem> {
+  const { data } = await api.patch<ValidationHistoryItem>(
+    `/customer-validation/${validationId}/metadata`,
+    payload,
+  );
   return data;
 }
 
