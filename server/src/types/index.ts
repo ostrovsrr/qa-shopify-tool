@@ -39,7 +39,17 @@ export interface ValidationHistoryItem {
   errors: number;
   warnings: number;
   info: number;
+  ticketNumber: string | null;
+  ticketName: string | null;
+  comments: string | null;
   createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface UpdateValidationMetadata {
+  ticketNumber?: string | null;
+  ticketName?: string | null;
+  comments?: string | null;
 }
 
 // Shape stored in ValidationRun.affectedRows JSON field

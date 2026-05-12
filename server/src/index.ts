@@ -7,6 +7,7 @@ import {
   getHistoryHandler,
   getReportHandler,
   getValidationHandler,
+  updateMetadataHandler,
   uploadHandler,
 } from './controllers/customerValidation.controller';
 
@@ -20,7 +21,7 @@ const PORT = process.env.PORT ?? 3001;
 app.use(
   cors({
     origin: process.env.CLIENT_URL ?? 'http://localhost:5173',
-    methods: ['GET', 'POST', 'DELETE'],
+    methods: ['GET', 'POST', 'PATCH', 'DELETE'],
   }),
 );
 app.use(express.json());
@@ -50,6 +51,7 @@ app.post('/api/customer-validation/upload', upload.single('file'), uploadHandler
 app.get('/api/customer-validation/history', getHistoryHandler);
 app.get('/api/customer-validation/report/:validationId', getReportHandler);
 app.get('/api/customer-validation/:validationId', getValidationHandler);
+app.patch('/api/customer-validation/:validationId/metadata', updateMetadataHandler);
 app.delete('/api/customer-validation/:validationId', deleteValidationHandler);
 
 // ── Error handler ───────────────────────────────────────────────────────────

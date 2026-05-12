@@ -4,6 +4,7 @@ import {
   CustomerValidationIssue,
   CustomerValidationResult,
   Severity,
+  UpdateValidationMetadata,
   ValidationHistoryItem,
 } from '../types';
 import { customerValidationRules } from '../validators/customer';
@@ -109,12 +110,49 @@ export async function getValidationHistory(): Promise<ValidationHistoryItem[]> {
       errors: true,
       warnings: true,
       info: true,
+      ticketNumber: true,
+      ticketName: true,
+      comments: true,
       createdAt: true,
+      updatedAt: true,
     },
     orderBy: { createdAt: 'desc' },
     take: 50,
   });
   return runs;
+}
+
+export async function updateValidationMetadata(
+  validationId: string,
+  metadata: UpdateValidationMetadata,
+): Promise<ValidationHistoryItem | null> {
+  try {
+    const run = await prisma.validationRun.update({
+      where: { id: validationId },
+      data: {
+        ticketNumber: metadata.ticketNumber ?? undefined,
+        ticketName: metadata.ticketName ?? undefined,
+        comments: metadata.comments ?? undefined,
+      },
+      select: {
+        id: true,
+        fileName: true,
+        fileType: true,
+        totalRows: true,
+        errors: true,
+        warnings: true,
+        info: true,
+        ticketNumber: true,
+        ticketName: true,
+        comments: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+    return run;
+  } catch {
+    return null;
+  }
 }
 
 export async function deleteValidationRun(validationId: string): Promise<boolean> {

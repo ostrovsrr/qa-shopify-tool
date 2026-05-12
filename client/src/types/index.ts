@@ -28,5 +28,15 @@ export interface ValidationHistoryItem {
   errors: number;
   warnings: number;
   info: number;
+  ticketNumber: string | null;
+  ticketName: string | null;
+  comments: string | null;
   createdAt: string;
+  updatedAt: string;
+}
+
+export interface UpdateMetadataPayload {
+  ticketNumber?: string | null;
+  ticketName?: string | null;
+  comments?: string | null;
 }

@@ -18,7 +18,12 @@ model ValidationRun {
   // Stores original row data for rows that have at least one issue,
   // enabling the "Original Rows With Issues" Excel sheet without keeping the full CSV.
   affectedRows Json?
+  // Editable metadata fields
+  ticketNumber String?
+  ticketName   String?
+  comments     String?
   createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
   issues       ValidationIssue[]
 
   @@map("validation_runs")
