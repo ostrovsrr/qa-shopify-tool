@@ -2,7 +2,6 @@ import ExcelJS from 'exceljs';
 import prisma from '../db/prisma';
 import { AffectedRow, CustomerValidationIssue, Severity } from '../types';
 
-// Severity → background colour (ARGB)
 const SEVERITY_COLOURS: Record<Severity, string> = {
   Error: 'FFFEE2E2',
   Warning: 'FFFEF3C7',
@@ -15,12 +14,16 @@ const HEADER_COLOURS: Record<string, string> = {
   Warnings: 'FFB45309',
   Info: 'FF0369A1',
   'Original Rows With Issues': 'FF4C1D95',
+  'Full Uploaded File': 'FF065F46',
 };
 
 export async function generateExcelReport(validationId: string): Promise<Buffer> {
   const run = await prisma.validationRun.findUnique({
     where: { id: validationId },
-    include: { issues: { orderBy: { rowNumber: 'asc' } } },
+    include: {
+      issues: { orderBy: { rowNumber: 'asc' } },
+      originalRows: { orderBy: { rowNumber: 'asc' } },
+    },
   });
 
   if (!run) throw new Error(`Validation run "${validationId}" not found.`);
@@ -39,6 +42,10 @@ export async function generateExcelReport(validationId: string): Promise<Buffer>
     ? (run.affectedRows as unknown as AffectedRow[])
     : [];
 
+  const originalColumns: string[] = Array.isArray(run.originalColumns)
+    ? (run.originalColumns as string[])
+    : [];
+
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'Shopify CSV QA Tool';
   workbook.created = new Date();
@@ -48,6 +55,7 @@ export async function generateExcelReport(validationId: string): Promise<Buffer>
   addIssuesSheet(workbook, 'Warnings', issues.filter((i) => i.severity === 'Warning'));
   addIssuesSheet(workbook, 'Info', issues.filter((i) => i.severity === 'Info'));
   addOriginalRowsSheet(workbook, issues, affectedRows);
+  addFullUploadedFileSheet(workbook, originalColumns, run.originalRows);
 
   const arrayBuffer = await workbook.xlsx.writeBuffer();
   return Buffer.from(arrayBuffer);
@@ -105,7 +113,6 @@ function addSummarySheet(
   styleHeader(headerRow, HEADER_COLOURS['Summary']);
   sheet.getColumn(3).width = 14;
 
-  // Count by issue type
   const counts = new Map<string, { count: number; severity: Severity }>();
   for (const issue of issues) {
     const existing = counts.get(issue.issueType);
@@ -178,7 +185,6 @@ function addOriginalRowsSheet(
     return;
   }
 
-  // Derive column set from available data (preserve insertion order from first row)
   const allColumns = ['Row Number', ...Object.keys(affectedRows[0]?.data ?? {})];
   sheet.columns = allColumns.map((col) => ({
     header: col,
@@ -188,7 +194,6 @@ function addOriginalRowsSheet(
 
   styleHeader(sheet.getRow(1), HEADER_COLOURS['Original Rows With Issues']);
 
-  // Build a quick lookup: rowNumber → set of issue types
   const rowIssueTypes = new Map<number, Set<string>>();
   for (const issue of issues) {
     const s = rowIssueTypes.get(issue.rowNumber) ?? new Set();
@@ -206,7 +211,6 @@ function addOriginalRowsSheet(
 
     const row = sheet.addRow(rowData);
 
-    // Highlight row if it has errors
     const severities = rowIssueTypes.get(affected.rowNumber) ?? new Set();
     const colour = severities.has('Error')
       ? SEVERITY_COLOURS.Error
@@ -220,4 +224,48 @@ function addOriginalRowsSheet(
   }
 
   sheet.autoFilter = { from: 'A1', to: `${String.fromCharCode(64 + allColumns.length)}1` };
+}
+
+function addFullUploadedFileSheet(
+  workbook: ExcelJS.Workbook,
+  originalColumns: string[],
+  originalRows: { rowNumber: number; data: unknown }[],
+) {
+  const sheet = workbook.addWorksheet('Full Uploaded File');
+
+  if (originalColumns.length === 0 || originalRows.length === 0) {
+    sheet.addRow(['No uploaded file data available.']);
+    return;
+  }
+
+  const allColumns = ['Row Number', ...originalColumns];
+  sheet.columns = allColumns.map((col) => ({
+    header: col,
+    key: col,
+    width: col === 'Row Number' ? 12 : 22,
+  }));
+
+  styleHeader(sheet.getRow(1), HEADER_COLOURS['Full Uploaded File']);
+
+  for (const origRow of originalRows) {
+    const data = origRow.data as Record<string, string>;
+    const rowData: Record<string, string | number> = { 'Row Number': origRow.rowNumber };
+    for (const col of originalColumns) {
+      rowData[col] = data[col] ?? '';
+    }
+    sheet.addRow(rowData);
+  }
+
+  const lastColLetter = columnIndexToLetter(allColumns.length);
+  sheet.autoFilter = { from: 'A1', to: `${lastColLetter}1` };
+}
+
+function columnIndexToLetter(index: number): string {
+  let letter = '';
+  while (index > 0) {
+    const remainder = (index - 1) % 26;
+    letter = String.fromCharCode(65 + remainder) + letter;
+    index = Math.floor((index - 1) / 26);
+  }
+  return letter;
 }

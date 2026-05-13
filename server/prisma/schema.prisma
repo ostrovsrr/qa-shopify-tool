@@ -8,25 +8,36 @@ datasource db {
 }
 
 model ValidationRun {
-  id           String            @id @default(uuid())
-  fileName     String
-  fileType     String            @default("CUSTOMER")
-  totalRows    Int
-  errors       Int
-  warnings     Int
-  info         Int
-  // Stores original row data for rows that have at least one issue,
-  // enabling the "Original Rows With Issues" Excel sheet without keeping the full CSV.
-  affectedRows Json?
-  // Editable metadata fields
-  ticketNumber String?
-  ticketName   String?
-  comments     String?
-  createdAt    DateTime          @default(now())
-  updatedAt    DateTime          @updatedAt
-  issues       ValidationIssue[]
+  id              String                @id @default(uuid())
+  fileName        String
+  fileType        String                @default("CUSTOMER")
+  totalRows       Int
+  errors          Int
+  warnings        Int
+  info            Int
+  affectedRows    Json?
+  originalColumns Json?
+  ticketNumber    String?
+  ticketName      String?
+  comments        String?
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+  issues          ValidationIssue[]
+  originalRows    OriginalCustomerRow[]
 
   @@map("validation_runs")
+}
+
+model OriginalCustomerRow {
+  id              String        @id @default(uuid())
+  validationRunId String
+  rowNumber       Int
+  data            Json
+  createdAt       DateTime      @default(now())
+
+  validationRun ValidationRun @relation(fields: [validationRunId], references: [id], onDelete: Cascade)
+
+  @@map("original_customer_rows")
 }
 
 model ValidationIssue {

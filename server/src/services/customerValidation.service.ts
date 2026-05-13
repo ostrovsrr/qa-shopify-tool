@@ -15,9 +15,8 @@ export async function validateCustomerCsv(
   buffer: Buffer,
   fileName: string,
 ): Promise<CustomerValidationResult> {
-  const rows = await parseCsvBuffer(buffer);
+  const { rows, headers } = await parseCsvBuffer(buffer);
 
-  // Run every rule and collect all issues
   const allIssues: CustomerValidationIssue[] = [];
   for (const rule of customerValidationRules) {
     allIssues.push(...rule.validate(rows));
@@ -27,7 +26,6 @@ export async function validateCustomerCsv(
   const warnings = allIssues.filter((i) => i.severity === 'Warning').length;
   const info = allIssues.filter((i) => i.severity === 'Info').length;
 
-  // Build a map of affected row numbers → original data for the Excel report
   const affectedRowNumbers = new Set(allIssues.map((i) => i.rowNumber));
   const affectedRows: AffectedRow[] = rows
     .filter((r) => affectedRowNumbers.has(r.rowNumber))
@@ -45,6 +43,7 @@ export async function validateCustomerCsv(
       warnings,
       info,
       affectedRows: affectedRows as unknown as object[],
+      originalColumns: headers,
       issues: {
         create: allIssues.map((issue) => ({
           id: uuidv4(),
@@ -55,6 +54,13 @@ export async function validateCustomerCsv(
           currentValue: issue.currentValue || null,
           message: issue.message,
           suggestedFix: issue.suggestedFix || null,
+        })),
+      },
+      originalRows: {
+        create: rows.map((row) => ({
+          id: uuidv4(),
+          rowNumber: row.rowNumber,
+          data: row.original as unknown as object,
         })),
       },
     },
