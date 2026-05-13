@@ -2,20 +2,26 @@ import { parse } from 'csv-parse';
 import { CustomerCsvRow } from '../types';
 import { isRowFullyEmpty, normalizeRecord } from '../utils/normalize';
 
-export async function parseCsvBuffer(buffer: Buffer): Promise<CustomerCsvRow[]> {
+export interface ParsedCsv {
+  rows: CustomerCsvRow[];
+  headers: string[];
+}
+
+export async function parseCsvBuffer(buffer: Buffer): Promise<ParsedCsv> {
   return new Promise((resolve, reject) => {
     parse(
       buffer,
       {
-        columns: true,          // consume first row as column names
-        skip_empty_lines: false, // handle ourselves to preserve line numbers
+        columns: true,
+        skip_empty_lines: false,
         relax_column_count: true,
-        cast: false,             // keep all values as strings
+        cast: false,
       },
       (err, records: Record<string, string>[]) => {
         if (err) return reject(err);
 
-        // Find the last non-empty record index to strip trailing empty rows
+        const headers = records.length > 0 ? Object.keys(records[0]) : [];
+
         let lastNonEmpty = records.length - 1;
         while (lastNonEmpty >= 0 && isRowFullyEmpty(records[lastNonEmpty])) {
           lastNonEmpty--;
@@ -25,7 +31,6 @@ export async function parseCsvBuffer(buffer: Buffer): Promise<CustomerCsvRow[]> 
 
         for (let i = 0; i <= lastNonEmpty; i++) {
           const record = records[i];
-          // CSV line number: header = 1, first data row = 2
           const rowNumber = i + 2;
 
           rows.push({
@@ -35,7 +40,7 @@ export async function parseCsvBuffer(buffer: Buffer): Promise<CustomerCsvRow[]> 
           });
         }
 
-        resolve(rows);
+        resolve({ rows, headers });
       },
     );
   });
