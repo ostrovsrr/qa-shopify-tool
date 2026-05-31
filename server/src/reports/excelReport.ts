@@ -2,6 +2,7 @@ import ExcelJS from 'exceljs';
 import prisma from '../db/prisma';
 import { SHOPIFY_COLUMNS } from '../services/columnMapping.service';
 import { AffectedRow, CustomerValidationIssue, Severity } from '../types';
+import { AutoFixEntry, computeAutoFixes } from './autoFix';
 
 const SEVERITY_COLOURS: Record<Severity, string> = {
   Error: 'FFFEE2E2',
@@ -17,6 +18,7 @@ const HEADER_COLOURS: Record<string, string> = {
   'Original Rows With Issues': 'FF4C1D95',
   'Full Uploaded File': 'FF065F46',
   'Shopify Template': 'FF004C3F',
+  'Auto Fixes Applied': 'FF166534',
 };
 
 export async function generateExcelReport(validationId: string): Promise<Buffer> {
@@ -66,13 +68,16 @@ export async function generateExcelReport(validationId: string): Promise<Buffer>
   workbook.creator = 'Shopify CSV QA Tool';
   workbook.created = new Date();
 
+  const autoFixes = computeAutoFixes(runData.originalRows, columnMapping);
+
   addSummarySheet(workbook, run, issues);
   addIssuesSheet(workbook, 'Errors', issues.filter((i) => i.severity === 'Error'));
   addIssuesSheet(workbook, 'Warnings', issues.filter((i) => i.severity === 'Warning'));
   addIssuesSheet(workbook, 'Info', issues.filter((i) => i.severity === 'Info'));
   addOriginalRowsSheet(workbook, issues, affectedRows);
   addFullUploadedFileSheet(workbook, originalColumns, runData.originalRows);
-  addShopifyTemplateSheet(workbook, columnMapping, runData.originalRows);
+  addAutoFixesSheet(workbook, autoFixes);
+  addShopifyTemplateSheet(workbook, columnMapping, runData.originalRows, autoFixes);
 
   const arrayBuffer = await workbook.xlsx.writeBuffer();
   return Buffer.from(arrayBuffer);
@@ -276,10 +281,51 @@ function addFullUploadedFileSheet(
   sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(allColumns.length)}1` };
 }
 
+const AUTO_FIX_GREEN = 'FFD1FAE5';
+
+function addAutoFixesSheet(workbook: ExcelJS.Workbook, autoFixes: AutoFixEntry[]) {
+  const sheet = workbook.addWorksheet('Auto Fixes Applied');
+
+  sheet.columns = [
+    { header: 'Row #', key: 'rowNumber', width: 10 },
+    { header: 'Field', key: 'field', width: 30 },
+    { header: 'Original Value', key: 'originalValue', width: 24 },
+    { header: 'Fixed Value', key: 'fixedValue', width: 16 },
+    { header: 'Fix Type', key: 'fixType', width: 24 },
+    { header: 'Confidence', key: 'confidence', width: 14 },
+    { header: 'Reason', key: 'reason', width: 55 },
+  ];
+
+  styleHeader(sheet.getRow(1), HEADER_COLOURS['Auto Fixes Applied']);
+
+  if (autoFixes.length === 0) {
+    sheet.addRow(['No auto-fixes were applied.']);
+    return;
+  }
+
+  for (const fix of autoFixes) {
+    const row = sheet.addRow({
+      rowNumber: fix.rowNumber,
+      field: fix.field,
+      originalValue: fix.originalValue,
+      fixedValue: fix.fixedValue,
+      fixType: fix.fixType,
+      confidence: fix.confidence,
+      reason: fix.reason,
+    });
+    row.eachCell((cell) => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: AUTO_FIX_GREEN } };
+    });
+  }
+
+  sheet.autoFilter = { from: 'A1', to: 'G1' };
+}
+
 function addShopifyTemplateSheet(
   workbook: ExcelJS.Workbook,
   columnMapping: Record<string, string>,
   originalRows: { rowNumber: number; data: unknown }[],
+  autoFixes: AutoFixEntry[] = [],
 ) {
   const sheet = workbook.addWorksheet('Shopify Template');
 
@@ -307,14 +353,31 @@ function addShopifyTemplateSheet(
 
   styleHeader(sheet.getRow(1), HEADER_COLOURS['Shopify Template']);
 
+  // Build fix lookup: rowNumber → shopify column → fixed value
+  const fixMap = new Map<number, Map<string, string>>();
+  for (const fix of autoFixes) {
+    if (!fixMap.has(fix.rowNumber)) fixMap.set(fix.rowNumber, new Map());
+    fixMap.get(fix.rowNumber)!.set(fix.field, fix.fixedValue);
+  }
+
   for (const origRow of originalRows) {
     const data = origRow.data as Record<string, string>;
+    const rowFixes = fixMap.get(origRow.rowNumber);
     const rowData: Record<string, string> = {};
     for (const shopifyCol of shopifyColumns) {
       const srcCol = reverseMap[shopifyCol];
-      rowData[shopifyCol] = srcCol !== undefined ? (data[srcCol] ?? '') : '';
+      rowData[shopifyCol] = rowFixes?.get(shopifyCol) ?? (srcCol !== undefined ? (data[srcCol] ?? '') : '');
     }
-    sheet.addRow(rowData);
+    const excelRow = sheet.addRow(rowData);
+
+    if (rowFixes) {
+      shopifyColumns.forEach((shopifyCol, colIdx) => {
+        if (rowFixes.has(shopifyCol)) {
+          const cell = excelRow.getCell(colIdx + 1);
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: AUTO_FIX_GREEN } };
+        }
+      });
+    }
   }
 
   sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(shopifyColumns.length)}1` };
