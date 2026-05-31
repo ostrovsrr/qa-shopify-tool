@@ -30,13 +30,16 @@ export class AddressCompletenessRule implements CustomerValidationRule {
       const province = row.normalized['Default Address Province Code'] || '';
 
       if (!country) {
+        const hasProvince = !!row.normalized['Default Address Province Code'];
         issues.push({
           rowNumber: row.rowNumber,
           column: 'Default Address Country Code',
-          severity: 'Warning',
+          severity: hasProvince ? 'Error' : 'Warning',
           issueType: 'MissingCountry',
           currentValue: '',
-          message: 'Address fields are present but Country Code is missing.',
+          message: hasProvince
+            ? 'Province Code is present but Country Code is missing.'
+            : 'Address fields are present but Country Code is missing.',
           suggestedFix: 'Add the country code for this address (e.g. CA, US).',
         });
       }
