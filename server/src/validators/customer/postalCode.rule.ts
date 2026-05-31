@@ -12,8 +12,8 @@ export class PostalCodeRule implements CustomerValidationRule {
     const issues: CustomerValidationIssue[] = [];
 
     for (const row of rows) {
-      const country = (row.normalized['Country'] ?? '').toLowerCase();
-      const zip = row.normalized['Zip'] ?? '';
+      const country = (row.normalized['Default Address Country Code'] ?? '').toLowerCase();
+      const zip = row.normalized['Default Address Zip'] ?? '';
 
       if (!zip) continue;
 
@@ -21,10 +21,10 @@ export class PostalCodeRule implements CustomerValidationRule {
         if (!CA_POSTAL_REGEX.test(zip)) {
           issues.push({
             rowNumber: row.rowNumber,
-            column: 'Zip',
+            column: 'Default Address Zip',
             severity: 'Warning',
             issueType: 'InvalidCanadianPostalCode',
-            currentValue: row.original['Zip'] ?? '',
+            currentValue: row.original['Default Address Zip'] ?? '',
             message: `"${zip}" does not look like a Canadian postal code.`,
             suggestedFix: 'Canadian postal codes use the format A1A 1A1 (e.g., M5V 3L9).',
           });
@@ -33,10 +33,10 @@ export class PostalCodeRule implements CustomerValidationRule {
         if (!US_ZIP_REGEX.test(zip)) {
           issues.push({
             rowNumber: row.rowNumber,
-            column: 'Zip',
+            column: 'Default Address Zip',
             severity: 'Warning',
             issueType: 'InvalidUSZipCode',
-            currentValue: row.original['Zip'] ?? '',
+            currentValue: row.original['Default Address Zip'] ?? '',
             message: `"${zip}" does not look like a US ZIP code.`,
             suggestedFix: 'US ZIP codes should be 5 digits or 5+4 format (e.g., 12345 or 12345-6789).',
           });

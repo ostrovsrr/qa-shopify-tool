@@ -1,12 +1,22 @@
 import { useState } from 'react';
-import { fetchValidationResult, getReportDownloadUrl, uploadCustomerCsv } from '../api/validationApi';
+import {
+  fetchValidationResult,
+  getReportDownloadUrl,
+  previewCsv,
+  validateWithMapping,
+} from '../api/validationApi';
+import { ColumnMappingScreen } from '../components/ColumnMappingScreen';
 import { IssuesTable } from '../components/IssuesTable';
 import { SummaryCards } from '../components/SummaryCards';
 import { UploadArea } from '../components/UploadArea';
 import { ValidationHistory } from '../components/ValidationHistory';
-import { ValidationResult } from '../types';
+import { ColumnMapping, CsvPreview, ValidationResult } from '../types';
+
+type UploadPhase = 'upload' | 'mapping' | 'results';
 
 export function Dashboard() {
+  const [uploadPhase, setUploadPhase] = useState<UploadPhase>('upload');
+  const [preview, setPreview] = useState<CsvPreview | null>(null);
   const [result, setResult] = useState<ValidationResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -18,16 +28,38 @@ export function Dashboard() {
     setError('');
     setResult(null);
     try {
-      const data = await uploadCustomerCsv(file);
-      setResult(data);
-      setHistoryRefresh((n) => n + 1);
+      const data = await previewCsv(file);
+      setPreview(data);
+      setUploadPhase('mapping');
     } catch (err: unknown) {
-      const msg =
-        err instanceof Error ? err.message : 'Upload failed. Is the server running?';
+      const msg = err instanceof Error ? err.message : 'Upload failed. Is the server running?';
       setError(msg);
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleValidate = async (mapping: ColumnMapping) => {
+    if (!preview) return;
+    setLoading(true);
+    setError('');
+    try {
+      const data = await validateWithMapping(preview.uploadId, mapping);
+      setResult(data);
+      setUploadPhase('results');
+      setHistoryRefresh((n) => n + 1);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Validation failed.';
+      setError(msg);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleBack = () => {
+    setPreview(null);
+    setUploadPhase('upload');
+    setError('');
   };
 
   const handleOpenHistoryRun = async (id: string) => {
@@ -36,6 +68,8 @@ export function Dashboard() {
     try {
       const data = await fetchValidationResult(id);
       setResult(data);
+      setPreview(null);
+      setUploadPhase('results');
       setActiveTab('upload');
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch {
@@ -48,6 +82,13 @@ export function Dashboard() {
   const handleDownload = () => {
     if (!result) return;
     window.open(getReportDownloadUrl(result.validationId), '_blank');
+  };
+
+  const handleNewUpload = () => {
+    setResult(null);
+    setPreview(null);
+    setUploadPhase('upload');
+    setError('');
   };
 
   return (
@@ -78,12 +119,28 @@ export function Dashboard() {
       <main className="main-content">
         {activeTab === 'upload' && (
           <>
-            <UploadArea onUpload={handleUpload} loading={loading} />
+            {uploadPhase === 'upload' && (
+              <UploadArea onUpload={handleUpload} loading={loading} />
+            )}
+
+            {uploadPhase === 'mapping' && preview && (
+              <ColumnMappingScreen
+                preview={preview}
+                onValidate={handleValidate}
+                onBack={handleBack}
+                loading={loading}
+              />
+            )}
 
             {error && <div className="error-banner">{error}</div>}
 
-            {result && (
+            {uploadPhase === 'results' && result && (
               <>
+                <div className="results-toolbar">
+                  <button className="btn btn-outline btn-sm" onClick={handleNewUpload}>
+                    ← New Upload
+                  </button>
+                </div>
                 <SummaryCards result={result} onDownload={handleDownload} />
                 <IssuesTable issues={result.issues} />
               </>

@@ -85,10 +85,10 @@ export function UploadArea({ onUpload, loading }: Props) {
       >
         {loading ? (
           <>
-            <span className="spinner" /> Validating…
+            <span className="spinner" /> Uploading&hellip;
           </>
         ) : (
-          'Validate CSV'
+          'Upload & Map Columns'
         )}
       </button>
     </div>

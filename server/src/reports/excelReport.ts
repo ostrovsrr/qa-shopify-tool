@@ -1,6 +1,8 @@
 import ExcelJS from 'exceljs';
 import prisma from '../db/prisma';
+import { SHOPIFY_COLUMNS } from '../services/columnMapping.service';
 import { AffectedRow, CustomerValidationIssue, Severity } from '../types';
+import { AutoFixEntry, computeAutoFixes } from './autoFix';
 
 const SEVERITY_COLOURS: Record<Severity, string> = {
   Error: 'FFFEE2E2',
@@ -15,6 +17,8 @@ const HEADER_COLOURS: Record<string, string> = {
   Info: 'FF0369A1',
   'Original Rows With Issues': 'FF4C1D95',
   'Full Uploaded File': 'FF065F46',
+  'Shopify Template': 'FF004C3F',
+  'Auto Fixes Applied': 'FF166534',
 };
 
 export async function generateExcelReport(validationId: string): Promise<Buffer> {
@@ -27,6 +31,13 @@ export async function generateExcelReport(validationId: string): Promise<Buffer>
   });
 
   if (!run) throw new Error(`Validation run "${validationId}" not found.`);
+
+  // Cast to include JSON fields that Prisma's stale generated types don't yet expose
+  const runData = run as typeof run & {
+    originalColumns: unknown;
+    columnMapping: unknown;
+    originalRows: { rowNumber: number; data: unknown }[];
+  };
 
   const issues: CustomerValidationIssue[] = run.issues.map((issue) => ({
     rowNumber: issue.rowNumber,
@@ -42,20 +53,31 @@ export async function generateExcelReport(validationId: string): Promise<Buffer>
     ? (run.affectedRows as unknown as AffectedRow[])
     : [];
 
-  const originalColumns: string[] = Array.isArray(run.originalColumns)
-    ? (run.originalColumns as string[])
+  const originalColumns: string[] = Array.isArray(runData.originalColumns)
+    ? (runData.originalColumns as string[])
     : [];
+
+  const columnMapping: Record<string, string> =
+    runData.columnMapping &&
+    typeof runData.columnMapping === 'object' &&
+    !Array.isArray(runData.columnMapping)
+      ? (runData.columnMapping as Record<string, string>)
+      : {};
 
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'Shopify CSV QA Tool';
   workbook.created = new Date();
+
+  const autoFixes = computeAutoFixes(runData.originalRows, columnMapping);
 
   addSummarySheet(workbook, run, issues);
   addIssuesSheet(workbook, 'Errors', issues.filter((i) => i.severity === 'Error'));
   addIssuesSheet(workbook, 'Warnings', issues.filter((i) => i.severity === 'Warning'));
   addIssuesSheet(workbook, 'Info', issues.filter((i) => i.severity === 'Info'));
   addOriginalRowsSheet(workbook, issues, affectedRows);
-  addFullUploadedFileSheet(workbook, originalColumns, run.originalRows);
+  addFullUploadedFileSheet(workbook, originalColumns, runData.originalRows);
+  addAutoFixesSheet(workbook, autoFixes);
+  addShopifyTemplateSheet(workbook, columnMapping, runData.originalRows, autoFixes);
 
   const arrayBuffer = await workbook.xlsx.writeBuffer();
   return Buffer.from(arrayBuffer);
@@ -223,7 +245,7 @@ function addOriginalRowsSheet(
     });
   }
 
-  sheet.autoFilter = { from: 'A1', to: `${String.fromCharCode(64 + allColumns.length)}1` };
+  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(allColumns.length)}1` };
 }
 
 function addFullUploadedFileSheet(
@@ -256,8 +278,109 @@ function addFullUploadedFileSheet(
     sheet.addRow(rowData);
   }
 
-  const lastColLetter = columnIndexToLetter(allColumns.length);
-  sheet.autoFilter = { from: 'A1', to: `${lastColLetter}1` };
+  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(allColumns.length)}1` };
+}
+
+const AUTO_FIX_GREEN = 'FFD1FAE5';
+
+function addAutoFixesSheet(workbook: ExcelJS.Workbook, autoFixes: AutoFixEntry[]) {
+  const sheet = workbook.addWorksheet('Auto Fixes Applied');
+
+  sheet.columns = [
+    { header: 'Row #', key: 'rowNumber', width: 10 },
+    { header: 'Field', key: 'field', width: 30 },
+    { header: 'Original Value', key: 'originalValue', width: 24 },
+    { header: 'Fixed Value', key: 'fixedValue', width: 16 },
+    { header: 'Fix Type', key: 'fixType', width: 24 },
+    { header: 'Confidence', key: 'confidence', width: 14 },
+    { header: 'Reason', key: 'reason', width: 55 },
+  ];
+
+  styleHeader(sheet.getRow(1), HEADER_COLOURS['Auto Fixes Applied']);
+
+  if (autoFixes.length === 0) {
+    sheet.addRow(['No auto-fixes were applied.']);
+    return;
+  }
+
+  for (const fix of autoFixes) {
+    const row = sheet.addRow({
+      rowNumber: fix.rowNumber,
+      field: fix.field,
+      originalValue: fix.originalValue,
+      fixedValue: fix.fixedValue,
+      fixType: fix.fixType,
+      confidence: fix.confidence,
+      reason: fix.reason,
+    });
+    row.eachCell((cell) => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: AUTO_FIX_GREEN } };
+    });
+  }
+
+  sheet.autoFilter = { from: 'A1', to: 'G1' };
+}
+
+function addShopifyTemplateSheet(
+  workbook: ExcelJS.Workbook,
+  columnMapping: Record<string, string>,
+  originalRows: { rowNumber: number; data: unknown }[],
+  autoFixes: AutoFixEntry[] = [],
+) {
+  const sheet = workbook.addWorksheet('Shopify Template');
+
+  if (Object.keys(columnMapping).length === 0 || originalRows.length === 0) {
+    sheet.addRow(['No column mapping was applied for this validation run.']);
+    return;
+  }
+
+  // Determine which Shopify columns are present, in canonical SHOPIFY_COLUMNS order
+  const mappedTargets = new Set(Object.values(columnMapping));
+  const shopifyColumns = SHOPIFY_COLUMNS.filter((col) => mappedTargets.has(col));
+
+  // Build reverse map: Shopify column → source CSV column(s)
+  // (multiple source columns can map to the same target — last one wins)
+  const reverseMap: Record<string, string> = {};
+  for (const [src, tgt] of Object.entries(columnMapping)) {
+    reverseMap[tgt] = src;
+  }
+
+  sheet.columns = shopifyColumns.map((col) => ({
+    header: col,
+    key: col,
+    width: 26,
+  }));
+
+  styleHeader(sheet.getRow(1), HEADER_COLOURS['Shopify Template']);
+
+  // Build fix lookup: rowNumber → shopify column → fixed value
+  const fixMap = new Map<number, Map<string, string>>();
+  for (const fix of autoFixes) {
+    if (!fixMap.has(fix.rowNumber)) fixMap.set(fix.rowNumber, new Map());
+    fixMap.get(fix.rowNumber)!.set(fix.field, fix.fixedValue);
+  }
+
+  for (const origRow of originalRows) {
+    const data = origRow.data as Record<string, string>;
+    const rowFixes = fixMap.get(origRow.rowNumber);
+    const rowData: Record<string, string> = {};
+    for (const shopifyCol of shopifyColumns) {
+      const srcCol = reverseMap[shopifyCol];
+      rowData[shopifyCol] = rowFixes?.get(shopifyCol) ?? (srcCol !== undefined ? (data[srcCol] ?? '') : '');
+    }
+    const excelRow = sheet.addRow(rowData);
+
+    if (rowFixes) {
+      shopifyColumns.forEach((shopifyCol, colIdx) => {
+        if (rowFixes.has(shopifyCol)) {
+          const cell = excelRow.getCell(colIdx + 1);
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: AUTO_FIX_GREEN } };
+        }
+      });
+    }
+  }
+
+  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(shopifyColumns.length)}1` };
 }
 
 function columnIndexToLetter(index: number): string {

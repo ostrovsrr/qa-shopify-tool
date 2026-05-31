@@ -2,8 +2,9 @@ import { CustomerCsvRow, CustomerValidationIssue, CustomerValidationRule } from 
 
 const IMPORTANT_FIELDS = [
   'First Name', 'Last Name', 'Email', 'Phone',
-  'Address1', 'Address2', 'City', 'Province',
-  'Country', 'Zip', 'Company',
+  'Default Address Address1', 'Default Address Address2', 'Default Address City',
+  'Default Address Province Code', 'Default Address Country Code',
+  'Default Address Zip', 'Default Address Company', 'Default Address Phone',
 ];
 
 export class WhitespaceRule implements CustomerValidationRule {

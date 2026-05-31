@@ -1,3 +1,16 @@
+New Ideas:
+1. In history user can input a field to add ticket number/name and comments for the upload. He also can edit it and hit "Save"
+2. When downloading the report, one of the sheets should be full uploaded file. This is done so later I can add fixes that can be automated, like removing leading white spaces, or deduplication by moving duped phone number into Notes etc.
+3. When uploading initially i need to map columns manually, cuz sources will always vary, they need to be mapped with shopify expected columns.
+3. You can reupload for entry and check if some errors were removed.
+4. If the merchant has customers in his Shopify Store -> export customers and upload to the tool and do cross-reference
+5. Include image tool to the same tool
+6. Include variants extraction from the Title in the same tool
+7. Phone/email/duplicate errors - include autofix by extracting duplicate/error value into the note section
+8. Change validation rules to directly match Shopify rules
+9. Add mapping of the columns during the initial upload 
+10. Products - generate handles
+
 # Shopify CSV QA Tool
 
 An internal tool for validating Shopify Customer CSV files before import. Upload a CSV, get a detailed validation report, and download an Excel file with all issues.

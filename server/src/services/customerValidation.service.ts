@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import {
   AffectedRow,
+  CustomerCsvRow,
   CustomerValidationIssue,
   CustomerValidationResult,
   Severity,
@@ -10,12 +11,37 @@ import {
 import { customerValidationRules } from '../validators/customer';
 import prisma from '../db/prisma';
 import { parseCsvBuffer } from './csvParser.service';
+import { getPreview } from './previewStore';
+
+function applyColumnMapping(
+  rows: CustomerCsvRow[],
+  mapping: Record<string, string>,
+): CustomerCsvRow[] {
+  if (Object.keys(mapping).length === 0) return rows;
+  return rows.map((row) => {
+    const newOriginal: Record<string, string> = {};
+    const newNormalized: Record<string, string> = {};
+    for (const [key, value] of Object.entries(row.original)) {
+      const mapped = mapping[key] ?? key;
+      newOriginal[mapped] = value;
+    }
+    for (const [key, value] of Object.entries(row.normalized)) {
+      const mapped = mapping[key] ?? key;
+      newNormalized[mapped] = value;
+    }
+    return { ...row, original: newOriginal, normalized: newNormalized };
+  });
+}
 
 export async function validateCustomerCsv(
   buffer: Buffer,
   fileName: string,
+  columnMapping: Record<string, string> = {},
 ): Promise<CustomerValidationResult> {
-  const { rows, headers } = await parseCsvBuffer(buffer);
+  const { rows: rawRows, headers } = await parseCsvBuffer(buffer);
+
+  // Apply mapping only to the rows fed into validators; raw data is preserved separately
+  const rows = applyColumnMapping(rawRows, columnMapping);
 
   const allIssues: CustomerValidationIssue[] = [];
   for (const rule of customerValidationRules) {
@@ -38,12 +64,15 @@ export async function validateCustomerCsv(
       id: validationId,
       fileName,
       fileType: 'CUSTOMER',
-      totalRows: rows.length,
+      totalRows: rawRows.length,
       errors,
       warnings,
       info,
       affectedRows: affectedRows as unknown as object[],
       originalColumns: headers,
+      columnMapping: Object.keys(columnMapping).length > 0
+        ? (columnMapping as unknown as object)
+        : undefined,
       issues: {
         create: allIssues.map((issue) => ({
           id: uuidv4(),
@@ -57,7 +86,7 @@ export async function validateCustomerCsv(
         })),
       },
       originalRows: {
-        create: rows.map((row) => ({
+        create: rawRows.map((row) => ({
           id: uuidv4(),
           rowNumber: row.rowNumber,
           data: row.original as unknown as object,
@@ -69,12 +98,21 @@ export async function validateCustomerCsv(
   return {
     validationId,
     fileName,
-    totalRows: rows.length,
+    totalRows: rawRows.length,
     errors,
     warnings,
     info,
     issues: allIssues,
   };
+}
+
+export async function validateFromPreview(
+  uploadId: string,
+  columnMapping: Record<string, string>,
+): Promise<CustomerValidationResult | null> {
+  const entry = getPreview(uploadId);
+  if (!entry) return null;
+  return validateCustomerCsv(entry.buffer, entry.fileName, columnMapping);
 }
 
 export async function getValidationResult(
