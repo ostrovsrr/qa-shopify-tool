@@ -7,18 +7,20 @@ export class MissingContactRule implements CustomerValidationRule {
     const issues: CustomerValidationIssue[] = [];
 
     for (const row of rows) {
+      const firstName = row.normalized['First Name'] ?? '';
+      const lastName = row.normalized['Last Name'] ?? '';
       const email = row.normalized['Email'] ?? '';
       const phone = row.normalized['Phone'] ?? '';
 
-      if (!email && !phone) {
+      if (!firstName && !lastName && !email && !phone) {
         issues.push({
           rowNumber: row.rowNumber,
-          column: 'Email / Phone',
+          column: 'First Name / Last Name / Email / Phone',
           severity: 'Error',
           issueType: 'MissingContact',
           currentValue: '',
-          message: 'Both Email and Phone are missing. At least one contact method is required.',
-          suggestedFix: 'Add a valid email address or phone number.',
+          message: 'All identity fields are blank (First Name, Last Name, Email, Phone). At least one must be present.',
+          suggestedFix: 'Add at least a First Name, Last Name, Email, or Phone.',
         });
       }
     }

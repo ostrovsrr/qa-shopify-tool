@@ -8,6 +8,7 @@ import { MarketingConsentRule } from './marketingConsent.rule';
 import { TaxExemptRule } from './taxExempt.rule';
 import { AddressCompletenessRule } from './addressCompleteness.rule';
 import { PostalCodeRule } from './postalCode.rule';
+import { ProvinceCodeRule } from './provinceCode.rule';
 import { TagsRule } from './tags.rule';
 import { NumericFieldsRule } from './numericFields.rule';
 import { WhitespaceRule } from './whitespace.rule';
@@ -23,6 +24,7 @@ export const customerValidationRules: CustomerValidationRule[] = [
   new TaxExemptRule(),
   new AddressCompletenessRule(),
   new PostalCodeRule(),
+  new ProvinceCodeRule(),
   new TagsRule(),
   new NumericFieldsRule(),
   new WhitespaceRule(),
