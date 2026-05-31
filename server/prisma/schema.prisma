@@ -17,6 +17,7 @@ model ValidationRun {
   info            Int
   affectedRows    Json?
   originalColumns Json?
+  columnMapping   Json?
   ticketNumber    String?
   ticketName      String?
   comments        String?

@@ -7,8 +7,10 @@ import {
   getHistoryHandler,
   getReportHandler,
   getValidationHandler,
+  previewHandler,
   updateMetadataHandler,
   uploadHandler,
+  validateWithMappingHandler,
 } from './controllers/customerValidation.controller';
 
 dotenv.config();
@@ -47,6 +49,8 @@ const upload = multer({
 // ── Routes ──────────────────────────────────────────────────────────────────
 
 // Order matters: /history must come before /:validationId to avoid param capture
+app.post('/api/customer-validation/preview', upload.single('file'), previewHandler);
+app.post('/api/customer-validation/validate', validateWithMappingHandler);
 app.post('/api/customer-validation/upload', upload.single('file'), uploadHandler);
 app.get('/api/customer-validation/history', getHistoryHandler);
 app.get('/api/customer-validation/report/:validationId', getReportHandler);

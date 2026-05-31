@@ -1,9 +1,35 @@
 import axios from 'axios';
-import { UpdateMetadataPayload, ValidationHistoryItem, ValidationResult } from '../types';
+import {
+  ColumnMapping,
+  CsvPreview,
+  UpdateMetadataPayload,
+  ValidationHistoryItem,
+  ValidationResult,
+} from '../types';
 
 const api = axios.create({
   baseURL: '/api',
 });
+
+export async function previewCsv(file: File): Promise<CsvPreview> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const { data } = await api.post<CsvPreview>('/customer-validation/preview', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+  return data;
+}
+
+export async function validateWithMapping(
+  uploadId: string,
+  columnMapping: ColumnMapping,
+): Promise<ValidationResult> {
+  const { data } = await api.post<ValidationResult>('/customer-validation/validate', {
+    uploadId,
+    columnMapping,
+  });
+  return data;
+}
 
 export async function uploadCustomerCsv(file: File): Promise<ValidationResult> {
   const formData = new FormData();

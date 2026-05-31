@@ -40,3 +40,14 @@ export interface UpdateMetadataPayload {
   ticketName?: string | null;
   comments?: string | null;
 }
+
+// Column mapping: source CSV column → Shopify target column (empty string = ignore)
+export type ColumnMapping = Record<string, string>;
+
+export interface CsvPreview {
+  uploadId: string;
+  fileName: string;
+  headers: string[];
+  sampleRows: Record<string, string>[];
+  suggestedMapping: ColumnMapping;
+}
