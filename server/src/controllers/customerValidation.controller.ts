@@ -24,6 +24,7 @@ const updateMetadataSchema = z.object({
 const validateWithMappingSchema = z.object({
   uploadId: z.string().uuid('Invalid upload ID.'),
   columnMapping: z.record(z.string(), z.string()),
+  heliosMigratedTag: z.boolean().default(true),
 });
 
 // POST /api/customer-validation/preview
@@ -64,7 +65,11 @@ export async function validateWithMappingHandler(
       res.status(400).json({ error: parsed.error.errors[0].message });
       return;
     }
-    const result = await validateFromPreview(parsed.data.uploadId, parsed.data.columnMapping);
+    const result = await validateFromPreview(
+      parsed.data.uploadId,
+      parsed.data.columnMapping,
+      parsed.data.heliosMigratedTag,
+    );
     if (!result) {
       res.status(404).json({ error: 'Upload not found or expired. Please re-upload the file.' });
       return;

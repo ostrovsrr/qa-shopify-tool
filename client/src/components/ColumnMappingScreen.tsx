@@ -25,7 +25,7 @@ const SHOPIFY_COLUMNS = [
 
 interface Props {
   preview: CsvPreview;
-  onValidate: (mapping: ColumnMapping) => void;
+  onValidate: (mapping: ColumnMapping, heliosMigratedTag: boolean) => void;
   onBack: () => void;
   loading: boolean;
 }
@@ -38,6 +38,7 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
     }
     return initial;
   });
+  const [heliosMigratedTag, setHeliosMigratedTag] = useState(true);
 
   const mappedCount = Object.values(mapping).filter(Boolean).length;
 
@@ -46,7 +47,7 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
     for (const [src, tgt] of Object.entries(mapping)) {
       if (tgt) filtered[src] = tgt;
     }
-    onValidate(filtered);
+    onValidate(filtered, heliosMigratedTag);
   };
 
   return (
@@ -66,19 +67,30 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
             </p>
           </div>
         </div>
-        <button
-          className="btn btn-primary"
-          onClick={handleValidate}
-          disabled={loading}
-        >
-          {loading ? (
-            <>
-              <span className="spinner" /> Validating&hellip;
-            </>
-          ) : (
-            'Validate CSV'
-          )}
-        </button>
+        <div className="mapping-header-right">
+          <label className="helios-tag-label">
+            <input
+              type="checkbox"
+              checked={heliosMigratedTag}
+              onChange={(e) => setHeliosMigratedTag(e.target.checked)}
+              disabled={loading}
+            />
+            Add HeliosMigrated Tag
+          </label>
+          <button
+            className="btn btn-primary"
+            onClick={handleValidate}
+            disabled={loading}
+          >
+            {loading ? (
+              <>
+                <span className="spinner" /> Validating&hellip;
+              </>
+            ) : (
+              'Validate CSV'
+            )}
+          </button>
+        </div>
       </div>
 
       <div className="mapping-body">

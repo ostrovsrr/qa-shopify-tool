@@ -570,6 +570,30 @@ body {
   gap: 14px;
 }
 
+.mapping-header-right {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.helios-tag-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #374151;
+  cursor: pointer;
+  user-select: none;
+}
+
+.helios-tag-label input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  accent-color: #004C3F;
+}
+
 .mapping-title {
   font-size: 17px;
   font-weight: 700;

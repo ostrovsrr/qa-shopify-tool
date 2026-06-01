@@ -39,12 +39,12 @@ export function Dashboard() {
     }
   };
 
-  const handleValidate = async (mapping: ColumnMapping) => {
+  const handleValidate = async (mapping: ColumnMapping, heliosMigratedTag: boolean) => {
     if (!preview) return;
     setLoading(true);
     setError('');
     try {
-      const data = await validateWithMapping(preview.uploadId, mapping);
+      const data = await validateWithMapping(preview.uploadId, mapping, heliosMigratedTag);
       setResult(data);
       setUploadPhase('results');
       setHistoryRefresh((n) => n + 1);

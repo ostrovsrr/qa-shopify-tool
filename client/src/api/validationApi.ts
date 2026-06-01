@@ -23,10 +23,12 @@ export async function previewCsv(file: File): Promise<CsvPreview> {
 export async function validateWithMapping(
   uploadId: string,
   columnMapping: ColumnMapping,
+  heliosMigratedTag: boolean,
 ): Promise<ValidationResult> {
   const { data } = await api.post<ValidationResult>('/customer-validation/validate', {
     uploadId,
     columnMapping,
+    heliosMigratedTag,
   });
   return data;
 }

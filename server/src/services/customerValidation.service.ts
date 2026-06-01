@@ -37,6 +37,7 @@ export async function validateCustomerCsv(
   buffer: Buffer,
   fileName: string,
   columnMapping: Record<string, string> = {},
+  heliosMigratedTag = false,
 ): Promise<CustomerValidationResult> {
   const { rows: rawRows, headers } = await parseCsvBuffer(buffer);
 
@@ -73,6 +74,7 @@ export async function validateCustomerCsv(
       columnMapping: Object.keys(columnMapping).length > 0
         ? (columnMapping as unknown as object)
         : undefined,
+      heliosMigratedTag,
       issues: {
         create: allIssues.map((issue) => ({
           id: uuidv4(),
@@ -109,10 +111,11 @@ export async function validateCustomerCsv(
 export async function validateFromPreview(
   uploadId: string,
   columnMapping: Record<string, string>,
+  heliosMigratedTag = false,
 ): Promise<CustomerValidationResult | null> {
   const entry = getPreview(uploadId);
   if (!entry) return null;
-  return validateCustomerCsv(entry.buffer, entry.fileName, columnMapping);
+  return validateCustomerCsv(entry.buffer, entry.fileName, columnMapping, heliosMigratedTag);
 }
 
 export async function getValidationResult(

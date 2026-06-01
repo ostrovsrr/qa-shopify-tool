@@ -17,8 +17,9 @@ model ValidationRun {
   info            Int
   affectedRows    Json?
   originalColumns Json?
-  columnMapping   Json?
-  ticketNumber    String?
+  columnMapping      Json?
+  heliosMigratedTag  Boolean               @default(false)
+  ticketNumber       String?
   ticketName      String?
   comments        String?
   createdAt       DateTime              @default(now())

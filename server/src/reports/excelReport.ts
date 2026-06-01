@@ -1,7 +1,7 @@
 import ExcelJS from 'exceljs';
 import prisma from '../db/prisma';
 import { SHOPIFY_COLUMNS } from '../services/columnMapping.service';
-import { AffectedRow, CustomerValidationIssue, Severity } from '../types';
+import { CustomerValidationIssue, Severity } from '../types';
 import { AutoFixEntry, computeAutoFixes } from './autoFix';
 
 const SEVERITY_COLOURS: Record<Severity, string> = {
@@ -15,10 +15,8 @@ const HEADER_COLOURS: Record<string, string> = {
   Errors: 'FFB91C1C',
   Warnings: 'FFB45309',
   Info: 'FF0369A1',
-  'Original Rows With Issues': 'FF4C1D95',
   'Full Uploaded File': 'FF065F46',
   'Shopify Template': 'FF004C3F',
-  'Auto Fixes Applied': 'FF166534',
 };
 
 export async function generateExcelReport(validationId: string): Promise<Buffer> {
@@ -36,6 +34,7 @@ export async function generateExcelReport(validationId: string): Promise<Buffer>
   const runData = run as typeof run & {
     originalColumns: unknown;
     columnMapping: unknown;
+    heliosMigratedTag: boolean;
     originalRows: { rowNumber: number; data: unknown }[];
   };
 
@@ -48,10 +47,6 @@ export async function generateExcelReport(validationId: string): Promise<Buffer>
     message: issue.message,
     suggestedFix: issue.suggestedFix ?? '',
   }));
-
-  const affectedRows: AffectedRow[] = Array.isArray(run.affectedRows)
-    ? (run.affectedRows as unknown as AffectedRow[])
-    : [];
 
   const originalColumns: string[] = Array.isArray(runData.originalColumns)
     ? (runData.originalColumns as string[])
@@ -69,15 +64,13 @@ export async function generateExcelReport(validationId: string): Promise<Buffer>
   workbook.created = new Date();
 
   const autoFixes = computeAutoFixes(runData.originalRows, columnMapping);
+  const heliosMigratedTag: boolean = runData.heliosMigratedTag ?? false;
 
   addSummarySheet(workbook, run, issues);
   addIssuesSheet(workbook, 'Errors', issues.filter((i) => i.severity === 'Error'));
   addIssuesSheet(workbook, 'Warnings', issues.filter((i) => i.severity === 'Warning'));
-  addIssuesSheet(workbook, 'Info', issues.filter((i) => i.severity === 'Info'));
-  addOriginalRowsSheet(workbook, issues, affectedRows);
   addFullUploadedFileSheet(workbook, originalColumns, runData.originalRows);
-  addAutoFixesSheet(workbook, autoFixes);
-  addShopifyTemplateSheet(workbook, columnMapping, runData.originalRows, autoFixes);
+  addShopifyTemplateSheet(workbook, columnMapping, runData.originalRows, autoFixes, heliosMigratedTag);
 
   const arrayBuffer = await workbook.xlsx.writeBuffer();
   return Buffer.from(arrayBuffer);
@@ -195,59 +188,6 @@ function addIssuesSheet(
   sheet.autoFilter = { from: 'A1', to: 'G1' };
 }
 
-function addOriginalRowsSheet(
-  workbook: ExcelJS.Workbook,
-  issues: CustomerValidationIssue[],
-  affectedRows: AffectedRow[],
-) {
-  const sheet = workbook.addWorksheet('Original Rows With Issues');
-
-  if (affectedRows.length === 0) {
-    sheet.addRow(['No original row data available.']);
-    return;
-  }
-
-  const allColumns = ['Row Number', ...Object.keys(affectedRows[0]?.data ?? {})];
-  sheet.columns = allColumns.map((col) => ({
-    header: col,
-    key: col,
-    width: col === 'Row Number' ? 12 : 22,
-  }));
-
-  styleHeader(sheet.getRow(1), HEADER_COLOURS['Original Rows With Issues']);
-
-  const rowIssueTypes = new Map<number, Set<string>>();
-  for (const issue of issues) {
-    const s = rowIssueTypes.get(issue.rowNumber) ?? new Set();
-    s.add(issue.severity);
-    rowIssueTypes.set(issue.rowNumber, s);
-  }
-
-  const sorted = [...affectedRows].sort((a, b) => a.rowNumber - b.rowNumber);
-
-  for (const affected of sorted) {
-    const rowData: Record<string, string | number> = { 'Row Number': affected.rowNumber };
-    for (const [col, val] of Object.entries(affected.data)) {
-      rowData[col] = val;
-    }
-
-    const row = sheet.addRow(rowData);
-
-    const severities = rowIssueTypes.get(affected.rowNumber) ?? new Set();
-    const colour = severities.has('Error')
-      ? SEVERITY_COLOURS.Error
-      : severities.has('Warning')
-        ? SEVERITY_COLOURS.Warning
-        : SEVERITY_COLOURS.Info;
-
-    row.eachCell((cell) => {
-      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: colour } };
-    });
-  }
-
-  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(allColumns.length)}1` };
-}
-
 function addFullUploadedFileSheet(
   workbook: ExcelJS.Workbook,
   originalColumns: string[],
@@ -283,49 +223,14 @@ function addFullUploadedFileSheet(
 
 const AUTO_FIX_GREEN = 'FFD1FAE5';
 
-function addAutoFixesSheet(workbook: ExcelJS.Workbook, autoFixes: AutoFixEntry[]) {
-  const sheet = workbook.addWorksheet('Auto Fixes Applied');
-
-  sheet.columns = [
-    { header: 'Row #', key: 'rowNumber', width: 10 },
-    { header: 'Field', key: 'field', width: 30 },
-    { header: 'Original Value', key: 'originalValue', width: 24 },
-    { header: 'Fixed Value', key: 'fixedValue', width: 16 },
-    { header: 'Fix Type', key: 'fixType', width: 24 },
-    { header: 'Confidence', key: 'confidence', width: 14 },
-    { header: 'Reason', key: 'reason', width: 55 },
-  ];
-
-  styleHeader(sheet.getRow(1), HEADER_COLOURS['Auto Fixes Applied']);
-
-  if (autoFixes.length === 0) {
-    sheet.addRow(['No auto-fixes were applied.']);
-    return;
-  }
-
-  for (const fix of autoFixes) {
-    const row = sheet.addRow({
-      rowNumber: fix.rowNumber,
-      field: fix.field,
-      originalValue: fix.originalValue,
-      fixedValue: fix.fixedValue,
-      fixType: fix.fixType,
-      confidence: fix.confidence,
-      reason: fix.reason,
-    });
-    row.eachCell((cell) => {
-      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: AUTO_FIX_GREEN } };
-    });
-  }
-
-  sheet.autoFilter = { from: 'A1', to: 'G1' };
-}
+const HELIOS_TAG = 'HeliosMigrated';
 
 function addShopifyTemplateSheet(
   workbook: ExcelJS.Workbook,
   columnMapping: Record<string, string>,
   originalRows: { rowNumber: number; data: unknown }[],
   autoFixes: AutoFixEntry[] = [],
+  heliosMigratedTag = false,
 ) {
   const sheet = workbook.addWorksheet('Shopify Template');
 
@@ -338,6 +243,11 @@ function addShopifyTemplateSheet(
   const mappedTargets = new Set(Object.values(columnMapping));
   const shopifyColumns = SHOPIFY_COLUMNS.filter((col) => mappedTargets.has(col));
 
+  // If appending HeliosMigrated tag and Tags isn't already mapped, add it as a trailing column
+  const tagsAlreadyMapped = shopifyColumns.includes('Tags');
+  const effectiveColumns: string[] =
+    heliosMigratedTag && !tagsAlreadyMapped ? [...shopifyColumns, 'Tags'] : [...shopifyColumns];
+
   // Build reverse map: Shopify column → source CSV column(s)
   // (multiple source columns can map to the same target — last one wins)
   const reverseMap: Record<string, string> = {};
@@ -345,11 +255,11 @@ function addShopifyTemplateSheet(
     reverseMap[tgt] = src;
   }
 
-  sheet.columns = shopifyColumns.map((col) => ({
-    header: col,
-    key: col,
-    width: 26,
-  }));
+  // Row Number is always the first column
+  sheet.columns = [
+    { header: 'Row Number', key: 'rowNumber', width: 12 },
+    ...effectiveColumns.map((col) => ({ header: col, key: col, width: 26 })),
+  ];
 
   styleHeader(sheet.getRow(1), HEADER_COLOURS['Shopify Template']);
 
@@ -363,24 +273,33 @@ function addShopifyTemplateSheet(
   for (const origRow of originalRows) {
     const data = origRow.data as Record<string, string>;
     const rowFixes = fixMap.get(origRow.rowNumber);
-    const rowData: Record<string, string> = {};
-    for (const shopifyCol of shopifyColumns) {
+    const rowData: Record<string, string | number> = { rowNumber: origRow.rowNumber };
+
+    for (const shopifyCol of effectiveColumns) {
       const srcCol = reverseMap[shopifyCol];
       rowData[shopifyCol] = rowFixes?.get(shopifyCol) ?? (srcCol !== undefined ? (data[srcCol] ?? '') : '');
     }
+
+    if (heliosMigratedTag) {
+      const existing = rowData['Tags'] as string ?? '';
+      rowData['Tags'] = existing ? `${existing},${HELIOS_TAG}` : HELIOS_TAG;
+    }
+
     const excelRow = sheet.addRow(rowData);
 
     if (rowFixes) {
-      shopifyColumns.forEach((shopifyCol, colIdx) => {
+      effectiveColumns.forEach((shopifyCol, colIdx) => {
         if (rowFixes.has(shopifyCol)) {
-          const cell = excelRow.getCell(colIdx + 1);
+          // +2 because col index 1 is Row Number
+          const cell = excelRow.getCell(colIdx + 2);
           cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: AUTO_FIX_GREEN } };
         }
       });
     }
   }
 
-  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(shopifyColumns.length)}1` };
+  // +1 for the Row Number column
+  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(effectiveColumns.length + 1)}1` };
 }
 
 function columnIndexToLetter(index: number): string {
