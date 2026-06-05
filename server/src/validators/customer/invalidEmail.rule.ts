@@ -1,6 +1,7 @@
 import { CustomerCsvRow, CustomerValidationIssue, CustomerValidationRule } from '../../types';
 
-const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const EMAIL_REGEX =
+  /^[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}$/;
 
 export class InvalidEmailRule implements CustomerValidationRule {
   name = 'InvalidEmailRule';
