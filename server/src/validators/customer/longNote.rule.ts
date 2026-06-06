@@ -1,5 +1,6 @@
 import { CustomerCsvRow, CustomerValidationIssue, CustomerValidationRule } from '../../types';
 
+// Project convention — Shopify has no documented note length limit
 const MAX_NOTE_LENGTH = 500;
 
 export class LongNoteRule implements CustomerValidationRule {
