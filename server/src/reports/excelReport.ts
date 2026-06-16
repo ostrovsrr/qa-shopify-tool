@@ -255,13 +255,62 @@ function addShopifyTemplateSheet(
     reverseMap[tgt] = src;
   }
 
-  // Row Number is always the first column
+  // Assign duplicate-group numbers per row, grouped by a Shopify field's value.
+  // Matches the DuplicateEmail/DuplicatePhone validator normalization so the
+  // report stays consistent. Returns rowNumber → group # (only for duplicates).
+  const buildDuplicateGroups = (
+    field: string,
+    normalize: (value: string) => string,
+  ): Map<number, number> => {
+    const result = new Map<number, number>();
+    const srcCol = reverseMap[field];
+    if (srcCol === undefined) return result;
+
+    const order: string[] = [];
+    const byValue = new Map<string, number[]>();
+    for (const origRow of originalRows) {
+      const data = origRow.data as Record<string, string>;
+      const normalized = normalize(data[srcCol] ?? '');
+      if (!normalized) continue;
+      if (!byValue.has(normalized)) {
+        byValue.set(normalized, []);
+        order.push(normalized);
+      }
+      byValue.get(normalized)!.push(origRow.rowNumber);
+    }
+
+    let groupNumber = 0;
+    for (const value of order) {
+      const rowNumbers = byValue.get(value)!;
+      if (rowNumbers.length < 2) continue;
+      groupNumber++;
+      for (const rowNumber of rowNumbers) result.set(rowNumber, groupNumber);
+    }
+    return result;
+  };
+
+  const emailGroups = buildDuplicateGroups('Email', (v) => v.trim().toLowerCase());
+  const phoneGroups = buildDuplicateGroups('Phone', (v) => v.replace(/\D/g, ''));
+
+  // Duplicate-group columns lead, then Row Number, then the Shopify columns
   sheet.columns = [
+    { header: 'Duplicate Group # (Email)', key: 'dupEmailGroup', width: 22 },
+    { header: 'Duplicate Group # (Phone)', key: 'dupPhoneGroup', width: 22 },
     { header: 'Row Number', key: 'rowNumber', width: 12 },
     ...effectiveColumns.map((col) => ({ header: col, key: col, width: 26 })),
   ];
 
   styleHeader(sheet.getRow(1), HEADER_COLOURS['Shopify Template']);
+
+  // Highlight the two duplicate-group header cells in red
+  const headerRow = sheet.getRow(1);
+  for (const c of [1, 2]) {
+    headerRow.getCell(c).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: HEADER_COLOURS['Errors'] },
+    };
+  }
 
   // Build fix lookup: rowNumber → shopify column → fixed value
   const fixMap = new Map<number, Map<string, string>>();
@@ -273,7 +322,11 @@ function addShopifyTemplateSheet(
   for (const origRow of originalRows) {
     const data = origRow.data as Record<string, string>;
     const rowFixes = fixMap.get(origRow.rowNumber);
-    const rowData: Record<string, string | number> = { rowNumber: origRow.rowNumber };
+    const rowData: Record<string, string | number> = {
+      rowNumber: origRow.rowNumber,
+      dupEmailGroup: emailGroups.get(origRow.rowNumber) ?? '',
+      dupPhoneGroup: phoneGroups.get(origRow.rowNumber) ?? '',
+    };
 
     for (const shopifyCol of effectiveColumns) {
       const srcCol = reverseMap[shopifyCol];
@@ -290,16 +343,16 @@ function addShopifyTemplateSheet(
     if (rowFixes) {
       effectiveColumns.forEach((shopifyCol, colIdx) => {
         if (rowFixes.has(shopifyCol)) {
-          // +2 because col index 1 is Row Number
-          const cell = excelRow.getCell(colIdx + 2);
+          // +4: cols 1-2 are duplicate-group columns, col 3 is Row Number
+          const cell = excelRow.getCell(colIdx + 4);
           cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: AUTO_FIX_GREEN } };
         }
       });
     }
   }
 
-  // +1 for the Row Number column
-  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(effectiveColumns.length + 1)}1` };
+  // +3 for the two duplicate-group columns and the Row Number column
+  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(effectiveColumns.length + 3)}1` };
 }
 
 function columnIndexToLetter(index: number): string {
