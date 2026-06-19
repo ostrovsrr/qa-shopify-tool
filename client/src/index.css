@@ -781,7 +781,66 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   margin-bottom: 12px;
+}
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.store-selector {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+.store-chip {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  min-width: 168px;
+  text-align: left;
+  cursor: pointer;
+}
+.store-chip span,
+.store-chip small {
+  display: block;
+}
+.store-chip span {
+  font-weight: 700;
+  font-size: 13px;
+}
+.store-chip small {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin-top: 2px;
+}
+.store-chip.active {
+  border-color: var(--primary);
+  background: var(--info-bg);
+}
+.store-status {
+  margin: 8px 0 12px;
+}
+.store-stats {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.store-stats span {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 10px;
 }
 .muted { color: var(--text-muted); font-size: 14px; margin: 4px 0; }
 .subsection-title {

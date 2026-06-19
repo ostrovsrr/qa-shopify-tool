@@ -2,10 +2,23 @@ import { useEffect, useState } from 'react';
 import axios from 'axios';
 import {
   checkShopifyHealth,
+  cleanupImportRun,
+  cleanupQaCustomers,
   fetchImportFeedback,
+  fetchShopifyStores,
+  fetchStoreCustomerStats,
+  getImportReportDownloadUrl,
   runImport,
 } from '../api/validationApi';
-import { ImportFeedback, RuleGap, ShopifyHealth, ValidationResult } from '../types';
+import {
+  CleanupResult,
+  ImportFeedback,
+  RuleGap,
+  ShopifyHealth,
+  ShopifyStore,
+  StoreCustomerStats,
+  ValidationResult,
+} from '../types';
 
 interface Props {
   result: ValidationResult;
@@ -61,19 +74,45 @@ function RuleGapList({ gaps }: { gaps: RuleGap[] }) {
 
 export function ImportPanel({ result }: Props) {
   const [health, setHealth] = useState<ShopifyHealth | null>(null);
+  const [stores, setStores] = useState<ShopifyStore[]>([]);
+  const [selectedStoreId, setSelectedStoreId] = useState<string | undefined>();
+  const [stats, setStats] = useState<StoreCustomerStats | null>(null);
   const [feedback, setFeedback] = useState<ImportFeedback | null>(null);
   const [running, setRunning] = useState(false);
+  const [cleaning, setCleaning] = useState(false);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
 
   useEffect(() => {
     let active = true;
-    checkShopifyHealth()
-      .then((h) => active && setHealth(h))
-      .catch(() => active && setHealth({ ok: false, error: 'Could not reach the server.' }));
+    fetchShopifyStores()
+      .then((data) => {
+        if (!active) return;
+        setStores(data);
+        setSelectedStoreId((current) => current ?? data[0]?.id);
+      })
+      .catch(() => active && setError('Could not load Shopify test stores.'));
     return () => {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    setHealth(null);
+    setStats(null);
+    checkShopifyHealth(selectedStoreId)
+      .then((h) => active && setHealth(h))
+      .catch(() => active && setHealth({ ok: false, error: 'Could not reach the server.' }));
+    if (selectedStoreId) {
+      fetchStoreCustomerStats(selectedStoreId)
+        .then((data) => active && setStats(data))
+        .catch(() => active && setError('Could not load test-store customer counts.'));
+    }
+    return () => {
+      active = false;
+    };
+  }, [selectedStoreId]);
 
   // Reset when switching to a different validation run.
   useEffect(() => {
@@ -84,9 +123,13 @@ export function ImportPanel({ result }: Props) {
   const handleRun = async () => {
     setRunning(true);
     setError('');
+    setNotice('');
     try {
-      const data = await runImport(result.validationId);
+      const data = await runImport(result.validationId, selectedStoreId);
       setFeedback(data);
+      if (selectedStoreId) {
+        setStats(await fetchStoreCustomerStats(selectedStoreId));
+      }
     } catch (err) {
       setError(errMessage(err, 'Import failed.'));
     } finally {
@@ -97,6 +140,57 @@ export function ImportPanel({ result }: Props) {
   const handleRefresh = async () => {
     if (!feedback) return;
     setFeedback(await fetchImportFeedback(feedback.importRunId));
+    if (selectedStoreId) {
+      setStats(await fetchStoreCustomerStats(selectedStoreId));
+    }
+  };
+
+  const handleDownloadReport = () => {
+    if (!feedback) return;
+    window.open(getImportReportDownloadUrl(feedback.importRunId), '_blank');
+  };
+
+  const applyCleanupResult = async (cleanup: Promise<CleanupResult>) => {
+    setCleaning(true);
+    setError('');
+    setNotice('');
+    try {
+      const result = await cleanup;
+      setNotice(
+        `Cleanup complete: deleted ${result.deleted} of ${result.found} customer(s) tagged "${result.tag}".`,
+      );
+      if (selectedStoreId) {
+        setStats(await fetchStoreCustomerStats(selectedStoreId));
+      }
+    } catch (err) {
+      setError(errMessage(err, 'Cleanup failed.'));
+    } finally {
+      setCleaning(false);
+    }
+  };
+
+  const handleCleanupAllQa = () => {
+    if (!selectedStoreId || !stats) return;
+    if (
+      !window.confirm(
+        `Delete all ${stats.qaImportCustomers} customer(s) tagged qa-import from this test store?`,
+      )
+    ) {
+      return;
+    }
+    void applyCleanupResult(cleanupQaCustomers(selectedStoreId));
+  };
+
+  const handleCleanupImportRun = () => {
+    if (!feedback) return;
+    if (
+      !window.confirm(
+        `Delete customers created by import ${feedback.importRunId.slice(0, 8)} only?`,
+      )
+    ) {
+      return;
+    }
+    void applyCleanupResult(cleanupImportRun(feedback.importRunId, selectedStoreId));
   };
 
   const s = feedback?.summary;
@@ -114,11 +208,31 @@ export function ImportPanel({ result }: Props) {
         <button
           className="btn btn-primary"
           onClick={handleRun}
-          disabled={running || health?.ok === false}
+          disabled={running || health?.ok === false || !selectedStoreId}
         >
           {running ? 'Importing… (bulk op may take a minute)' : 'Import to test store'}
         </button>
       </div>
+
+      {stores.length > 0 && (
+        <div className="store-selector">
+          {stores.map((store) => (
+            <button
+              key={store.id}
+              className={`store-chip ${selectedStoreId === store.id ? 'active' : ''}`}
+              onClick={() => {
+                setSelectedStoreId(store.id);
+                setFeedback(null);
+                setError('');
+              }}
+              type="button"
+            >
+              <span>{store.label}</span>
+              <small>{store.shop}</small>
+            </button>
+          ))}
+        </div>
+      )}
 
       {health && !health.ok && (
         <div className="error-banner">
@@ -130,9 +244,25 @@ export function ImportPanel({ result }: Props) {
         </div>
       )}
       {health?.ok && (
-        <p className="muted">
-          Connected to <strong>{health.shop}</strong> (API {health.apiVersion}).
-        </p>
+        <div className="store-status">
+          <p className="muted">
+            Connected to <strong>{health.label ?? health.shop}</strong>
+            {health.shop ? ` (${health.shop})` : ''} on API {health.apiVersion}.
+          </p>
+          {stats && (
+            <div className="store-stats">
+              <span>Total customers: <strong>{stats.totalCustomers}</strong></span>
+              <span>QA imports: <strong>{stats.qaImportCustomers}</strong></span>
+              <button
+                className="btn btn-outline btn-sm"
+                onClick={handleCleanupAllQa}
+                disabled={cleaning || stats.qaImportCustomers === 0}
+              >
+                {cleaning ? 'Cleaning...' : 'Clean all QA imports'}
+              </button>
+            </div>
+          )}
+        </div>
       )}
 
       {result.errors > 0 && !feedback && (
@@ -143,6 +273,7 @@ export function ImportPanel({ result }: Props) {
       )}
 
       {error && <div className="error-banner">{error}</div>}
+      {notice && <div className="success-banner">{notice}</div>}
 
       {feedback && s && (
         <div className="import-results">
@@ -152,9 +283,21 @@ export function ImportPanel({ result }: Props) {
               {feedback.successCount} accepted / {feedback.errorCount} rejected of{' '}
               {feedback.totalRows}
             </span>
-            <button className="btn btn-outline btn-sm" onClick={handleRefresh}>
-              Refresh
-            </button>
+            <div className="toolbar-actions">
+              <button className="btn btn-outline btn-sm" onClick={handleDownloadReport}>
+                Download verification report
+              </button>
+              <button
+                className="btn btn-outline btn-sm"
+                onClick={handleCleanupImportRun}
+                disabled={cleaning}
+              >
+                {cleaning ? 'Cleaning...' : 'Clean this import'}
+              </button>
+              <button className="btn btn-outline btn-sm" onClick={handleRefresh}>
+                Refresh
+              </button>
+            </div>
           </div>
 
           <div className="cards-grid">

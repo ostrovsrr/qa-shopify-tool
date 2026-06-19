@@ -4,6 +4,11 @@ import {
   getImportFeedback,
   getRuleGapBacklog,
 } from '../services/importFeedback.service';
+import { generateShopifyVerificationReport } from '../reports/shopifyVerificationReport';
+import {
+  cleanupCustomersByTag,
+  qaImportTagForRun,
+} from '../services/shopifyCleanup.service';
 import { runCustomerImport } from '../services/shopifyImport.service';
 import {
   ShopifyAuthError,
@@ -11,6 +16,12 @@ import {
 } from '../services/shopifyClient';
 
 const uuidSchema = z.string().uuid('Invalid id format.');
+const runImportSchema = z.object({
+  storeId: z.string().min(1).optional(),
+});
+const cleanupImportSchema = z.object({
+  storeId: z.string().min(1).optional(),
+});
 
 // POST /api/customer-import/:validationId/run
 // Per decision, runs with Errors are allowed (the feedback loop tests both
@@ -28,7 +39,13 @@ export async function runImportHandler(
       return;
     }
 
-    const result = await runCustomerImport(parsed.data);
+    const bodyParsed = runImportSchema.safeParse(req.body ?? {});
+    if (!bodyParsed.success) {
+      res.status(400).json({ error: bodyParsed.error.errors[0].message });
+      return;
+    }
+
+    const result = await runCustomerImport(parsed.data, bodyParsed.data.storeId);
     if ('notFound' in result) {
       res.status(404).json({ error: 'Validation run not found.' });
       return;
@@ -67,6 +84,63 @@ export async function ruleGapBacklogHandler(
   try {
     const backlog = await getRuleGapBacklog();
     res.json(backlog);
+  } catch (err) {
+    next(err);
+  }
+}
+
+// GET /api/customer-import/:id/report — Shopify verification workbook.
+export async function getImportReportHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const parsed = uuidSchema.safeParse(req.params.id);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.errors[0].message });
+      return;
+    }
+
+    const buffer = await generateShopifyVerificationReport(parsed.data);
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="shopify-verification-report-${parsed.data}.xlsx"`,
+    );
+    res.send(buffer);
+  } catch (err) {
+    next(err);
+  }
+}
+
+// POST /api/customer-import/:id/cleanup - delete customers from this import run.
+export async function cleanupImportRunHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const idParsed = uuidSchema.safeParse(req.params.id);
+    if (!idParsed.success) {
+      res.status(400).json({ error: idParsed.error.errors[0].message });
+      return;
+    }
+
+    const bodyParsed = cleanupImportSchema.safeParse(req.body ?? {});
+    if (!bodyParsed.success) {
+      res.status(400).json({ error: bodyParsed.error.errors[0].message });
+      return;
+    }
+
+    const result = await cleanupCustomersByTag(
+      bodyParsed.data.storeId,
+      qaImportTagForRun(idParsed.data),
+    );
+    res.json(result);
   } catch (err) {
     next(err);
   }

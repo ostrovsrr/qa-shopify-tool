@@ -1,9 +1,12 @@
 import axios from 'axios';
 import {
   ColumnMapping,
+  CleanupResult,
   CsvPreview,
   ImportFeedback,
   ShopifyHealth,
+  ShopifyStore,
+  StoreCustomerStats,
   UpdateMetadataPayload,
   ValidationHistoryItem,
   ValidationResult,
@@ -53,6 +56,10 @@ export function getReportDownloadUrl(validationId: string): string {
   return `/api/customer-validation/report/${validationId}`;
 }
 
+export function getImportReportDownloadUrl(importRunId: string): string {
+  return `/api/customer-import/${importRunId}/report`;
+}
+
 export async function fetchHistory(): Promise<ValidationHistoryItem[]> {
   const { data } = await api.get<ValidationHistoryItem[]>('/customer-validation/history');
   return data;
@@ -75,23 +82,62 @@ export async function deleteValidation(validationId: string): Promise<void> {
 
 // ── Shopify test-store import + feedback ─────────────────────────────────────
 
-export async function checkShopifyHealth(): Promise<ShopifyHealth> {
+export async function fetchShopifyStores(): Promise<ShopifyStore[]> {
+  const { data } = await api.get<{ stores: ShopifyStore[] }>('/shopify/stores', {
+    validateStatus: () => true,
+  });
+  return data.stores ?? [];
+}
+
+export async function fetchStoreCustomerStats(
+  storeId: string,
+): Promise<StoreCustomerStats> {
+  const { data } = await api.get<StoreCustomerStats>(
+    `/shopify/stores/${encodeURIComponent(storeId)}/stats`,
+  );
+  return data;
+}
+
+export async function cleanupQaCustomers(storeId: string): Promise<CleanupResult> {
+  const { data } = await api.post<CleanupResult>(
+    `/shopify/stores/${encodeURIComponent(storeId)}/cleanup-qa`,
+  );
+  return data;
+}
+
+export async function checkShopifyHealth(storeId?: string): Promise<ShopifyHealth> {
   // /health returns non-2xx (422/503/401) when misconfigured; surface the body
   // either way rather than throwing.
   const { data } = await api.get<ShopifyHealth>('/shopify/health', {
+    params: storeId ? { storeId } : undefined,
     validateStatus: () => true,
   });
   return data;
 }
 
-export async function runImport(validationId: string): Promise<ImportFeedback> {
+export async function runImport(
+  validationId: string,
+  storeId?: string,
+): Promise<ImportFeedback> {
   const { data } = await api.post<ImportFeedback>(
     `/customer-import/${validationId}/run`,
+    { storeId },
   );
   return data;
 }
 
 export async function fetchImportFeedback(importRunId: string): Promise<ImportFeedback> {
   const { data } = await api.get<ImportFeedback>(`/customer-import/${importRunId}`);
+  return data;
+}
+
+export async function cleanupImportRun(
+  importRunId: string,
+  storeId?: string,
+): Promise<CleanupResult> {
+  const { data } = await api.post<CleanupResult>(
+    `/customer-import/${importRunId}/cleanup`,
+    { storeId },
+  );
   return data;
 }

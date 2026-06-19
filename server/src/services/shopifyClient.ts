@@ -1,4 +1,4 @@
-import { getShopifyConfig, ShopifyConfig } from '../config/shopify';
+import { getShopifyConfig, ShopifyStoreConfig } from '../config/shopify';
 
 export interface ThrottleStatus {
   maximumAvailable: number;
@@ -48,6 +48,8 @@ export class ShopifyConfigError extends Error {
 
 export interface HealthReport {
   ok: boolean;
+  storeId?: string;
+  label?: string;
   shop?: string;
   apiVersion: string;
   grantedScopes: string[];
@@ -58,15 +60,19 @@ export interface HealthReport {
 const REQUIRED_SCOPES = ['write_customers', 'read_customers'];
 
 export class ShopifyClient {
-  private config: ShopifyConfig;
+  private config: ShopifyStoreConfig;
   private lastThrottle: ThrottleStatus | null = null;
 
-  constructor(config: ShopifyConfig) {
+  constructor(config: ShopifyStoreConfig) {
     this.config = config;
   }
 
   get throttleStatus(): ThrottleStatus | null {
     return this.lastThrottle;
+  }
+
+  get shop(): string {
+    return this.config.shop;
   }
 
   private get endpoint(): string {
@@ -78,13 +84,14 @@ export class ShopifyClient {
     query: string,
     variables: Record<string, unknown> = {},
   ): Promise<T> {
+    const accessToken = await getAccessToken(this.config);
     let res: Response;
     try {
       res = await fetch(this.endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': this.config.adminToken,
+          'X-Shopify-Access-Token': accessToken,
         },
         body: JSON.stringify({ query, variables }),
       });
@@ -96,7 +103,7 @@ export class ShopifyClient {
 
     if (res.status === 401 || res.status === 403) {
       throw new ShopifyAuthError(
-        `Shopify rejected the Admin token (HTTP ${res.status}). Check SHOPIFY_ADMIN_TOKEN and that the custom app has write_customers + read_customers scopes.`,
+        `Shopify rejected the Admin token (HTTP ${res.status}). Check the selected store credentials and that the app has write_customers + read_customers scopes.`,
       );
     }
 
@@ -155,6 +162,8 @@ export class ShopifyClient {
 
     return {
       ok: missingScopes.length === 0,
+      storeId: this.config.id,
+      label: this.config.label,
       shop: data.shop.myshopifyDomain,
       apiVersion: this.config.apiVersion,
       grantedScopes,
@@ -168,9 +177,109 @@ export class ShopifyClient {
 }
 
 let cachedClient: ShopifyClient | null = null;
+const cachedClients = new Map<string, ShopifyClient>();
+
+interface TokenCacheEntry {
+  accessToken: string;
+  expiresAt: number;
+}
+
+const tokenCache = new Map<string, TokenCacheEntry>();
+
+async function fetchClientCredentialsToken(config: ShopifyStoreConfig): Promise<TokenCacheEntry> {
+  if (!config.clientId || !config.clientSecret) {
+    throw new ShopifyConfigError(
+      `${config.label} is missing clientId/clientSecret and has no adminToken fallback.`,
+    );
+  }
+
+  const body = new URLSearchParams({
+    grant_type: 'client_credentials',
+    client_id: config.clientId,
+    client_secret: config.clientSecret,
+  });
+
+  let res: Response;
+  try {
+    res = await fetch(`https://${config.shop}/admin/oauth/access_token`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Accept: 'application/json',
+      },
+      body,
+    });
+  } catch (err) {
+    throw new ShopifyApiError(
+      `Could not request an Admin token for ${config.shop}: ${(err as Error).message}`,
+    );
+  }
+
+  const text = await res.text();
+  let parsed: { access_token?: string; expires_in?: number; error?: string; error_description?: string };
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new ShopifyApiError(
+      `Shopify returned a non-JSON token response (HTTP ${res.status}): ${text.slice(0, 200)}`,
+    );
+  }
+
+  if (res.status >= 300 || !parsed.access_token) {
+    throw new ShopifyAuthError(
+      parsed.error_description ??
+        parsed.error ??
+        `Shopify token request failed for ${config.shop} (HTTP ${res.status}).`,
+    );
+  }
+
+  const ttlSeconds = parsed.expires_in ?? 3600;
+  return {
+    accessToken: parsed.access_token,
+    expiresAt: Date.now() + Math.max(ttlSeconds - 60, 60) * 1000,
+  };
+}
+
+async function getAccessToken(config: ShopifyStoreConfig): Promise<string> {
+  if (config.adminToken) return config.adminToken;
+
+  const cached = tokenCache.get(config.id);
+  if (cached && cached.expiresAt > Date.now()) return cached.accessToken;
+
+  const fresh = await fetchClientCredentialsToken(config);
+  tokenCache.set(config.id, fresh);
+  return fresh.accessToken;
+}
 
 /** Returns a singleton client, or throws ShopifyConfigError if env is unset. */
-export function getShopifyClient(): ShopifyClient {
+export async function getShopifyClient(storeId?: string): Promise<ShopifyClient> {
+  if (!storeId && cachedClient) return cachedClient;
+  if (storeId && cachedClients.has(storeId)) return cachedClients.get(storeId)!;
+
+  const result = getShopifyConfig(storeId);
+  if (!result.ok) {
+    throw new ShopifyConfigError(result.error);
+  }
+
+  const client = new ShopifyClient(result.config);
+  if (storeId) {
+    cachedClients.set(storeId, client);
+  } else {
+    cachedClient = client;
+  }
+  return client;
+}
+
+export function clearShopifyTokenCache(storeId?: string): void {
+  if (storeId) {
+    tokenCache.delete(storeId);
+    return;
+  }
+  tokenCache.clear();
+}
+
+/** Kept for older imports in compiled scripts; prefer getShopifyClient(storeId). */
+export function getDefaultShopifyClient(): ShopifyClient {
   if (cachedClient) return cachedClient;
   const result = getShopifyConfig();
   if (!result.ok) {

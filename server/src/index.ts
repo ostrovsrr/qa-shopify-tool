@@ -12,9 +12,16 @@ import {
   uploadHandler,
   validateWithMappingHandler,
 } from './controllers/customerValidation.controller';
-import { shopifyHealthHandler } from './controllers/shopifyHealth.controller';
 import {
+  cleanupQaCustomersHandler,
+  shopifyHealthHandler,
+  shopifyStoreStatsHandler,
+  shopifyStoresHandler,
+} from './controllers/shopifyHealth.controller';
+import {
+  cleanupImportRunHandler,
   getImportHandler,
+  getImportReportHandler,
   runImportHandler,
   ruleGapBacklogHandler,
 } from './controllers/customerImport.controller';
@@ -66,9 +73,14 @@ app.delete('/api/customer-validation/:validationId', deleteValidationHandler);
 
 // ── Shopify test-store import + feedback loop ────────────────────────────────
 app.get('/api/shopify/health', shopifyHealthHandler);
+app.get('/api/shopify/stores', shopifyStoresHandler);
+app.get('/api/shopify/stores/:storeId/stats', shopifyStoreStatsHandler);
+app.post('/api/shopify/stores/:storeId/cleanup-qa', cleanupQaCustomersHandler);
 // Order matters: /feedback must precede /:id so it isn't captured as an id.
 app.post('/api/customer-import/:validationId/run', runImportHandler);
 app.get('/api/customer-import/feedback', ruleGapBacklogHandler);
+app.get('/api/customer-import/:id/report', getImportReportHandler);
+app.post('/api/customer-import/:id/cleanup', cleanupImportRunHandler);
 app.get('/api/customer-import/:id', getImportHandler);
 
 // ── Error handler ───────────────────────────────────────────────────────────

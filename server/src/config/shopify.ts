@@ -1,32 +1,59 @@
 import { z } from 'zod';
 
-const schema = z.object({
-  SHOPIFY_SHOP: z
-    .string()
-    .min(1, 'SHOPIFY_SHOP is required (e.g. my-store.myshopify.com)'),
-  SHOPIFY_ADMIN_TOKEN: z
-    .string()
-    .regex(
-      /^shp(at|ca)_/,
-      'SHOPIFY_ADMIN_TOKEN must be an Admin API access token (starts with "shpat_" or "shpca_").',
-    ),
-  SHOPIFY_API_VERSION: z
-    .string()
-    .regex(/^\d{4}-\d{2}$/, 'SHOPIFY_API_VERSION must look like "2026-01".')
-    .default('2026-01'),
-});
+const DEFAULT_API_VERSION = '2026-01';
 
-export interface ShopifyConfig {
+const apiVersionSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}$/, 'SHOPIFY_API_VERSION must look like "2026-01".')
+  .default(DEFAULT_API_VERSION);
+
+const shopSchema = z
+  .string()
+  .min(1, 'Shop domain is required (e.g. my-store.myshopify.com)');
+
+const tokenSchema = z
+  .string()
+  .regex(
+    /^shp(at|ca)_/,
+    'Shopify Admin API access token must start with "shpat_" or "shpca_".',
+  );
+
+export interface ShopifyStoreConfig {
+  id: string;
+  label: string;
   shop: string;
-  adminToken: string;
   apiVersion: string;
+  adminToken?: string;
+  clientId?: string;
+  clientSecret?: string;
 }
 
-export type ShopifyConfigResult =
-  | { ok: true; config: ShopifyConfig }
+export interface SafeShopifyStore {
+  id: string;
+  label: string;
+  shop: string;
+  apiVersion: string;
+  authMode: 'adminToken' | 'clientCredentials';
+}
+
+export type ShopifyStoreConfigResult =
+  | { ok: true; stores: ShopifyStoreConfig[] }
   | { ok: false; error: string };
 
-// Normalize "https://store.myshopify.com/" → "store.myshopify.com"
+export type ShopifyConfigResult =
+  | { ok: true; config: ShopifyStoreConfig }
+  | { ok: false; error: string };
+
+const jsonStoreSchema = z.object({
+  id: z.string().min(1).optional(),
+  label: z.string().min(1).optional(),
+  shop: shopSchema,
+  apiVersion: apiVersionSchema.optional(),
+  adminToken: tokenSchema.optional(),
+  clientId: z.string().min(1).optional(),
+  clientSecret: z.string().min(1).optional(),
+});
+
 function normalizeShop(raw: string): string {
   return raw
     .trim()
@@ -34,39 +61,151 @@ function normalizeShop(raw: string): string {
     .replace(/\/+$/, '');
 }
 
-let cached: ShopifyConfigResult | null = null;
-
-/**
- * Loads + validates Shopify config from the environment. Never throws — a
- * missing/invalid config is surfaced as { ok: false } so the server still
- * boots and the /api/shopify/health endpoint can report the problem.
- */
-export function getShopifyConfig(): ShopifyConfigResult {
-  if (cached) return cached;
-
-  const parsed = schema.safeParse({
-    SHOPIFY_SHOP: process.env.SHOPIFY_SHOP,
-    SHOPIFY_ADMIN_TOKEN: process.env.SHOPIFY_ADMIN_TOKEN,
-    SHOPIFY_API_VERSION: process.env.SHOPIFY_API_VERSION,
-  });
-
-  if (!parsed.success) {
-    cached = { ok: false, error: parsed.error.errors[0].message };
-    return cached;
-  }
-
-  cached = {
-    ok: true,
-    config: {
-      shop: normalizeShop(parsed.data.SHOPIFY_SHOP),
-      adminToken: parsed.data.SHOPIFY_ADMIN_TOKEN,
-      apiVersion: parsed.data.SHOPIFY_API_VERSION,
-    },
-  };
-  return cached;
+function normalizeId(raw: string): string {
+  return normalizeShop(raw)
+    .toLowerCase()
+    .replace(/\.myshopify\.com$/, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
 }
 
-// Test/maintenance helper — drop the memoized result (e.g. after env changes).
+function validateStore(store: ShopifyStoreConfig): ShopifyStoreConfig {
+  if (!store.adminToken && (!store.clientId || !store.clientSecret)) {
+    throw new Error(
+      `${store.label} (${store.shop}) needs either adminToken or clientId + clientSecret.`,
+    );
+  }
+  if (store.adminToken) tokenSchema.parse(store.adminToken);
+  apiVersionSchema.parse(store.apiVersion);
+  return store;
+}
+
+function fromJsonEnv(): ShopifyStoreConfig[] {
+  const raw = process.env.SHOPIFY_TEST_STORES;
+  if (!raw) return [];
+
+  const parsed = z.array(jsonStoreSchema).safeParse(JSON.parse(raw));
+  if (!parsed.success) {
+    throw new Error(`SHOPIFY_TEST_STORES is invalid: ${parsed.error.errors[0].message}`);
+  }
+
+  return parsed.data.map((store, index) =>
+    validateStore({
+      id: store.id ?? normalizeId(store.shop),
+      label: store.label ?? `Test Store ${index + 1}`,
+      shop: normalizeShop(store.shop),
+      apiVersion: store.apiVersion ?? process.env.SHOPIFY_API_VERSION ?? DEFAULT_API_VERSION,
+      adminToken: store.adminToken,
+      clientId: store.clientId,
+      clientSecret: store.clientSecret,
+    }),
+  );
+}
+
+function fromNumberedEnv(): ShopifyStoreConfig[] {
+  const stores: ShopifyStoreConfig[] = [];
+
+  for (let index = 1; index <= 20; index++) {
+    const shop = process.env[`SHOPIFY_SHOP_${index}`];
+    if (!shop) continue;
+
+    stores.push(
+      validateStore({
+        id: process.env[`SHOPIFY_STORE_ID_${index}`] ?? normalizeId(shop),
+        label: process.env[`SHOPIFY_STORE_LABEL_${index}`] ?? `Test Store ${index}`,
+        shop: normalizeShop(shop),
+        apiVersion:
+          process.env[`SHOPIFY_API_VERSION_${index}`] ??
+          process.env.SHOPIFY_API_VERSION ??
+          DEFAULT_API_VERSION,
+        adminToken: process.env[`SHOPIFY_ADMIN_TOKEN_${index}`],
+        clientId: process.env[`SHOPIFY_CLIENT_ID_${index}`],
+        clientSecret: process.env[`SHOPIFY_CLIENT_SECRET_${index}`],
+      }),
+    );
+  }
+
+  return stores;
+}
+
+function fromLegacyEnv(): ShopifyStoreConfig[] {
+  if (!process.env.SHOPIFY_SHOP) return [];
+
+  return [
+    validateStore({
+      id: process.env.SHOPIFY_STORE_ID ?? normalizeId(process.env.SHOPIFY_SHOP),
+      label: process.env.SHOPIFY_STORE_LABEL ?? 'Default Test Store',
+      shop: normalizeShop(process.env.SHOPIFY_SHOP),
+      apiVersion: process.env.SHOPIFY_API_VERSION ?? DEFAULT_API_VERSION,
+      adminToken: process.env.SHOPIFY_ADMIN_TOKEN,
+      clientId: process.env.SHOPIFY_CLIENT_ID,
+      clientSecret: process.env.SHOPIFY_CLIENT_SECRET,
+    }),
+  ];
+}
+
+let cached: ShopifyStoreConfigResult | null = null;
+
+export function getShopifyStoresConfig(): ShopifyStoreConfigResult {
+  if (cached) return cached;
+
+  try {
+    const stores = [...fromJsonEnv(), ...fromNumberedEnv()];
+    const effectiveStores = stores.length > 0 ? stores : fromLegacyEnv();
+
+    if (effectiveStores.length === 0) {
+      cached = {
+        ok: false,
+        error:
+          'No Shopify test stores configured. Set SHOPIFY_TEST_STORES, SHOPIFY_SHOP_1, or legacy SHOPIFY_SHOP.',
+      };
+      return cached;
+    }
+
+    const seen = new Set<string>();
+    for (const store of effectiveStores) {
+      if (seen.has(store.id)) {
+        throw new Error(`Duplicate Shopify store id "${store.id}".`);
+      }
+      seen.add(store.id);
+    }
+
+    cached = { ok: true, stores: effectiveStores };
+    return cached;
+  } catch (err) {
+    cached = { ok: false, error: (err as Error).message };
+    return cached;
+  }
+}
+
+export function getSafeShopifyStores(): SafeShopifyStore[] {
+  const result = getShopifyStoresConfig();
+  if (!result.ok) return [];
+
+  return result.stores.map((store) => ({
+    id: store.id,
+    label: store.label,
+    shop: store.shop,
+    apiVersion: store.apiVersion,
+    authMode: store.adminToken ? 'adminToken' : 'clientCredentials',
+  }));
+}
+
+export function getShopifyConfig(storeId?: string): ShopifyConfigResult {
+  const result = getShopifyStoresConfig();
+  if (!result.ok) return result;
+
+  const config = storeId
+    ? result.stores.find((store) => store.id === storeId)
+    : result.stores[0];
+
+  if (!config) {
+    return { ok: false, error: `Shopify test store "${storeId}" is not configured.` };
+  }
+
+  return { ok: true, config };
+}
+
 export function resetShopifyConfigCache(): void {
   cached = null;
 }

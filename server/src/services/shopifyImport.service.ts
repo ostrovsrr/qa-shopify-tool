@@ -360,6 +360,7 @@ async function fetchAndParseResults(
 
 export async function runCustomerImport(
   validationId: string,
+  storeId?: string,
 ): Promise<RunImportResult> {
   const run = await prisma.validationRun.findUnique({
     where: { id: validationId },
@@ -371,7 +372,7 @@ export async function runCustomerImport(
   if (!run) return { notFound: true };
 
   // Throws ShopifyConfigError (handled by controller) if env is unset.
-  const client = getShopifyClient();
+  const client = await getShopifyClient(storeId);
   const health = await client.verifyConnection();
   if (!health.ok) {
     return { ok: false, error: health.error ?? 'Shopify connection not healthy.' };
