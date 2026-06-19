@@ -12,6 +12,12 @@ import {
   uploadHandler,
   validateWithMappingHandler,
 } from './controllers/customerValidation.controller';
+import { shopifyHealthHandler } from './controllers/shopifyHealth.controller';
+import {
+  getImportHandler,
+  runImportHandler,
+  ruleGapBacklogHandler,
+} from './controllers/customerImport.controller';
 
 dotenv.config();
 
@@ -57,6 +63,13 @@ app.get('/api/customer-validation/report/:validationId', getReportHandler);
 app.get('/api/customer-validation/:validationId', getValidationHandler);
 app.patch('/api/customer-validation/:validationId/metadata', updateMetadataHandler);
 app.delete('/api/customer-validation/:validationId', deleteValidationHandler);
+
+// ── Shopify test-store import + feedback loop ────────────────────────────────
+app.get('/api/shopify/health', shopifyHealthHandler);
+// Order matters: /feedback must precede /:id so it isn't captured as an id.
+app.post('/api/customer-import/:validationId/run', runImportHandler);
+app.get('/api/customer-import/feedback', ruleGapBacklogHandler);
+app.get('/api/customer-import/:id', getImportHandler);
 
 // ── Error handler ───────────────────────────────────────────────────────────
 

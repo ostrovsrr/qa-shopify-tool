@@ -51,3 +51,51 @@ export interface CsvPreview {
   sampleRows: Record<string, string>[];
   suggestedMapping: ColumnMapping;
 }
+
+// ── Shopify test-store import + feedback ─────────────────────────────────────
+
+export interface ShopifyHealth {
+  ok: boolean;
+  shop?: string;
+  apiVersion?: string;
+  grantedScopes?: string[];
+  missingScopes?: string[];
+  error?: string;
+  hint?: string;
+}
+
+export interface BucketRow {
+  rowNumber: number;
+  shopifyField: string | null;
+  shopifyCode: string | null;
+  message: string | null;
+}
+
+export interface FourBucketSummary {
+  missingRule: { count: number; rows: BucketRow[] };
+  falsePositive: { count: number; rows: BucketRow[] };
+  confirmedReject: { count: number };
+  confirmedClean: { count: number };
+}
+
+export interface RuleGap {
+  shopifyField: string | null;
+  shopifyCode: string | null;
+  count: number;
+  sampleMessages: string[];
+  sampleRowNumbers: number[];
+  existingValidator: string | null;
+}
+
+export interface ImportFeedback {
+  importRunId: string;
+  validationId: string;
+  shopDomain: string;
+  status: string;
+  successCount: number;
+  errorCount: number;
+  totalRows: number;
+  createdAt: string;
+  summary: FourBucketSummary;
+  ruleGaps: RuleGap[];
+}

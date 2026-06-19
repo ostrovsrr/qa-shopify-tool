@@ -2,6 +2,8 @@ import axios from 'axios';
 import {
   ColumnMapping,
   CsvPreview,
+  ImportFeedback,
+  ShopifyHealth,
   UpdateMetadataPayload,
   ValidationHistoryItem,
   ValidationResult,
@@ -69,4 +71,27 @@ export async function updateValidationMetadata(
 
 export async function deleteValidation(validationId: string): Promise<void> {
   await api.delete(`/customer-validation/${validationId}`);
+}
+
+// ── Shopify test-store import + feedback ─────────────────────────────────────
+
+export async function checkShopifyHealth(): Promise<ShopifyHealth> {
+  // /health returns non-2xx (422/503/401) when misconfigured; surface the body
+  // either way rather than throwing.
+  const { data } = await api.get<ShopifyHealth>('/shopify/health', {
+    validateStatus: () => true,
+  });
+  return data;
+}
+
+export async function runImport(validationId: string): Promise<ImportFeedback> {
+  const { data } = await api.post<ImportFeedback>(
+    `/customer-import/${validationId}/run`,
+  );
+  return data;
+}
+
+export async function fetchImportFeedback(importRunId: string): Promise<ImportFeedback> {
+  const { data } = await api.get<ImportFeedback>(`/customer-import/${importRunId}`);
+  return data;
 }

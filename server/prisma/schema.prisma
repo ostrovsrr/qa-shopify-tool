@@ -26,8 +26,46 @@ model ValidationRun {
   updatedAt       DateTime              @updatedAt
   issues          ValidationIssue[]
   originalRows    OriginalCustomerRow[]
+  importRuns      ImportRun[]
 
   @@map("validation_runs")
+}
+
+model ImportRun {
+  id              String            @id @default(uuid())
+  validationId    String
+  shopDomain      String
+  bulkOperationId String
+  status          String
+  successCount    Int               @default(0)
+  errorCount      Int               @default(0)
+  createdAt       DateTime          @default(now())
+
+  validationRun ValidationRun     @relation(fields: [validationId], references: [id], onDelete: Cascade)
+  rowResults    ImportRowResult[]
+
+  @@index([validationId])
+  @@map("import_runs")
+}
+
+model ImportRowResult {
+  id                    String   @id @default(uuid())
+  importRunId           String
+  rowNumber             Int
+  accepted              Boolean
+  shopifyCustomerId     String?
+  shopifyCode           String?
+  shopifyField          String?
+  message               String?
+  // Set at join time so the four-bucket query is a single lookup.
+  wasFlaggedByValidator Boolean  @default(false)
+  createdAt             DateTime @default(now())
+
+  importRun ImportRun @relation(fields: [importRunId], references: [id], onDelete: Cascade)
+
+  @@index([importRunId])
+  @@index([accepted, wasFlaggedByValidator])
+  @@map("import_row_results")
 }
 
 model OriginalCustomerRow {
