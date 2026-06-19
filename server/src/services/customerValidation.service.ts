@@ -46,7 +46,12 @@ export async function validateCustomerCsv(
 
   const allIssues: CustomerValidationIssue[] = [];
   for (const rule of customerValidationRules) {
-    allIssues.push(...rule.validate(rows));
+    // Append per-issue rather than spreading (push(...arr)) — the spread passes
+    // every element as a function argument and overflows the engine's argument
+    // limit ("Maximum call stack size exceeded") when a rule flags many rows.
+    for (const issue of rule.validate(rows)) {
+      allIssues.push(issue);
+    }
   }
 
   const errors = allIssues.filter((i) => i.severity === 'Error').length;
