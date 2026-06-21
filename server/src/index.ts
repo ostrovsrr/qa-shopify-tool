@@ -24,6 +24,7 @@ import {
   getImportReportHandler,
   getLatestImportForValidationHandler,
   getValidatorFeedbackReportHandler,
+  runBatchImportHandler,
   runImportHandler,
   ruleGapBacklogHandler,
 } from './controllers/customerImport.controller';
@@ -81,6 +82,7 @@ app.post('/api/shopify/stores/:storeId/cleanup-qa', cleanupQaCustomersHandler);
 // Order matters: literal segments (/feedback, /by-validation) must precede /:id
 // so they aren't captured as an id.
 app.post('/api/customer-import/:validationId/run', runImportHandler);
+app.post('/api/customer-import/:validationId/run-batch', runBatchImportHandler);
 app.get('/api/customer-import/feedback', ruleGapBacklogHandler);
 app.get('/api/customer-import/by-validation/:validationId', getLatestImportForValidationHandler);
 app.get('/api/customer-import/:id/report', getImportReportHandler);

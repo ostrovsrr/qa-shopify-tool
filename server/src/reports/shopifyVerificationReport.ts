@@ -156,7 +156,7 @@ function addSummarySheet(
     id: string;
     validationId: string;
     shopDomain: string;
-    bulkOperationId: string;
+    bulkOperationId: string | null;
     status: string;
     successCount: number;
     errorCount: number;
@@ -193,7 +193,7 @@ function addSummarySheet(
   kv('Validation ID', importRun.validationId);
   kv('Import Run ID', importRun.id);
   kv('Shop Domain', importRun.shopDomain);
-  kv('Bulk Operation ID', importRun.bulkOperationId);
+  kv('Bulk Operation ID', importRun.bulkOperationId ?? '(parallel batch — multiple)');
   kv('Bulk Operation Status', importRun.status);
   kv('Imported At', importRun.createdAt.toISOString());
   sheet.addRow([]);

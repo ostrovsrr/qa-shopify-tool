@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import {
   checkShopifyHealth,
@@ -11,10 +11,10 @@ import {
   fetchValidatorFeedbackMarkdown,
   getImportReportDownloadUrl,
   getValidatorFeedbackReportUrl,
+  runBatchImport,
   runImport,
 } from '../api/validationApi';
 import {
-  CleanupResult,
   ImportFeedback,
   RuleGap,
   ShopifyHealth,
@@ -39,6 +39,15 @@ function errMessage(err: unknown, fallback: string): string {
     if (data?.error) return data.hint ? `${data.error} — ${data.hint}` : data.error;
   }
   return err instanceof Error ? err.message : fallback;
+}
+
+// Contiguous balanced split — mirrors the server's splitIntoBatches sizing so the
+// previewed batch sizes match what each store actually receives.
+function batchSizeFor(index: number, total: number, n: number): number {
+  if (n <= 0) return 0;
+  const base = Math.floor(total / n);
+  const remainder = total % n;
+  return base + (index < remainder ? 1 : 0);
 }
 
 function RuleGapList({ gaps }: { gaps: RuleGap[] }) {
@@ -82,23 +91,55 @@ function RuleGapList({ gaps }: { gaps: RuleGap[] }) {
 }
 
 export function ImportPanel({ result }: Props) {
-  const [health, setHealth] = useState<ShopifyHealth | null>(null);
   const [stores, setStores] = useState<ShopifyStore[]>([]);
-  const [selectedStoreId, setSelectedStoreId] = useState<string | undefined>();
-  const [stats, setStats] = useState<StoreCustomerStats | null>(null);
+  // Two explicit flows. Parallel has a lock-in step: 'select' (pick stores) →
+  // 'review' (locked, shows the per-store batch plan) → import.
+  const [importMode, setImportMode] = useState<'single' | 'parallel'>('single');
+  const [parallelPhase, setParallelPhase] = useState<'select' | 'review'>('select');
+  const [selectedStoreIds, setSelectedStoreIds] = useState<string[]>([]);
+  // Per-store health/stats (one entry per displayed store) and independent
+  // per-store cleanup spinners.
+  const [storeHealth, setStoreHealth] = useState<Record<string, ShopifyHealth>>({});
+  const [storeStats, setStoreStats] = useState<Record<string, StoreCustomerStats>>({});
+  const [cleaningStores, setCleaningStores] = useState<Set<string>>(new Set());
+  const [cleaningRun, setCleaningRun] = useState(false);
   const [feedback, setFeedback] = useState<ImportFeedback | null>(null);
   const [running, setRunning] = useState(false);
-  const [cleaning, setCleaning] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
+  const primaryStoreId = selectedStoreIds[0];
+  const inParallelSelect = importMode === 'parallel' && parallelPhase === 'select';
+  const inParallelReview = importMode === 'parallel' && parallelPhase === 'review';
+
+  // Stores whose cards we render: the one selected store in single mode, or every
+  // selected store once the parallel selection is locked into review.
+  const displayedStoreIds =
+    importMode === 'single'
+      ? primaryStoreId
+        ? [primaryStoreId]
+        : []
+      : inParallelReview
+        ? selectedStoreIds
+        : [];
+  const displayKey = displayedStoreIds.join(',');
+  // Avoid stale closures / interval churn when refreshing stats on terminal poll.
+  const displayedRef = useRef<string[]>(displayedStoreIds);
+  displayedRef.current = displayedStoreIds;
+
+  const storeLabel = (storeId: string): string =>
+    stores.find((s) => s.id === storeId)?.label ?? storeId;
+
+  // ── load stores ─────────────────────────────────────────────────────────────
   useEffect(() => {
     let active = true;
     fetchShopifyStores()
       .then((data) => {
         if (!active) return;
         setStores(data);
-        setSelectedStoreId((current) => current ?? data[0]?.id);
+        setSelectedStoreIds((current) =>
+          current.length > 0 ? current : data[0] ? [data[0].id] : [],
+        );
       })
       .catch(() => active && setError('Could not load Shopify test stores.'));
     return () => {
@@ -106,26 +147,32 @@ export function ImportPanel({ result }: Props) {
     };
   }, []);
 
+  // ── health + stats for the displayed stores ──────────────────────────────────
   useEffect(() => {
+    if (displayedStoreIds.length === 0) return;
     let active = true;
-    setHealth(null);
-    setStats(null);
-    checkShopifyHealth(selectedStoreId)
-      .then((h) => active && setHealth(h))
-      .catch(() => active && setHealth({ ok: false, error: 'Could not reach the server.' }));
-    if (selectedStoreId) {
-      fetchStoreCustomerStats(selectedStoreId)
-        .then((data) => active && setStats(data))
-        .catch(() => active && setError('Could not load test-store customer counts.'));
+    for (const id of displayedStoreIds) {
+      checkShopifyHealth(id)
+        .then((h) => active && setStoreHealth((m) => ({ ...m, [id]: h })))
+        .catch(
+          () =>
+            active &&
+            setStoreHealth((m) => ({
+              ...m,
+              [id]: { ok: false, error: 'Could not reach the server.' },
+            })),
+        );
+      fetchStoreCustomerStats(id)
+        .then((st) => active && setStoreStats((m) => ({ ...m, [id]: st })))
+        .catch(() => undefined);
     }
     return () => {
       active = false;
     };
-  }, [selectedStoreId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayKey]);
 
-  // On a different validation run (incl. reopening one from History), load its
-  // most recent import so status / verification report / cleanup are available
-  // again. If that import is still RUNNING, the poll effect below resumes it.
+  // ── restore the latest import when (re)opening a validation run ───────────────
   useEffect(() => {
     let active = true;
     setFeedback(null);
@@ -138,10 +185,7 @@ export function ImportPanel({ result }: Props) {
     };
   }, [result.validationId]);
 
-  // Reconcile-on-poll: while the run is non-terminal, poll GET /:id (which pokes
-  // Shopify and finalizes when the bulk op is done). The dependency on `status`
-  // (not the whole object) keeps one interval alive across same-status polls and
-  // tears it down once the run reaches a terminal state.
+  // ── reconcile-on-poll while non-terminal ──────────────────────────────────────
   const pollStatus = feedback?.status;
   const pollRunId = feedback?.importRunId;
   useEffect(() => {
@@ -154,9 +198,9 @@ export function ImportPanel({ result }: Props) {
         setFeedback(next);
         if (isTerminal(next.status)) {
           clearInterval(timer);
-          if (selectedStoreId) {
-            fetchStoreCustomerStats(selectedStoreId)
-              .then((d) => active && setStats(d))
+          for (const id of displayedRef.current) {
+            fetchStoreCustomerStats(id)
+              .then((st) => active && setStoreStats((m) => ({ ...m, [id]: st })))
               .catch(() => undefined);
           }
         }
@@ -170,28 +214,77 @@ export function ImportPanel({ result }: Props) {
       active = false;
       clearInterval(timer);
     };
-  }, [pollRunId, pollStatus, selectedStoreId]);
+  }, [pollRunId, pollStatus]);
 
-  // When a run is opened from History, point the store selector at the store the
-  // import actually used (by storeId; fall back to matching the shop domain for
-  // legacy runs) instead of leaving it on the default first chip.
+  // ── point selection at a single-store run reopened from History ───────────────
   const feedbackStoreId = feedback?.storeId ?? null;
   const feedbackShopDomain = feedback?.shopDomain;
   useEffect(() => {
-    if (!feedbackShopDomain && !feedbackStoreId) return;
+    if (!feedbackStoreId && !feedbackShopDomain) return;
     const target =
       feedbackStoreId ?? stores.find((s) => s.shop === feedbackShopDomain)?.id;
-    if (target) setSelectedStoreId(target);
+    if (target) {
+      setSelectedStoreIds([target]);
+      setImportMode('single');
+      setParallelPhase('select');
+    }
   }, [feedbackStoreId, feedbackShopDomain, stores]);
 
+  // ── derived flags ─────────────────────────────────────────────────────────────
+  const s = feedback?.summary;
+  const polling = !!feedback && !isTerminal(feedback.status);
+  const completed = feedback?.status === 'COMPLETED';
+  const failed = !!feedback && isTerminal(feedback.status) && !completed;
+  const busy = running || polling;
+  const showResults = !!feedback && isTerminal(feedback.status) && feedback.totalRows > 0;
+
+  const primaryHealthOk = primaryStoreId ? storeHealth[primaryStoreId]?.ok !== false : false;
+  const canImportNow = inParallelReview
+    ? selectedStoreIds.length >= 2
+    : importMode === 'single' && selectedStoreIds.length === 1 && primaryHealthOk;
+
+  // ── actions ───────────────────────────────────────────────────────────────────
+  const switchMode = (mode: 'single' | 'parallel') => {
+    setImportMode(mode);
+    setParallelPhase('select');
+    setError('');
+    if (mode === 'single') setSelectedStoreIds((prev) => prev.slice(0, 1));
+  };
+
+  const toggleStore = (storeId: string) => {
+    setSelectedStoreIds((prev) => {
+      if (importMode === 'single') return [storeId];
+      return prev.includes(storeId)
+        ? prev.filter((id) => id !== storeId)
+        : [...prev, storeId];
+    });
+    setFeedback(null);
+    setError('');
+  };
+
+  const confirmSelection = () => {
+    if (selectedStoreIds.length < 2) return;
+    setParallelPhase('review');
+    setError('');
+  };
+
+  const editSelection = () => {
+    setParallelPhase('select');
+    setError('');
+  };
+
   const handleRun = async () => {
+    if (!canImportNow) return;
     setRunning(true);
     setError('');
     setNotice('');
     try {
       // Returns immediately with status RUNNING; the poll effect drives it to a
-      // terminal state and refreshes store stats once finished.
-      const data = await runImport(result.validationId, selectedStoreId);
+      // terminal state. 2+ stores → rows split and imported in parallel, merged.
+      const data =
+        importMode === 'parallel'
+          ? await runBatchImport(result.validationId, selectedStoreIds)
+          : await runImport(result.validationId, selectedStoreIds[0]);
       setFeedback(data);
     } catch (err) {
       setError(errMessage(err, 'Import failed.'));
@@ -203,9 +296,6 @@ export function ImportPanel({ result }: Props) {
   const handleRefresh = async () => {
     if (!feedback) return;
     setFeedback(await fetchImportFeedback(feedback.importRunId));
-    if (selectedStoreId) {
-      setStats(await fetchStoreCustomerStats(selectedStoreId));
-    }
   };
 
   const handleDownloadReport = () => {
@@ -231,53 +321,157 @@ export function ImportPanel({ result }: Props) {
     }
   };
 
-  const applyCleanupResult = async (cleanup: Promise<CleanupResult>) => {
-    setCleaning(true);
+  const refreshStoreStats = async (storeId: string) => {
+    const st = await fetchStoreCustomerStats(storeId).catch(() => null);
+    if (st) setStoreStats((m) => ({ ...m, [storeId]: st }));
+  };
+
+  const cleanStore = async (storeId: string) => {
+    const st = storeStats[storeId];
+    if (!st) return;
+    if (
+      !window.confirm(
+        `Delete all ${st.qaImportCustomers} customer(s) tagged qa-import from ${storeLabel(
+          storeId,
+        )}?`,
+      )
+    ) {
+      return;
+    }
+    setCleaningStores((prev) => new Set(prev).add(storeId));
     setError('');
     setNotice('');
     try {
-      const result = await cleanup;
-      setNotice(
-        `Cleanup complete: deleted ${result.deleted} of ${result.found} customer(s) tagged "${result.tag}".`,
-      );
-      if (selectedStoreId) {
-        setStats(await fetchStoreCustomerStats(selectedStoreId));
-      }
+      const res = await cleanupQaCustomers(storeId);
+      setNotice(`Cleaned ${res.deleted} of ${res.found} qa-import customer(s) from ${res.shop}.`);
+      await refreshStoreStats(storeId);
     } catch (err) {
       setError(errMessage(err, 'Cleanup failed.'));
     } finally {
-      setCleaning(false);
+      setCleaningStores((prev) => {
+        const next = new Set(prev);
+        next.delete(storeId);
+        return next;
+      });
     }
   };
 
-  const handleCleanupAllQa = () => {
-    if (!selectedStoreId || !stats) return;
-    if (
-      !window.confirm(
-        `Delete all ${stats.qaImportCustomers} customer(s) tagged qa-import from this test store?`,
-      )
-    ) {
-      return;
+  const cleanAllSelected = async () => {
+    const ids = [...displayedStoreIds];
+    if (ids.length === 0) return;
+    if (!window.confirm(`Delete all qa-import customers from ${ids.length} store(s)?`)) return;
+    setError('');
+    setNotice('');
+    let totalDeleted = 0;
+    for (const id of ids) {
+      setCleaningStores((prev) => new Set(prev).add(id));
+      try {
+        const res = await cleanupQaCustomers(id);
+        totalDeleted += res.deleted;
+        await refreshStoreStats(id);
+      } catch (err) {
+        setError(errMessage(err, `Cleanup failed for ${storeLabel(id)}.`));
+      } finally {
+        setCleaningStores((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      }
     }
-    void applyCleanupResult(cleanupQaCustomers(selectedStoreId));
+    setNotice(`Cleaned ${totalDeleted} qa-import customer(s) across ${ids.length} store(s).`);
   };
 
-  const handleCleanupImportRun = () => {
+  const handleCleanupImportRun = async () => {
     if (!feedback) return;
     if (
       !window.confirm(
-        `Delete customers created by import ${feedback.importRunId.slice(0, 8)} only?`,
+        `Delete customers created by import ${feedback.importRunId.slice(0, 8)} (across all its stores)?`,
       )
     ) {
       return;
     }
-    void applyCleanupResult(cleanupImportRun(feedback.importRunId, selectedStoreId));
+    setCleaningRun(true);
+    setError('');
+    setNotice('');
+    try {
+      const res = await cleanupImportRun(feedback.importRunId, primaryStoreId);
+      setNotice(`Deleted ${res.deleted} of ${res.found} customer(s) for this import (${res.shop}).`);
+      await Promise.all(displayedStoreIds.map((id) => refreshStoreStats(id)));
+    } catch (err) {
+      setError(errMessage(err, 'Cleanup failed.'));
+    } finally {
+      setCleaningRun(false);
+    }
   };
 
-  const s = feedback?.summary;
-  const polling = !!feedback && !isTerminal(feedback.status);
-  const completed = feedback?.status === 'COMPLETED';
-  const failed = !!feedback && isTerminal(feedback.status) && !completed;
+  // ── per-store card ─────────────────────────────────────────────────────────────
+  const renderStoreCard = (storeId: string, index: number) => {
+    const store = stores.find((s2) => s2.id === storeId);
+    const h = storeHealth[storeId];
+    const st = storeStats[storeId];
+    const cleaning = cleaningStores.has(storeId);
+    const batch = inParallelReview
+      ? batchSizeFor(index, result.totalRows, selectedStoreIds.length)
+      : null;
+    const pct =
+      batch !== null && result.totalRows > 0
+        ? Math.round((batch / result.totalRows) * 100)
+        : null;
+
+    return (
+      <div className="store-card" key={storeId}>
+        <div className="store-card-head">
+          <div>
+            <div className="store-card-name">{store?.label ?? storeId}</div>
+            <div className="store-card-shop">{store?.shop ?? ''}</div>
+          </div>
+          <span
+            className={`store-card-badge ${h ? (h.ok ? 'ok' : 'bad') : 'pending'}`}
+          >
+            {h ? (h.ok ? 'connected' : 'not ready') : 'checking…'}
+          </span>
+        </div>
+
+        {h && !h.ok && (
+          <div className="store-card-error">
+            {h.error ?? 'unknown'}
+            {h.hint ? ` — ${h.hint}` : ''}
+            {h.missingScopes && h.missingScopes.length > 0
+              ? ` (missing scopes: ${h.missingScopes.join(', ')})`
+              : ''}
+          </div>
+        )}
+
+        <div className="store-card-stats">
+          {batch !== null && (
+            <span>
+              Batch:{' '}
+              <strong>
+                {batch} row{batch === 1 ? '' : 's'}
+              </strong>
+              {pct !== null ? ` (${pct}%)` : ''}
+              {batch === 0 ? ' — skipped' : ''}
+            </span>
+          )}
+          <span>
+            Total customers: <strong>{st ? st.totalCustomers : '—'}</strong>
+          </span>
+          <span>
+            QA imports: <strong>{st ? st.qaImportCustomers : '—'}</strong>
+          </span>
+        </div>
+
+        <button
+          className="btn btn-outline btn-sm"
+          onClick={() => cleanStore(storeId)}
+          disabled={cleaning || !st || st.qaImportCustomers === 0}
+        >
+          {cleaning ? 'Cleaning…' : 'Clean QA'}
+        </button>
+      </div>
+    );
+  };
 
   return (
     <div className="import-panel">
@@ -289,66 +483,111 @@ export function ImportPanel({ result }: Props) {
             result against our validator to surface missing / over-strict rules.
           </p>
         </div>
-        <button
-          className="btn btn-primary"
-          onClick={handleRun}
-          disabled={running || polling || health?.ok === false || !selectedStoreId}
-        >
-          {running || polling
-            ? 'Importing… (running in Shopify)'
-            : 'Import to test store'}
-        </button>
+        {inParallelSelect ? (
+          <button
+            className="btn btn-primary"
+            onClick={confirmSelection}
+            disabled={busy || selectedStoreIds.length < 2}
+          >
+            Confirm selection{selectedStoreIds.length >= 2 ? ` (${selectedStoreIds.length})` : ''}
+          </button>
+        ) : (
+          <button className="btn btn-primary" onClick={handleRun} disabled={busy || !canImportNow}>
+            {busy
+              ? 'Importing… (running in Shopify)'
+              : importMode === 'parallel'
+                ? `Import to ${selectedStoreIds.length} stores in parallel`
+                : 'Import to test store'}
+          </button>
+        )}
       </div>
 
       {stores.length > 0 && (
-        <div className="store-selector">
-          {stores.map((store) => (
-            <button
-              key={store.id}
-              className={`store-chip ${selectedStoreId === store.id ? 'active' : ''}`}
-              onClick={() => {
-                setSelectedStoreId(store.id);
-                setFeedback(null);
-                setError('');
-              }}
-              type="button"
-            >
-              <span>{store.label}</span>
-              <small>{store.shop}</small>
-            </button>
-          ))}
-        </div>
-      )}
-
-      {health && !health.ok && (
-        <div className="error-banner">
-          Shopify not ready: {health.error ?? 'unknown'}
-          {health.hint ? ` — ${health.hint}` : ''}
-          {health.missingScopes && health.missingScopes.length > 0
-            ? ` (missing scopes: ${health.missingScopes.join(', ')})`
-            : ''}
-        </div>
-      )}
-      {health?.ok && (
-        <div className="store-status">
-          <p className="muted">
-            Connected to <strong>{health.label ?? health.shop}</strong>
-            {health.shop ? ` (${health.shop})` : ''} on API {health.apiVersion}.
-          </p>
-          {stats && (
-            <div className="store-stats">
-              <span>Total customers: <strong>{stats.totalCustomers}</strong></span>
-              <span>QA imports: <strong>{stats.qaImportCustomers}</strong></span>
+        <>
+          {stores.length > 1 && (
+            <div className="import-mode-toggle" role="tablist" aria-label="Import mode">
               <button
-                className="btn btn-outline btn-sm"
-                onClick={handleCleanupAllQa}
-                disabled={cleaning || stats.qaImportCustomers === 0}
+                type="button"
+                role="tab"
+                aria-selected={importMode === 'single'}
+                className={`mode-tab ${importMode === 'single' ? 'active' : ''}`}
+                onClick={() => switchMode('single')}
+                disabled={busy}
               >
-                {cleaning ? 'Cleaning...' : 'Clean all QA imports'}
+                Single store import
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={importMode === 'parallel'}
+                className={`mode-tab ${importMode === 'parallel' ? 'active' : ''}`}
+                onClick={() => switchMode('parallel')}
+                disabled={busy}
+              >
+                Parallel import
               </button>
             </div>
           )}
-        </div>
+
+          {/* Store picker — hidden once a parallel selection is locked for review. */}
+          {!inParallelReview && (
+            <>
+              <p className="muted store-selector-hint">
+                {importMode === 'parallel'
+                  ? 'Select two or more stores, then confirm to see how the file splits across them.'
+                  : 'Select the test store to import into.'}
+              </p>
+              <div className="store-selector">
+                {stores.map((store) => (
+                  <button
+                    key={store.id}
+                    className={`store-chip ${selectedStoreIds.includes(store.id) ? 'active' : ''}`}
+                    onClick={() => toggleStore(store.id)}
+                    disabled={busy}
+                    type="button"
+                  >
+                    <span>{store.label}</span>
+                    <small>{store.shop}</small>
+                  </button>
+                ))}
+              </div>
+              {inParallelSelect && selectedStoreIds.length < 2 && (
+                <p className="muted">Select at least 2 stores to import in parallel.</p>
+              )}
+            </>
+          )}
+
+          {/* Review bar for a locked parallel selection. */}
+          {inParallelReview && (
+            <div className="review-bar">
+              <span className="muted">
+                Parallel import · <strong>{selectedStoreIds.length}</strong> stores ·{' '}
+                {result.totalRows} rows total
+              </span>
+              <div className="toolbar-actions">
+                <button className="btn btn-outline btn-sm" onClick={editSelection} disabled={busy}>
+                  Edit selection
+                </button>
+                {displayedStoreIds.length > 1 && (
+                  <button
+                    className="btn btn-outline btn-sm"
+                    onClick={cleanAllSelected}
+                    disabled={cleaningStores.size > 0}
+                  >
+                    Clean QA on all selected
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Per-store cards (single: one card; parallel review: one per store). */}
+          {displayedStoreIds.length > 0 && (
+            <div className="store-cards">
+              {displayedStoreIds.map((id, i) => renderStoreCard(id, i))}
+            </div>
+          )}
+        </>
       )}
 
       {result.errors > 0 && !feedback && (
@@ -384,7 +623,7 @@ export function ImportPanel({ result }: Props) {
         </div>
       )}
 
-      {completed && s && (
+      {showResults && s && (
         <div className="import-results">
           <div className="import-toolbar">
             <span className="muted">
@@ -405,9 +644,9 @@ export function ImportPanel({ result }: Props) {
               <button
                 className="btn btn-outline btn-sm"
                 onClick={handleCleanupImportRun}
-                disabled={cleaning}
+                disabled={cleaningRun}
               >
-                {cleaning ? 'Cleaning...' : 'Clean this import'}
+                {cleaningRun ? 'Cleaning...' : 'Clean this import'}
               </button>
               <button className="btn btn-outline btn-sm" onClick={handleRefresh}>
                 Refresh
@@ -433,6 +672,34 @@ export function ImportPanel({ result }: Props) {
               <span className="card-value">{s.confirmedClean.count}</span>
             </div>
           </div>
+
+          {feedback.perStore.length > 1 && (
+            <>
+              <h3 className="subsection-title">Per-store results</h3>
+              <table className="issues-table">
+                <thead>
+                  <tr>
+                    <th>Store</th>
+                    <th>Rows</th>
+                    <th>Accepted</th>
+                    <th>Rejected</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {feedback.perStore.map((ps) => (
+                    <tr key={ps.storeId ?? ps.shopDomain}>
+                      <td>
+                        {stores.find((st) => st.shop === ps.shopDomain)?.label ?? ps.shopDomain}
+                      </td>
+                      <td>{ps.total}</td>
+                      <td>{ps.accepted}</td>
+                      <td>{ps.rejected}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          )}
 
           <h3 className="subsection-title">Rule-gap backlog (this run)</h3>
           <RuleGapList gaps={feedback.ruleGaps} />

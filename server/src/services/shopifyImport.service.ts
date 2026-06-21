@@ -1,7 +1,18 @@
 import { v4 as uuidv4 } from 'uuid';
+import type { ImportBatchJob } from '@prisma/client';
 import prisma from '../db/prisma';
 import { getImportFeedback, ImportFeedback } from './importFeedback.service';
-import { getShopifyClient, ShopifyClient } from './shopifyClient';
+import {
+  cleanupCustomersByTag,
+  CleanupResult,
+  qaImportTagForRun,
+} from './shopifyCleanup.service';
+import {
+  getShopifyClient,
+  ShopifyAuthError,
+  ShopifyClient,
+  ShopifyConfigError,
+} from './shopifyClient';
 
 // Strict create so duplicates surface as TAKEN against the empty test store.
 // userErrors here is plain UserError (no `code`) — we synthesize a stable code
@@ -257,6 +268,11 @@ interface BulkOperationState {
 // Shopify bulk-op statuses that mean the operation has stopped advancing.
 const TERMINAL_BULK_STATUSES = ['COMPLETED', 'FAILED', 'CANCELED', 'EXPIRED'];
 
+// A batch job is failed once the reconcile poll has checked it this many times
+// while still non-terminal — bounds a stuck job (perma-RUNNING or repeatedly
+// erroring). At the client's ~3s poll cadence this is ~15 minutes of watching.
+const MAX_JOB_POLL_ATTEMPTS = 300;
+
 // Single-shot poll: the async model advances one step per reconcile call instead
 // of blocking an HTTP request in a multi-minute loop.
 async function fetchBulkOperationState(
@@ -415,9 +431,21 @@ function lineToRowFromRows(rows: OriginalRowRecord[]): number[] {
 export async function reconcileImportRun(
   importRunId: string,
 ): Promise<ImportFeedback | null> {
-  const run = await prisma.importRun.findUnique({ where: { id: importRunId } });
+  const run = await prisma.importRun.findUnique({
+    where: { id: importRunId },
+    include: { batchJobs: true },
+  });
   if (!run) return null;
   if (TERMINAL_BULK_STATUSES.includes(run.status)) {
+    return getImportFeedback(importRunId);
+  }
+
+  // A batch parent has no bulk op of its own — advance its children instead.
+  if (run.batchJobs.length > 0) {
+    return reconcileBatchRun(importRunId, run.batchJobs);
+  }
+  // Shouldn't happen for a single run, but guard the now-nullable column.
+  if (!run.bulkOperationId) {
     return getImportFeedback(importRunId);
   }
 
@@ -460,6 +488,43 @@ export async function reconcileLatestImportForValidation(
   return reconcileImportRun(latest.id);
 }
 
+// Deletes the customers created by an import run, across every store it touched.
+// A batch spreads its customers over all its jobs' stores (all sharing the
+// qa-import-<importRunId> tag); a single run uses its own store (or the caller's
+// fallback). Results are aggregated into one CleanupResult the client renders
+// unchanged.
+export async function cleanupImportRunStores(
+  importRunId: string,
+  fallbackStoreId?: string,
+): Promise<CleanupResult> {
+  const run = await prisma.importRun.findUnique({
+    where: { id: importRunId },
+    include: { batchJobs: { select: { storeId: true } } },
+  });
+  const tag = qaImportTagForRun(importRunId);
+
+  const storeIds: (string | undefined)[] =
+    run && run.batchJobs.length > 0
+      ? [...new Set(run.batchJobs.map((j) => j.storeId ?? undefined))]
+      : [run?.storeId ?? fallbackStoreId];
+
+  const results: CleanupResult[] = [];
+  for (const storeId of storeIds) {
+    results.push(await cleanupCustomersByTag(storeId, tag));
+  }
+
+  if (results.length === 1) return results[0];
+  return {
+    storeId: undefined,
+    shop: results.map((r) => r.shop).join(', '),
+    tag,
+    found: results.reduce((n, r) => n + r.found, 0),
+    deleted: results.reduce((n, r) => n + r.deleted, 0),
+    failed: results.reduce((n, r) => n + r.failed, 0),
+    errors: results.flatMap((r) => r.errors),
+  };
+}
+
 // Download + parse results and write rowResults, but only if THIS call wins the
 // RUNNING → COMPLETED transition (updateMany returns count: 0 if another poll
 // already finalized), keeping concurrent reconciles idempotent.
@@ -499,6 +564,282 @@ async function finalizeCompletedRun(
       data: outcomes.map((o) => ({
         id: uuidv4(),
         importRunId,
+        storeId: run.storeId,
+        rowNumber: o.rowNumber,
+        accepted: o.accepted,
+        shopifyCustomerId: o.shopifyCustomerId,
+        shopifyCode: o.shopifyCode,
+        shopifyField: o.shopifyField,
+        message: o.message,
+        wasFlaggedByValidator: flaggedRows.has(o.rowNumber),
+      })),
+    });
+  });
+}
+
+// ── parallel batch import across multiple stores ─────────────────────────────
+
+// Contiguous, balanced split (earlier batches get the +1 when it doesn't divide
+// evenly). Deterministic given the asc-ordered rows + n, so a later reconcile can
+// recompute any job's exact slice from (batchIndex, batchCount) without storing it.
+function splitIntoBatches<T>(items: T[], n: number): T[][] {
+  const batches: T[][] = Array.from({ length: Math.max(n, 0) }, () => []);
+  if (n <= 0) return batches;
+  const base = Math.floor(items.length / n);
+  const remainder = items.length % n;
+  let idx = 0;
+  for (let i = 0; i < n; i++) {
+    const size = base + (i < remainder ? 1 : 0);
+    batches[i] = items.slice(idx, idx + size);
+    idx += size;
+  }
+  return batches;
+}
+
+// Splits the run's rows across the selected stores and kicks off one bulk op per
+// store in parallel. Returns immediately with a parent ImportRun id; the per-store
+// jobs are finalized and merged into the parent's rowResults by the reconcile poll.
+export async function startBatchImport(
+  validationId: string,
+  storeIds: string[],
+): Promise<RunImportResult> {
+  const run = await prisma.validationRun.findUnique({
+    where: { id: validationId },
+    include: { originalRows: { orderBy: { rowNumber: 'asc' } } },
+  });
+  if (!run) return { notFound: true };
+  if (storeIds.length === 0) return { ok: false, error: 'Select at least one store.' };
+  if (run.originalRows.length === 0) {
+    return { ok: false, error: 'This validation run has no rows to import.' };
+  }
+
+  const parentId = uuidv4();
+  const mapping = run.columnMapping as Record<string, string> | null;
+  const batches = splitIntoBatches(run.originalRows, storeIds.length);
+
+  // Per-store failure is captured as a FAILED job rather than aborting the whole
+  // batch (which would strand the bulk ops already started on other stores).
+  const jobs = await Promise.all(
+    storeIds.map(async (storeId, index) => {
+      const batch = batches[index] ?? [];
+      if (batch.length === 0) return null; // fewer rows than stores
+      try {
+        const client = await getShopifyClient(storeId);
+        const health = await client.verifyConnection();
+        if (!health.ok) {
+          return {
+            storeId,
+            index,
+            shopDomain: health.shop ?? storeId,
+            batchCount: storeIds.length,
+            bulkOperationId: null as string | null,
+            status: 'FAILED',
+            error: health.error ?? 'Store not healthy.',
+            rowCount: batch.length,
+          };
+        }
+        const { jsonl } = buildJsonl(batch, mapping, parentId);
+        const stagedPath = await stagedUpload(client, jsonl);
+        const bulkOpId = await runBulkMutation(client, stagedPath);
+        return {
+          storeId,
+          index,
+          shopDomain: health.shop ?? storeId,
+          batchCount: storeIds.length,
+          bulkOperationId: bulkOpId as string | null,
+          status: 'RUNNING',
+          error: null as string | null,
+          rowCount: batch.length,
+        };
+      } catch (err) {
+        return {
+          storeId,
+          index,
+          shopDomain: storeId,
+          batchCount: storeIds.length,
+          bulkOperationId: null as string | null,
+          status: 'FAILED',
+          error: (err as Error).message,
+          rowCount: batch.length,
+        };
+      }
+    }),
+  );
+
+  const realJobs = jobs.filter((j): j is NonNullable<typeof j> => j !== null);
+  if (realJobs.length === 0) {
+    return { ok: false, error: 'No rows to import.' };
+  }
+
+  await prisma.importRun.create({
+    data: {
+      id: parentId,
+      validationId,
+      storeId: null,
+      shopDomain: realJobs.map((j) => j.shopDomain).join(', ').slice(0, 250),
+      bulkOperationId: null,
+      status: 'RUNNING',
+      successCount: 0,
+      errorCount: 0,
+      batchJobs: {
+        create: realJobs.map((j) => ({
+          id: uuidv4(),
+          storeId: j.storeId,
+          shopDomain: j.shopDomain,
+          batchIndex: j.index,
+          batchCount: j.batchCount,
+          bulkOperationId: j.bulkOperationId,
+          status: j.status,
+          error: j.error,
+          rowCount: j.rowCount,
+          successCount: 0,
+          errorCount: 0,
+        })),
+      },
+    },
+  });
+
+  return { ok: true, importRunId: parentId };
+}
+
+// Advances a batch parent: polls each non-terminal job once, merges completed
+// ones into the parent's rowResults, and rolls the parent status up when every
+// job is terminal (FAILED if any job didn't COMPLETE).
+async function reconcileBatchRun(
+  parentId: string,
+  jobs: ImportBatchJob[],
+): Promise<ImportFeedback | null> {
+  for (const job of jobs) {
+    if (TERMINAL_BULK_STATUSES.includes(job.status)) continue;
+    if (!job.bulkOperationId) continue; // never started → already effectively failed
+
+    // Bound stuck jobs: count this poll and fail the job once it's been checked
+    // too many times without reaching a terminal state.
+    const attempts = job.pollAttempts + 1;
+    if (attempts > MAX_JOB_POLL_ATTEMPTS) {
+      await prisma.importBatchJob.updateMany({
+        where: { id: job.id, status: 'RUNNING' },
+        data: {
+          status: 'FAILED',
+          error: `Timed out: still running after ${MAX_JOB_POLL_ATTEMPTS} status checks.`,
+        },
+      });
+      continue;
+    }
+    await prisma.importBatchJob.update({
+      where: { id: job.id },
+      data: { pollAttempts: attempts },
+    });
+
+    // Isolate each job: one store erroring must not abort the others' progress.
+    try {
+      const client = await getShopifyClient(job.storeId ?? undefined);
+      const state = await fetchBulkOperationState(client, job.bulkOperationId);
+      if (!TERMINAL_BULK_STATUSES.includes(state.status)) continue;
+
+      if (state.status === 'COMPLETED') {
+        await finalizeCompletedJob(parentId, job, state.url);
+      } else {
+        await prisma.importBatchJob.updateMany({
+          where: { id: job.id, status: 'RUNNING' },
+          data: {
+            status: state.status,
+            error: `Bulk operation ${state.status}${state.errorCode ? ` (${state.errorCode})` : ''}.`,
+          },
+        });
+      }
+    } catch (err) {
+      // Persistent errors (bad token/config) fail just this job so the batch can
+      // still finish; transient errors are left RUNNING to retry on the next poll.
+      if (err instanceof ShopifyAuthError || err instanceof ShopifyConfigError) {
+        await prisma.importBatchJob.updateMany({
+          where: { id: job.id, status: 'RUNNING' },
+          data: { status: 'FAILED', error: (err as Error).message },
+        });
+      }
+    }
+  }
+
+  // Roll up: re-read jobs and recompute parent counts from the merged rowResults.
+  const fresh = await prisma.importBatchJob.findMany({ where: { importRunId: parentId } });
+  const allTerminal = fresh.every((j) => TERMINAL_BULK_STATUSES.includes(j.status));
+  const merged = await prisma.importRowResult.findMany({
+    where: { importRunId: parentId },
+    select: { accepted: true },
+  });
+  const successCount = merged.filter((r) => r.accepted).length;
+  const errorCount = merged.length - successCount;
+
+  if (allTerminal) {
+    const failedJobs = fresh.filter((j) => j.status !== 'COMPLETED');
+    const error = failedJobs.length
+      ? failedJobs
+          .map((j) => `${j.shopDomain}: ${j.error ?? j.status}`)
+          .join(' | ')
+          .slice(0, 500)
+      : null;
+    await prisma.importRun.updateMany({
+      where: { id: parentId, status: 'RUNNING' },
+      data: {
+        status: failedJobs.length ? 'FAILED' : 'COMPLETED',
+        successCount,
+        errorCount,
+        error,
+      },
+    });
+  } else {
+    // Keep partial counts fresh so the header reflects progress as jobs land.
+    await prisma.importRun.updateMany({
+      where: { id: parentId, status: 'RUNNING' },
+      data: { successCount, errorCount },
+    });
+  }
+
+  return getImportFeedback(parentId);
+}
+
+// Parses one completed job's results and merges them into the parent's
+// rowResults — guarded by the job's RUNNING → COMPLETED transition so concurrent
+// polls insert exactly once.
+async function finalizeCompletedJob(
+  parentId: string,
+  job: ImportBatchJob,
+  resultUrl: string | null,
+): Promise<void> {
+  const parent = await prisma.importRun.findUnique({
+    where: { id: parentId },
+    include: {
+      validationRun: {
+        include: {
+          originalRows: { orderBy: { rowNumber: 'asc' } },
+          issues: { select: { rowNumber: true } },
+        },
+      },
+    },
+  });
+  if (!parent) return;
+
+  // Same split as startBatchImport → this job's exact rows → lineToRow.
+  const slice =
+    splitIntoBatches(parent.validationRun.originalRows, job.batchCount)[job.batchIndex] ?? [];
+  const lineToRow = slice.map((r) => r.rowNumber);
+  const outcomes = resultUrl ? await fetchAndParseResults(resultUrl, lineToRow) : [];
+
+  const flaggedRows = new Set(parent.validationRun.issues.map((i) => i.rowNumber));
+  const successCount = outcomes.filter((o) => o.accepted).length;
+  const errorCount = outcomes.length - successCount;
+
+  await prisma.$transaction(async (tx) => {
+    const claimed = await tx.importBatchJob.updateMany({
+      where: { id: job.id, status: 'RUNNING' },
+      data: { status: 'COMPLETED', successCount, errorCount },
+    });
+    if (claimed.count === 0) return; // another poll already merged this job
+    await tx.importRowResult.createMany({
+      data: outcomes.map((o) => ({
+        id: uuidv4(),
+        importRunId: parentId,
+        storeId: job.storeId,
         rowNumber: o.rowNumber,
         accepted: o.accepted,
         shopifyCustomerId: o.shopifyCustomerId,

@@ -7,12 +7,10 @@ import {
 import { generateShopifyVerificationReport } from '../reports/shopifyVerificationReport';
 import { generateValidatorFeedbackMarkdown } from '../reports/validatorFeedbackReport';
 import {
-  cleanupCustomersByTag,
-  qaImportTagForRun,
-} from '../services/shopifyCleanup.service';
-import {
+  cleanupImportRunStores,
   reconcileImportRun,
   reconcileLatestImportForValidation,
+  startBatchImport,
   startCustomerImport,
 } from '../services/shopifyImport.service';
 import {
@@ -40,6 +38,9 @@ function handleShopifyError(err: unknown, res: Response): boolean {
 const uuidSchema = z.string().uuid('Invalid id format.');
 const runImportSchema = z.object({
   storeId: z.string().min(1).optional(),
+});
+const runBatchSchema = z.object({
+  storeIds: z.array(z.string().min(1)).min(1, 'Select at least one store.'),
 });
 const cleanupImportSchema = z.object({
   storeId: z.string().min(1).optional(),
@@ -79,6 +80,47 @@ export async function runImportHandler(
     }
 
     // 202: the bulk op is queued; the client polls GET /:id until it finalizes.
+    const feedback = await getImportFeedback(result.importRunId);
+    res.status(202).json(feedback);
+  } catch (err) {
+    if (handleShopifyError(err, res)) return;
+    next(err);
+  }
+}
+
+// POST /api/customer-import/:validationId/run-batch
+// Splits the run's rows across the chosen stores and imports them in parallel,
+// merging the per-store results into one parent ImportRun the same reports read.
+export async function runBatchImportHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const parsed = uuidSchema.safeParse(req.params.validationId);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.errors[0].message });
+      return;
+    }
+
+    const bodyParsed = runBatchSchema.safeParse(req.body ?? {});
+    if (!bodyParsed.success) {
+      res.status(400).json({ error: bodyParsed.error.errors[0].message });
+      return;
+    }
+
+    const result = await startBatchImport(parsed.data, bodyParsed.data.storeIds);
+    if ('notFound' in result) {
+      res.status(404).json({ error: 'Validation run not found.' });
+      return;
+    }
+    if (!result.ok) {
+      const isBusy = /already running|in progress/i.test(result.error);
+      res.status(isBusy ? 409 : 422).json({ error: result.error });
+      return;
+    }
+
+    // 202: each store's bulk op is queued; the client polls GET /:id until merged.
     const feedback = await getImportFeedback(result.importRunId);
     res.status(202).json(feedback);
   } catch (err) {
@@ -206,12 +248,11 @@ export async function cleanupImportRunHandler(
       return;
     }
 
-    const result = await cleanupCustomersByTag(
-      bodyParsed.data.storeId,
-      qaImportTagForRun(idParsed.data),
-    );
+    // Batch-aware: deletes across every store the import touched, not just one.
+    const result = await cleanupImportRunStores(idParsed.data, bodyParsed.data.storeId);
     res.json(result);
   } catch (err) {
+    if (handleShopifyError(err, res)) return;
     next(err);
   }
 }

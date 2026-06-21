@@ -821,6 +821,36 @@ body {
   flex-wrap: wrap;
   justify-content: flex-end;
 }
+/* Segmented control: single vs parallel import flow. */
+.import-mode-toggle {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  margin: 12px 0 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.mode-tab {
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: calc(var(--radius) - 2px);
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.mode-tab:hover:not(:disabled) { color: var(--text); }
+.mode-tab.active {
+  background: var(--surface);
+  color: var(--primary);
+  box-shadow: var(--shadow);
+}
+.mode-tab:disabled { cursor: default; opacity: .6; }
+.store-selector-hint { margin: 4px 0 0; }
+
 .store-selector {
   display: flex;
   flex-wrap: wrap;
@@ -854,6 +884,10 @@ body {
   border-color: var(--primary);
   background: var(--info-bg);
 }
+.store-chip:disabled {
+  cursor: default;
+  opacity: .55;
+}
 .store-status {
   margin: 8px 0 12px;
 }
@@ -872,6 +906,58 @@ body {
   border-radius: var(--radius);
   padding: 6px 10px;
 }
+
+/* ─── Per-store cards (single + parallel-review) ─────────────────────────────── */
+.review-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 4px;
+}
+.store-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+  margin: 8px 0 12px;
+}
+.store-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+.store-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.store-card-name { font-weight: 700; font-size: 14px; }
+.store-card-shop { color: var(--text-muted); font-size: 12px; margin-top: 2px; }
+.store-card-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.store-card-badge.ok { background: var(--success-bg); color: var(--success); }
+.store-card-badge.bad { background: var(--error-bg); color: var(--error); }
+.store-card-badge.pending { background: var(--bg); color: var(--text-muted); }
+.store-card-error { color: var(--error); font-size: 12px; }
+.store-card-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.store-card .btn { align-self: flex-start; }
 .muted { color: var(--text-muted); font-size: 14px; margin: 4px 0; }
 .subsection-title {
   font-size: 15px;
