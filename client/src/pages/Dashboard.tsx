@@ -6,6 +6,7 @@ import {
   validateWithMapping,
 } from '../api/validationApi';
 import { ColumnMappingScreen } from '../components/ColumnMappingScreen';
+import { ImportPanel } from '../components/ImportPanel';
 import { IssuesTable } from '../components/IssuesTable';
 import { SummaryCards } from '../components/SummaryCards';
 import { UploadArea } from '../components/UploadArea';
@@ -143,6 +144,7 @@ export function Dashboard() {
                 </div>
                 <SummaryCards result={result} onDownload={handleDownload} />
                 <IssuesTable issues={result.issues} />
+                <ImportPanel result={result} />
               </>
             )}
           </>

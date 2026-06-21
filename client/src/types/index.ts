@@ -51,3 +51,80 @@ export interface CsvPreview {
   sampleRows: Record<string, string>[];
   suggestedMapping: ColumnMapping;
 }
+
+// ── Shopify test-store import + feedback ─────────────────────────────────────
+
+export interface ShopifyHealth {
+  ok: boolean;
+  storeId?: string;
+  label?: string;
+  shop?: string;
+  apiVersion?: string;
+  grantedScopes?: string[];
+  missingScopes?: string[];
+  error?: string;
+  hint?: string;
+}
+
+export interface ShopifyStore {
+  id: string;
+  label: string;
+  shop: string;
+  apiVersion: string;
+  authMode: 'adminToken' | 'clientCredentials';
+}
+
+export interface StoreCustomerStats {
+  storeId?: string;
+  shop: string;
+  totalCustomers: number;
+  qaImportCustomers: number;
+}
+
+export interface CleanupResult {
+  storeId?: string;
+  shop: string;
+  tag: string;
+  found: number;
+  deleted: number;
+  failed: number;
+  errors: { customerId: string; message: string }[];
+}
+
+export interface BucketRow {
+  rowNumber: number;
+  shopifyField: string | null;
+  shopifyCode: string | null;
+  message: string | null;
+}
+
+export interface FourBucketSummary {
+  missingRule: { count: number; rows: BucketRow[] };
+  falsePositive: { count: number; rows: BucketRow[] };
+  confirmedReject: { count: number };
+  confirmedClean: { count: number };
+}
+
+export interface RuleGap {
+  shopifyField: string | null;
+  shopifyCode: string | null;
+  count: number;
+  sampleMessages: string[];
+  sampleRowNumbers: number[];
+  existingValidator: string | null;
+}
+
+export interface ImportFeedback {
+  importRunId: string;
+  validationId: string;
+  storeId: string | null;
+  shopDomain: string;
+  status: string;
+  error: string | null;
+  successCount: number;
+  errorCount: number;
+  totalRows: number;
+  createdAt: string;
+  summary: FourBucketSummary;
+  ruleGaps: RuleGap[];
+}

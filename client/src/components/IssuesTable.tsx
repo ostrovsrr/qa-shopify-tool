@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Severity, ValidationIssue } from '../types';
 
 interface Props {
@@ -7,10 +7,16 @@ interface Props {
 
 type SortKey = 'rowNumber' | 'severity' | 'column' | 'issueType';
 type SortDir = 'asc' | 'desc';
+// collapsed → loading (spinner paints) → open (heavy table mounts)
+type View = 'collapsed' | 'loading' | 'open';
 
 const SEVERITY_ORDER: Record<Severity, number> = { Error: 0, Warning: 1, Info: 2 };
 
 export function IssuesTable({ issues }: Props) {
+  // The Excel validation report is the primary artifact; this table is opt-in.
+  // Nothing about it is computed or rendered until the user opens it — important
+  // when a run has tens of thousands of issues.
+  const [view, setView] = useState<View>('collapsed');
   const [search, setSearch] = useState('');
   const [filterSeverity, setFilterSeverity] = useState<string>('All');
   const [filterColumn, setFilterColumn] = useState<string>('All');
@@ -18,16 +24,43 @@ export function IssuesTable({ issues }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>('rowNumber');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
 
+  const rafIds = useRef<number[]>([]);
+  const cancelPending = () => {
+    rafIds.current.forEach((id) => cancelAnimationFrame(id));
+    rafIds.current = [];
+  };
+  useEffect(() => cancelPending, []);
+
+  const handleToggle = () => {
+    if (view !== 'collapsed') {
+      // Acts as both "hide" and "cancel a load in progress".
+      cancelPending();
+      setView('collapsed');
+      return;
+    }
+    setView('loading');
+    // Mount the heavy table only after the loading frame has painted, so the
+    // spinner is visible before the main thread blocks on rendering the rows.
+    const id1 = requestAnimationFrame(() => {
+      const id2 = requestAnimationFrame(() => setView('open'));
+      rafIds.current.push(id2);
+    });
+    rafIds.current.push(id1);
+  };
+
+  const open = view === 'open';
+
   const columns = useMemo(
-    () => ['All', ...Array.from(new Set(issues.map((i) => i.column))).sort()],
-    [issues],
+    () => (open ? ['All', ...Array.from(new Set(issues.map((i) => i.column))).sort()] : ['All']),
+    [open, issues],
   );
   const issueTypes = useMemo(
-    () => ['All', ...Array.from(new Set(issues.map((i) => i.issueType))).sort()],
-    [issues],
+    () => (open ? ['All', ...Array.from(new Set(issues.map((i) => i.issueType))).sort()] : ['All']),
+    [open, issues],
   );
 
   const filtered = useMemo(() => {
+    if (!open) return [];
     const q = search.toLowerCase();
     return issues
       .filter((i) => {
@@ -54,7 +87,7 @@ export function IssuesTable({ issues }: Props) {
         else if (sortKey === 'issueType') cmp = a.issueType.localeCompare(b.issueType);
         return sortDir === 'asc' ? cmp : -cmp;
       });
-  }, [issues, search, filterSeverity, filterColumn, filterIssueType, sortKey, sortDir]);
+  }, [open, issues, search, filterSeverity, filterColumn, filterIssueType, sortKey, sortDir]);
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -74,8 +107,29 @@ export function IssuesTable({ issues }: Props) {
 
   return (
     <div className="issues-section">
-      <h3 className="issues-title">Issues ({filtered.length} of {issues.length})</h3>
+      <button
+        type="button"
+        className="issues-toggle"
+        onClick={handleToggle}
+        aria-expanded={open}
+      >
+        <span className="issues-title">Issues ({issues.length})</span>
+        <span className="issues-toggle-hint">
+          {view === 'loading' ? (
+            <>
+              <span className="spinner" /> Loading {issues.length.toLocaleString()} issues…
+            </>
+          ) : (
+            <>
+              {open ? 'Hide details' : 'Show details'}
+              <span className={`issues-chevron ${open ? 'open' : ''}`}>▾</span>
+            </>
+          )}
+        </span>
+      </button>
 
+      {open && (
+        <>
       <div className="filters-bar">
         <input
           className="search-input"
@@ -160,6 +214,8 @@ export function IssuesTable({ issues }: Props) {
           </tbody>
         </table>
       </div>
+        </>
+      )}
     </div>
   );
 }
