@@ -114,6 +114,14 @@ export interface RuleGap {
   existingValidator: string | null;
 }
 
+export interface PerStoreResult {
+  storeId: string | null;
+  shopDomain: string;
+  total: number;
+  accepted: number;
+  rejected: number;
+}
+
 export interface ImportFeedback {
   importRunId: string;
   validationId: string;
@@ -127,4 +135,5 @@ export interface ImportFeedback {
   createdAt: string;
   summary: FourBucketSummary;
   ruleGaps: RuleGap[];
+  perStore: PerStoreResult[];
 }

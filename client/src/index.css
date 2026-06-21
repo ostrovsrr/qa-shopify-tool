@@ -906,6 +906,58 @@ body {
   border-radius: var(--radius);
   padding: 6px 10px;
 }
+
+/* ─── Per-store cards (single + parallel-review) ─────────────────────────────── */
+.review-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 4px;
+}
+.store-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+  margin: 8px 0 12px;
+}
+.store-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+.store-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.store-card-name { font-weight: 700; font-size: 14px; }
+.store-card-shop { color: var(--text-muted); font-size: 12px; margin-top: 2px; }
+.store-card-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.store-card-badge.ok { background: var(--success-bg); color: var(--success); }
+.store-card-badge.bad { background: var(--error-bg); color: var(--error); }
+.store-card-badge.pending { background: var(--bg); color: var(--text-muted); }
+.store-card-error { color: var(--error); font-size: 12px; }
+.store-card-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.store-card .btn { align-self: flex-start; }
 .muted { color: var(--text-muted); font-size: 14px; margin: 4px 0; }
 .subsection-title {
   font-size: 15px;

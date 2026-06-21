@@ -95,6 +95,9 @@ model ImportRowResult {
   shopifyCode           String?
   shopifyField          String?
   message               String?
+  // Which store imported this row — null for legacy rows; for a batch it's the
+  // job's store, enabling the per-store accepted/rejected breakdown.
+  storeId               String?
   // Set at join time so the four-bucket query is a single lookup.
   wasFlaggedByValidator Boolean  @default(false)
   createdAt             DateTime @default(now())

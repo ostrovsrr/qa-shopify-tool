@@ -46,6 +46,14 @@ export interface RuleGap {
   existingValidator: string | null;
 }
 
+export interface PerStoreResult {
+  storeId: string | null;
+  shopDomain: string;
+  total: number;
+  accepted: number;
+  rejected: number;
+}
+
 export interface ImportFeedback {
   importRunId: string;
   validationId: string;
@@ -61,6 +69,9 @@ export interface ImportFeedback {
   createdAt: Date;
   summary: FourBucketSummary;
   ruleGaps: RuleGap[];
+  // Per-store accepted/rejected split (one entry per store for a batch; a single
+  // entry for a single-store run).
+  perStore: PerStoreResult[];
 }
 
 const SAMPLE_LIMIT = 25;
@@ -97,7 +108,7 @@ export async function getImportFeedback(
 ): Promise<ImportFeedback | null> {
   const run = await prisma.importRun.findUnique({
     where: { id: importRunId },
-    include: { rowResults: true },
+    include: { rowResults: true, batchJobs: true },
   });
   if (!run) return null;
 
@@ -120,6 +131,32 @@ export async function getImportFeedback(
     shopifyCode: r.shopifyCode,
     message: r.message,
   });
+
+  // Per-store split. Label each store via its batch job; fall back to the run's
+  // own shopDomain for the single/legacy (null storeId) group.
+  const shopByStore = new Map<string, string>();
+  for (const job of run.batchJobs) {
+    if (job.storeId) shopByStore.set(job.storeId, job.shopDomain);
+  }
+  const perStoreMap = new Map<string, PerStoreResult>();
+  for (const r of run.rowResults) {
+    const key = r.storeId ?? '';
+    let entry = perStoreMap.get(key);
+    if (!entry) {
+      entry = {
+        storeId: r.storeId,
+        shopDomain: r.storeId ? shopByStore.get(r.storeId) ?? r.storeId : run.shopDomain,
+        total: 0,
+        accepted: 0,
+        rejected: 0,
+      };
+      perStoreMap.set(key, entry);
+    }
+    entry.total++;
+    if (r.accepted) entry.accepted++;
+    else entry.rejected++;
+  }
+  const perStore = [...perStoreMap.values()].sort((a, b) => b.total - a.total);
 
   return {
     importRunId: run.id,
@@ -145,6 +182,7 @@ export async function getImportFeedback(
       confirmedClean: { count: confirmedClean },
     },
     ruleGaps: aggregateRuleGaps(missingRows),
+    perStore,
   };
 }
 

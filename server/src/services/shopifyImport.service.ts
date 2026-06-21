@@ -564,6 +564,7 @@ async function finalizeCompletedRun(
       data: outcomes.map((o) => ({
         id: uuidv4(),
         importRunId,
+        storeId: run.storeId,
         rowNumber: o.rowNumber,
         accepted: o.accepted,
         shopifyCustomerId: o.shopifyCustomerId,
@@ -838,6 +839,7 @@ async function finalizeCompletedJob(
       data: outcomes.map((o) => ({
         id: uuidv4(),
         importRunId: parentId,
+        storeId: job.storeId,
         rowNumber: o.rowNumber,
         accepted: o.accepted,
         shopifyCustomerId: o.shopifyCustomerId,
