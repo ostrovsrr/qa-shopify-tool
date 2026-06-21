@@ -60,6 +60,19 @@ export function getImportReportDownloadUrl(importRunId: string): string {
   return `/api/customer-import/${importRunId}/report`;
 }
 
+export function getValidatorFeedbackReportUrl(importRunId: string): string {
+  return `/api/customer-import/${importRunId}/feedback-report`;
+}
+
+// Markdown body of the validator-fix report, for copying to the clipboard.
+export async function fetchValidatorFeedbackMarkdown(importRunId: string): Promise<string> {
+  const { data } = await api.get<string>(
+    `/customer-import/${importRunId}/feedback-report`,
+    { responseType: 'text', transformResponse: (d) => d },
+  );
+  return data;
+}
+
 export async function fetchHistory(): Promise<ValidationHistoryItem[]> {
   const { data } = await api.get<ValidationHistoryItem[]>('/customer-validation/history');
   return data;

@@ -5,6 +5,7 @@ import {
   getRuleGapBacklog,
 } from '../services/importFeedback.service';
 import { generateShopifyVerificationReport } from '../reports/shopifyVerificationReport';
+import { generateValidatorFeedbackMarkdown } from '../reports/validatorFeedbackReport';
 import {
   cleanupCustomersByTag,
   qaImportTagForRun,
@@ -151,6 +152,37 @@ export async function getImportReportHandler(
     );
     res.send(buffer);
   } catch (err) {
+    next(err);
+  }
+}
+
+// GET /api/customer-import/:id/feedback-report — paste-ready Markdown for fixing
+// validator logic from the Shopify-vs-validator discrepancy.
+export async function getValidatorFeedbackReportHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const parsed = uuidSchema.safeParse(req.params.id);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.errors[0].message });
+      return;
+    }
+
+    const markdown = await generateValidatorFeedbackMarkdown(parsed.data);
+    if (markdown === null) {
+      res.status(404).json({ error: 'Import run not found.' });
+      return;
+    }
+    res.type('text/markdown; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="validator-feedback-${parsed.data}.md"`,
+    );
+    res.send(markdown);
+  } catch (err) {
+    if (handleShopifyError(err, res)) return;
     next(err);
   }
 }

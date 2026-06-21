@@ -3,7 +3,7 @@ import prisma from '../db/prisma';
 // Which existing validator (if any) already owns a given Shopify (field, code).
 // If a row lands in a gap whose key IS covered here, the validator exists but
 // missed this row (a rule bug/gap); if it's NOT here, no rule covers it at all.
-const VALIDATOR_COVERAGE: Record<string, string> = {
+export const VALIDATOR_COVERAGE: Record<string, string> = {
   'email|INVALID': 'InvalidEmailRule',
   'email|TAKEN': 'DuplicateEmailRule',
   'email|BLANK': 'MissingContactRule',
@@ -15,7 +15,7 @@ const VALIDATOR_COVERAGE: Record<string, string> = {
   'zip|INVALID': 'PostalCodeRule',
 };
 
-function coverageKey(field: string | null, code: string | null): string {
+export function coverageKey(field: string | null, code: string | null): string {
   return `${field ?? '(none)'}|${code ?? '(none)'}`;
 }
 

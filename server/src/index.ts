@@ -23,6 +23,7 @@ import {
   getImportHandler,
   getImportReportHandler,
   getLatestImportForValidationHandler,
+  getValidatorFeedbackReportHandler,
   runImportHandler,
   ruleGapBacklogHandler,
 } from './controllers/customerImport.controller';
@@ -83,6 +84,7 @@ app.post('/api/customer-import/:validationId/run', runImportHandler);
 app.get('/api/customer-import/feedback', ruleGapBacklogHandler);
 app.get('/api/customer-import/by-validation/:validationId', getLatestImportForValidationHandler);
 app.get('/api/customer-import/:id/report', getImportReportHandler);
+app.get('/api/customer-import/:id/feedback-report', getValidatorFeedbackReportHandler);
 app.post('/api/customer-import/:id/cleanup', cleanupImportRunHandler);
 app.get('/api/customer-import/:id', getImportHandler);
 

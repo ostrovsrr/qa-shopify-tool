@@ -8,7 +8,9 @@ import {
   fetchLatestImportForValidation,
   fetchShopifyStores,
   fetchStoreCustomerStats,
+  fetchValidatorFeedbackMarkdown,
   getImportReportDownloadUrl,
+  getValidatorFeedbackReportUrl,
   runImport,
 } from '../api/validationApi';
 import {
@@ -211,6 +213,24 @@ export function ImportPanel({ result }: Props) {
     window.open(getImportReportDownloadUrl(feedback.importRunId), '_blank');
   };
 
+  const handleDownloadFeedbackReport = () => {
+    if (!feedback) return;
+    window.open(getValidatorFeedbackReportUrl(feedback.importRunId), '_blank');
+  };
+
+  const handleCopyForClaude = async () => {
+    if (!feedback) return;
+    setError('');
+    setNotice('');
+    try {
+      const markdown = await fetchValidatorFeedbackMarkdown(feedback.importRunId);
+      await navigator.clipboard.writeText(markdown);
+      setNotice('Copied — paste into Claude to fix the validators.');
+    } catch (err) {
+      setError(errMessage(err, 'Could not copy the validator report.'));
+    }
+  };
+
   const applyCleanupResult = async (cleanup: Promise<CleanupResult>) => {
     setCleaning(true);
     setError('');
@@ -373,6 +393,12 @@ export function ImportPanel({ result }: Props) {
               {feedback.totalRows}
             </span>
             <div className="toolbar-actions">
+              <button className="btn btn-primary btn-sm" onClick={handleCopyForClaude}>
+                Copy for Claude
+              </button>
+              <button className="btn btn-outline btn-sm" onClick={handleDownloadFeedbackReport}>
+                Download .md
+              </button>
               <button className="btn btn-outline btn-sm" onClick={handleDownloadReport}>
                 Download verification report
               </button>
