@@ -34,9 +34,15 @@ model ValidationRun {
 model ImportRun {
   id              String            @id @default(uuid())
   validationId    String
+  // storeId lets a later reconcile rebuild the Shopify client (getShopifyClient(storeId))
+  // when finalizing an async run; null falls back to the default store.
+  storeId         String?
   shopDomain      String
   bulkOperationId String
-  status          String
+  // RUNNING (start persisted, bulk op queued) → COMPLETED | FAILED | CANCELED | EXPIRED
+  status          String            @default("RUNNING")
+  // Failure reason for the terminal error states; null while RUNNING/COMPLETED.
+  error           String?
   successCount    Int               @default(0)
   errorCount      Int               @default(0)
   createdAt       DateTime          @default(now())

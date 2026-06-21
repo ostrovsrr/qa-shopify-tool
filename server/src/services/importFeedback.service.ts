@@ -49,8 +49,12 @@ export interface RuleGap {
 export interface ImportFeedback {
   importRunId: string;
   validationId: string;
+  // Store this import actually ran against (null = default store / legacy run).
+  storeId: string | null;
   shopDomain: string;
   status: string;
+  // Reason for a terminal failure (FAILED/CANCELED/EXPIRED); null otherwise.
+  error: string | null;
   successCount: number;
   errorCount: number;
   totalRows: number;
@@ -120,8 +124,10 @@ export async function getImportFeedback(
   return {
     importRunId: run.id,
     validationId: run.validationId,
+    storeId: run.storeId,
     shopDomain: run.shopDomain,
     status: run.status,
+    error: run.error,
     successCount: run.successCount,
     errorCount: run.errorCount,
     totalRows: run.rowResults.length,

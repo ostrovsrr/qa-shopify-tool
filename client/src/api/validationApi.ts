@@ -131,6 +131,18 @@ export async function fetchImportFeedback(importRunId: string): Promise<ImportFe
   return data;
 }
 
+// Latest import for a validation run, or null when none exists (404). Used to
+// restore/resume an import when a run is reopened from History.
+export async function fetchLatestImportForValidation(
+  validationId: string,
+): Promise<ImportFeedback | null> {
+  const { data, status } = await api.get<ImportFeedback>(
+    `/customer-import/by-validation/${encodeURIComponent(validationId)}`,
+    { validateStatus: () => true },
+  );
+  return status === 200 ? data : null;
+}
+
 export async function cleanupImportRun(
   importRunId: string,
   storeId?: string,

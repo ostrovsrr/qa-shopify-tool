@@ -265,6 +265,36 @@ body {
 
 .issues-title { font-size: 17px; font-weight: 700; }
 
+/* Collapsible header — the table is opt-in; Excel report is primary. */
+.issues-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text);
+  text-align: left;
+}
+.issues-toggle:focus-visible { outline: 2px solid var(--primary); outline-offset: 4px; }
+.issues-toggle-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--primary);
+}
+.issues-chevron { transition: transform .15s; font-size: 11px; }
+.issues-chevron.open { transform: rotate(180deg); }
+/* The shared .spinner is white (for dark buttons); recolor it for this light header. */
+.issues-toggle-hint .spinner {
+  border-color: var(--border);
+  border-top-color: var(--primary);
+}
+
 .filters-bar {
   display: flex;
   gap: 10px;

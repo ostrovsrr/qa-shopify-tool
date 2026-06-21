@@ -5,6 +5,7 @@ import {
   cleanupImportRun,
   cleanupQaCustomers,
   fetchImportFeedback,
+  fetchLatestImportForValidation,
   fetchShopifyStores,
   fetchStoreCustomerStats,
   getImportReportDownloadUrl,
@@ -23,6 +24,12 @@ import {
 interface Props {
   result: ValidationResult;
 }
+
+// Shopify bulk-op statuses that mean the import has stopped advancing.
+const TERMINAL_STATUSES = ['COMPLETED', 'FAILED', 'CANCELED', 'EXPIRED'];
+const isTerminal = (status: string): boolean => TERMINAL_STATUSES.includes(status);
+
+const POLL_INTERVAL_MS = 3000;
 
 function errMessage(err: unknown, fallback: string): string {
   if (axios.isAxiosError(err)) {
@@ -114,22 +121,76 @@ export function ImportPanel({ result }: Props) {
     };
   }, [selectedStoreId]);
 
-  // Reset when switching to a different validation run.
+  // On a different validation run (incl. reopening one from History), load its
+  // most recent import so status / verification report / cleanup are available
+  // again. If that import is still RUNNING, the poll effect below resumes it.
   useEffect(() => {
+    let active = true;
     setFeedback(null);
     setError('');
+    fetchLatestImportForValidation(result.validationId)
+      .then((f) => active && f && setFeedback(f))
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
   }, [result.validationId]);
+
+  // Reconcile-on-poll: while the run is non-terminal, poll GET /:id (which pokes
+  // Shopify and finalizes when the bulk op is done). The dependency on `status`
+  // (not the whole object) keeps one interval alive across same-status polls and
+  // tears it down once the run reaches a terminal state.
+  const pollStatus = feedback?.status;
+  const pollRunId = feedback?.importRunId;
+  useEffect(() => {
+    if (!pollRunId || !pollStatus || isTerminal(pollStatus)) return;
+    let active = true;
+    const timer = setInterval(async () => {
+      try {
+        const next = await fetchImportFeedback(pollRunId);
+        if (!active) return;
+        setFeedback(next);
+        if (isTerminal(next.status)) {
+          clearInterval(timer);
+          if (selectedStoreId) {
+            fetchStoreCustomerStats(selectedStoreId)
+              .then((d) => active && setStats(d))
+              .catch(() => undefined);
+          }
+        }
+      } catch (err) {
+        if (!active) return;
+        clearInterval(timer);
+        setError(errMessage(err, 'Failed to check import status.'));
+      }
+    }, POLL_INTERVAL_MS);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [pollRunId, pollStatus, selectedStoreId]);
+
+  // When a run is opened from History, point the store selector at the store the
+  // import actually used (by storeId; fall back to matching the shop domain for
+  // legacy runs) instead of leaving it on the default first chip.
+  const feedbackStoreId = feedback?.storeId ?? null;
+  const feedbackShopDomain = feedback?.shopDomain;
+  useEffect(() => {
+    if (!feedbackShopDomain && !feedbackStoreId) return;
+    const target =
+      feedbackStoreId ?? stores.find((s) => s.shop === feedbackShopDomain)?.id;
+    if (target) setSelectedStoreId(target);
+  }, [feedbackStoreId, feedbackShopDomain, stores]);
 
   const handleRun = async () => {
     setRunning(true);
     setError('');
     setNotice('');
     try {
+      // Returns immediately with status RUNNING; the poll effect drives it to a
+      // terminal state and refreshes store stats once finished.
       const data = await runImport(result.validationId, selectedStoreId);
       setFeedback(data);
-      if (selectedStoreId) {
-        setStats(await fetchStoreCustomerStats(selectedStoreId));
-      }
     } catch (err) {
       setError(errMessage(err, 'Import failed.'));
     } finally {
@@ -194,6 +255,9 @@ export function ImportPanel({ result }: Props) {
   };
 
   const s = feedback?.summary;
+  const polling = !!feedback && !isTerminal(feedback.status);
+  const completed = feedback?.status === 'COMPLETED';
+  const failed = !!feedback && isTerminal(feedback.status) && !completed;
 
   return (
     <div className="import-panel">
@@ -208,9 +272,11 @@ export function ImportPanel({ result }: Props) {
         <button
           className="btn btn-primary"
           onClick={handleRun}
-          disabled={running || health?.ok === false || !selectedStoreId}
+          disabled={running || polling || health?.ok === false || !selectedStoreId}
         >
-          {running ? 'Importing… (bulk op may take a minute)' : 'Import to test store'}
+          {running || polling
+            ? 'Importing… (running in Shopify)'
+            : 'Import to test store'}
         </button>
       </div>
 
@@ -275,7 +341,30 @@ export function ImportPanel({ result }: Props) {
       {error && <div className="error-banner">{error}</div>}
       {notice && <div className="success-banner">{notice}</div>}
 
-      {feedback && s && (
+      {failed && (
+        <div className="error-banner">
+          Import {feedback.importRunId.slice(0, 8)} {feedback.status.toLowerCase()}
+          {feedback.error ? `: ${feedback.error}` : '.'}
+        </div>
+      )}
+
+      {polling && (
+        <div className="import-results">
+          <div className="import-toolbar">
+            <span className="muted">
+              <span className="spinner" /> Import {feedback.importRunId.slice(0, 8)} ·
+              running in Shopify… polling for results
+            </span>
+            <div className="toolbar-actions">
+              <button className="btn btn-outline btn-sm" onClick={handleRefresh}>
+                Refresh
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {completed && s && (
         <div className="import-results">
           <div className="import-toolbar">
             <span className="muted">

@@ -117,8 +117,10 @@ export interface RuleGap {
 export interface ImportFeedback {
   importRunId: string;
   validationId: string;
+  storeId: string | null;
   shopDomain: string;
   status: string;
+  error: string | null;
   successCount: number;
   errorCount: number;
   totalRows: number;

@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import prisma from '../db/prisma';
+import { getImportFeedback, ImportFeedback } from './importFeedback.service';
 import { getShopifyClient, ShopifyClient } from './shopifyClient';
 
 // Strict create so duplicates surface as TAKEN against the empty test store.
@@ -244,8 +245,6 @@ async function runBulkMutation(
   return op.id;
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-
 interface BulkOperationState {
   id: string;
   status: string;
@@ -255,32 +254,25 @@ interface BulkOperationState {
   partialDataUrl: string | null;
 }
 
-async function pollBulkOperation(
+// Shopify bulk-op statuses that mean the operation has stopped advancing.
+const TERMINAL_BULK_STATUSES = ['COMPLETED', 'FAILED', 'CANCELED', 'EXPIRED'];
+
+// Single-shot poll: the async model advances one step per reconcile call instead
+// of blocking an HTTP request in a multi-minute loop.
+async function fetchBulkOperationState(
   client: ShopifyClient,
   id: string,
-  { maxAttempts = 1800, intervalMs = 5000 } = {},
 ): Promise<BulkOperationState> {
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const data = await client.query<{ node: BulkOperationState | null }>(
-      `query pollBulk($id: ID!) {
-        node(id: $id) {
-          ... on BulkOperation { id status errorCode objectCount url partialDataUrl }
-        }
-      }`,
-      { id },
-    );
-    const node = data.node;
-    if (!node) throw new Error(`Bulk operation ${id} not found while polling.`);
-
-    if (node.status === 'COMPLETED') return node;
-    if (['FAILED', 'CANCELED', 'EXPIRED'].includes(node.status)) {
-      throw new Error(
-        `Bulk operation ${node.status}${node.errorCode ? ` (${node.errorCode})` : ''}.`,
-      );
-    }
-    await sleep(intervalMs);
-  }
-  throw new Error(`Bulk operation timed out after ${maxAttempts} polls.`);
+  const data = await client.query<{ node: BulkOperationState | null }>(
+    `query pollBulk($id: ID!) {
+      node(id: $id) {
+        ... on BulkOperation { id status errorCode objectCount url partialDataUrl }
+      }
+    }`,
+    { id },
+  );
+  if (!data.node) throw new Error(`Bulk operation ${id} not found while polling.`);
+  return data.node;
 }
 
 async function fetchAndParseResults(
@@ -356,18 +348,18 @@ async function fetchAndParseResults(
   });
 }
 
-// ── orchestrator ─────────────────────────────────────────────────────────────
+// ── orchestrator: start (fast) ───────────────────────────────────────────────
 
-export async function runCustomerImport(
+// Kicks off the Shopify bulk operation and persists the run as RUNNING, then
+// returns immediately. The op is finalized later by reconcileImportRun (driven
+// by the GET poll), so no HTTP request is held open while Shopify processes.
+export async function startCustomerImport(
   validationId: string,
   storeId?: string,
 ): Promise<RunImportResult> {
   const run = await prisma.validationRun.findUnique({
     where: { id: validationId },
-    include: {
-      originalRows: { orderBy: { rowNumber: 'asc' } },
-      issues: { select: { rowNumber: true } },
-    },
+    include: { originalRows: { orderBy: { rowNumber: 'asc' } } },
   });
   if (!run) return { notFound: true };
 
@@ -389,40 +381,132 @@ export async function runCustomerImport(
     return { ok: false, error: 'This validation run has no rows to import.' };
   }
 
+  // Queue the op (seconds-scale); do NOT wait for it to finish here.
   const stagedPath = await stagedUpload(client, jsonl);
   const bulkOpId = await runBulkMutation(client, stagedPath);
-  const finalState = await pollBulkOperation(client, bulkOpId);
-  const outcomes = finalState.url
-    ? await fetchAndParseResults(finalState.url, lineToRow)
-    : [];
-
-  const flaggedRows = new Set(run.issues.map((i) => i.rowNumber));
-  const successCount = outcomes.filter((o) => o.accepted).length;
-  const errorCount = outcomes.length - successCount;
 
   await prisma.importRun.create({
     data: {
       id: importRunId,
       validationId,
+      storeId: storeId ?? null,
       shopDomain: health.shop ?? '',
       bulkOperationId: bulkOpId,
-      status: finalState.status,
-      successCount,
-      errorCount,
-      rowResults: {
-        create: outcomes.map((o) => ({
-          id: uuidv4(),
-          rowNumber: o.rowNumber,
-          accepted: o.accepted,
-          shopifyCustomerId: o.shopifyCustomerId,
-          shopifyCode: o.shopifyCode,
-          shopifyField: o.shopifyField,
-          message: o.message,
-          wasFlaggedByValidator: flaggedRows.has(o.rowNumber),
-        })),
-      },
+      status: 'RUNNING',
+      successCount: 0,
+      errorCount: 0,
     },
   });
 
   return { ok: true, importRunId };
+}
+
+// ── orchestrator: reconcile (advances at most one step) ──────────────────────
+
+// lineToRow is recomputed deterministically from the run's original rows (same
+// asc ordering buildJsonl used), so it need not be persisted across requests.
+function lineToRowFromRows(rows: OriginalRowRecord[]): number[] {
+  return rows.map((r) => r.rowNumber);
+}
+
+// Called by the GET poll. If the run is already terminal it just returns current
+// feedback; otherwise it pokes Shopify once and, when the op is done, finalizes
+// the run. Finalization is guarded so concurrent polls can't double-write.
+export async function reconcileImportRun(
+  importRunId: string,
+): Promise<ImportFeedback | null> {
+  const run = await prisma.importRun.findUnique({ where: { id: importRunId } });
+  if (!run) return null;
+  if (TERMINAL_BULK_STATUSES.includes(run.status)) {
+    return getImportFeedback(importRunId);
+  }
+
+  const client = await getShopifyClient(run.storeId ?? undefined);
+  const state = await fetchBulkOperationState(client, run.bulkOperationId);
+
+  // Still queued/processing — leave it RUNNING.
+  if (!TERMINAL_BULK_STATUSES.includes(state.status)) {
+    return getImportFeedback(importRunId);
+  }
+
+  if (state.status === 'COMPLETED') {
+    await finalizeCompletedRun(importRunId, state.url);
+  } else {
+    // FAILED / CANCELED / EXPIRED — record the terminal status + reason.
+    const error = `Bulk operation ${state.status}${
+      state.errorCode ? ` (${state.errorCode})` : ''
+    }.`;
+    await prisma.importRun.updateMany({
+      where: { id: importRunId, status: 'RUNNING' },
+      data: { status: state.status, error },
+    });
+  }
+
+  return getImportFeedback(importRunId);
+}
+
+// Resume/show the most recent import for a validation run — used when reopening
+// a run from History. Reconciles so a still-RUNNING import is advanced (and a
+// COMPLETED one is returned without re-hitting Shopify).
+export async function reconcileLatestImportForValidation(
+  validationId: string,
+): Promise<ImportFeedback | null> {
+  const latest = await prisma.importRun.findFirst({
+    where: { validationId },
+    orderBy: { createdAt: 'desc' },
+    select: { id: true },
+  });
+  if (!latest) return null;
+  return reconcileImportRun(latest.id);
+}
+
+// Download + parse results and write rowResults, but only if THIS call wins the
+// RUNNING → COMPLETED transition (updateMany returns count: 0 if another poll
+// already finalized), keeping concurrent reconciles idempotent.
+async function finalizeCompletedRun(
+  importRunId: string,
+  resultUrl: string | null,
+): Promise<void> {
+  const run = await prisma.importRun.findUnique({
+    where: { id: importRunId },
+    include: {
+      validationRun: {
+        include: {
+          originalRows: { orderBy: { rowNumber: 'asc' } },
+          issues: { select: { rowNumber: true } },
+        },
+      },
+    },
+  });
+  if (!run || run.status !== 'RUNNING') return;
+
+  const lineToRow = lineToRowFromRows(run.validationRun.originalRows);
+  const outcomes = resultUrl ? await fetchAndParseResults(resultUrl, lineToRow) : [];
+
+  const flaggedRows = new Set(run.validationRun.issues.map((i) => i.rowNumber));
+  const successCount = outcomes.filter((o) => o.accepted).length;
+  const errorCount = outcomes.length - successCount;
+
+  await prisma.$transaction(async (tx) => {
+    const claimed = await tx.importRun.updateMany({
+      where: { id: importRunId, status: 'RUNNING' },
+      data: { status: 'COMPLETED', successCount, errorCount },
+    });
+    // Another concurrent reconcile already finalized this run — don't double-insert.
+    if (claimed.count === 0) return;
+
+    await tx.importRowResult.createMany({
+      data: outcomes.map((o) => ({
+        id: uuidv4(),
+        importRunId,
+        rowNumber: o.rowNumber,
+        accepted: o.accepted,
+        shopifyCustomerId: o.shopifyCustomerId,
+        shopifyCode: o.shopifyCode,
+        shopifyField: o.shopifyField,
+        message: o.message,
+        wasFlaggedByValidator: flaggedRows.has(o.rowNumber),
+      })),
+    });
+  });
 }
