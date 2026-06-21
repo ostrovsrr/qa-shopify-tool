@@ -2,7 +2,17 @@ import { v4 as uuidv4 } from 'uuid';
 import type { ImportBatchJob } from '@prisma/client';
 import prisma from '../db/prisma';
 import { getImportFeedback, ImportFeedback } from './importFeedback.service';
-import { getShopifyClient, ShopifyClient } from './shopifyClient';
+import {
+  cleanupCustomersByTag,
+  CleanupResult,
+  qaImportTagForRun,
+} from './shopifyCleanup.service';
+import {
+  getShopifyClient,
+  ShopifyAuthError,
+  ShopifyClient,
+  ShopifyConfigError,
+} from './shopifyClient';
 
 // Strict create so duplicates surface as TAKEN against the empty test store.
 // userErrors here is plain UserError (no `code`) — we synthesize a stable code
@@ -258,6 +268,11 @@ interface BulkOperationState {
 // Shopify bulk-op statuses that mean the operation has stopped advancing.
 const TERMINAL_BULK_STATUSES = ['COMPLETED', 'FAILED', 'CANCELED', 'EXPIRED'];
 
+// A batch job is failed once the reconcile poll has checked it this many times
+// while still non-terminal — bounds a stuck job (perma-RUNNING or repeatedly
+// erroring). At the client's ~3s poll cadence this is ~15 minutes of watching.
+const MAX_JOB_POLL_ATTEMPTS = 300;
+
 // Single-shot poll: the async model advances one step per reconcile call instead
 // of blocking an HTTP request in a multi-minute loop.
 async function fetchBulkOperationState(
@@ -473,6 +488,43 @@ export async function reconcileLatestImportForValidation(
   return reconcileImportRun(latest.id);
 }
 
+// Deletes the customers created by an import run, across every store it touched.
+// A batch spreads its customers over all its jobs' stores (all sharing the
+// qa-import-<importRunId> tag); a single run uses its own store (or the caller's
+// fallback). Results are aggregated into one CleanupResult the client renders
+// unchanged.
+export async function cleanupImportRunStores(
+  importRunId: string,
+  fallbackStoreId?: string,
+): Promise<CleanupResult> {
+  const run = await prisma.importRun.findUnique({
+    where: { id: importRunId },
+    include: { batchJobs: { select: { storeId: true } } },
+  });
+  const tag = qaImportTagForRun(importRunId);
+
+  const storeIds: (string | undefined)[] =
+    run && run.batchJobs.length > 0
+      ? [...new Set(run.batchJobs.map((j) => j.storeId ?? undefined))]
+      : [run?.storeId ?? fallbackStoreId];
+
+  const results: CleanupResult[] = [];
+  for (const storeId of storeIds) {
+    results.push(await cleanupCustomersByTag(storeId, tag));
+  }
+
+  if (results.length === 1) return results[0];
+  return {
+    storeId: undefined,
+    shop: results.map((r) => r.shop).join(', '),
+    tag,
+    found: results.reduce((n, r) => n + r.found, 0),
+    deleted: results.reduce((n, r) => n + r.deleted, 0),
+    failed: results.reduce((n, r) => n + r.failed, 0),
+    errors: results.flatMap((r) => r.errors),
+  };
+}
+
 // Download + parse results and write rowResults, but only if THIS call wins the
 // RUNNING → COMPLETED transition (updateMany returns count: 0 if another poll
 // already finalized), keeping concurrent reconciles idempotent.
@@ -659,20 +711,51 @@ async function reconcileBatchRun(
   for (const job of jobs) {
     if (TERMINAL_BULK_STATUSES.includes(job.status)) continue;
     if (!job.bulkOperationId) continue; // never started → already effectively failed
-    const client = await getShopifyClient(job.storeId ?? undefined);
-    const state = await fetchBulkOperationState(client, job.bulkOperationId);
-    if (!TERMINAL_BULK_STATUSES.includes(state.status)) continue;
 
-    if (state.status === 'COMPLETED') {
-      await finalizeCompletedJob(parentId, job, state.url);
-    } else {
+    // Bound stuck jobs: count this poll and fail the job once it's been checked
+    // too many times without reaching a terminal state.
+    const attempts = job.pollAttempts + 1;
+    if (attempts > MAX_JOB_POLL_ATTEMPTS) {
       await prisma.importBatchJob.updateMany({
         where: { id: job.id, status: 'RUNNING' },
         data: {
-          status: state.status,
-          error: `Bulk operation ${state.status}${state.errorCode ? ` (${state.errorCode})` : ''}.`,
+          status: 'FAILED',
+          error: `Timed out: still running after ${MAX_JOB_POLL_ATTEMPTS} status checks.`,
         },
       });
+      continue;
+    }
+    await prisma.importBatchJob.update({
+      where: { id: job.id },
+      data: { pollAttempts: attempts },
+    });
+
+    // Isolate each job: one store erroring must not abort the others' progress.
+    try {
+      const client = await getShopifyClient(job.storeId ?? undefined);
+      const state = await fetchBulkOperationState(client, job.bulkOperationId);
+      if (!TERMINAL_BULK_STATUSES.includes(state.status)) continue;
+
+      if (state.status === 'COMPLETED') {
+        await finalizeCompletedJob(parentId, job, state.url);
+      } else {
+        await prisma.importBatchJob.updateMany({
+          where: { id: job.id, status: 'RUNNING' },
+          data: {
+            status: state.status,
+            error: `Bulk operation ${state.status}${state.errorCode ? ` (${state.errorCode})` : ''}.`,
+          },
+        });
+      }
+    } catch (err) {
+      // Persistent errors (bad token/config) fail just this job so the batch can
+      // still finish; transient errors are left RUNNING to retry on the next poll.
+      if (err instanceof ShopifyAuthError || err instanceof ShopifyConfigError) {
+        await prisma.importBatchJob.updateMany({
+          where: { id: job.id, status: 'RUNNING' },
+          data: { status: 'FAILED', error: (err as Error).message },
+        });
+      }
     }
   }
 

@@ -59,6 +59,14 @@ export interface HealthReport {
 
 const REQUIRED_SCOPES = ['write_customers', 'read_customers'];
 
+// Transient HTTP statuses worth retrying — Shopify's gateway returns 502/503/504
+// under load and 429 when throttled; these are not real failures of our request.
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+const MAX_ATTEMPTS = 4;
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+// 0.5s, 1s, 2s exponential backoff.
+const backoffMs = (attempt: number): number => 500 * 2 ** (attempt - 1);
+
 export class ShopifyClient {
   private config: ShopifyStoreConfig;
   private lastThrottle: ThrottleStatus | null = null;
@@ -79,66 +87,99 @@ export class ShopifyClient {
     return `https://${this.config.shop}/admin/api/${this.config.apiVersion}/graphql.json`;
   }
 
-  /** Run a GraphQL operation. Throws ShopifyAuthError / ShopifyApiError. */
+  /** Run a GraphQL operation. Throws ShopifyAuthError / ShopifyApiError.
+   *  Transient gateway errors (429/5xx, network blips, non-JSON 5xx bodies) are
+   *  retried with exponential backoff so a brief Shopify hiccup mid-poll doesn't
+   *  fail the whole import. */
   async query<T = unknown>(
     query: string,
     variables: Record<string, unknown> = {},
   ): Promise<T> {
     const accessToken = await getAccessToken(this.config);
-    let res: Response;
-    try {
-      res = await fetch(this.endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': accessToken,
-        },
-        body: JSON.stringify({ query, variables }),
-      });
-    } catch (err) {
-      throw new ShopifyApiError(
-        `Could not reach Shopify at ${this.config.shop}: ${(err as Error).message}`,
-      );
-    }
+    let lastError: Error = new ShopifyApiError('Shopify request failed.');
 
-    if (res.status === 401 || res.status === 403) {
-      throw new ShopifyAuthError(
-        `Shopify rejected the Admin token (HTTP ${res.status}). Check the selected store credentials and that the app has write_customers + read_customers scopes.`,
-      );
-    }
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      let res: Response;
+      try {
+        res = await fetch(this.endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Shopify-Access-Token': accessToken,
+          },
+          body: JSON.stringify({ query, variables }),
+        });
+      } catch (err) {
+        // Network/transport failure — transient, retry.
+        lastError = new ShopifyApiError(
+          `Could not reach Shopify at ${this.config.shop}: ${(err as Error).message}`,
+        );
+        if (attempt < MAX_ATTEMPTS) {
+          await sleep(backoffMs(attempt));
+          continue;
+        }
+        throw lastError;
+      }
 
-    const text = await res.text();
-    let body: GraphQLResponse<T>;
-    try {
-      body = JSON.parse(text) as GraphQLResponse<T>;
-    } catch {
-      throw new ShopifyApiError(
-        `Shopify returned a non-JSON response (HTTP ${res.status}): ${text.slice(0, 200)}`,
-      );
-    }
-
-    if (body.extensions?.cost?.throttleStatus) {
-      this.lastThrottle = body.extensions.cost.throttleStatus;
-    }
-
-    if (body.errors && body.errors.length > 0) {
-      const access = body.errors.find(
-        (e) => e.extensions?.code === 'ACCESS_DENIED',
-      );
-      if (access) {
+      // Auth failures are never transient — surface immediately.
+      if (res.status === 401 || res.status === 403) {
         throw new ShopifyAuthError(
-          `Access denied: ${access.message}. The app is likely missing a required scope (write_customers / read_customers).`,
+          `Shopify rejected the Admin token (HTTP ${res.status}). Check the selected store credentials and that the app has write_customers + read_customers scopes.`,
         );
       }
-      throw new ShopifyApiError(
-        body.errors.map((e) => e.message).join('; '),
-      );
+
+      if (RETRYABLE_STATUS.has(res.status)) {
+        lastError = new ShopifyApiError(
+          `Shopify returned a transient HTTP ${res.status} from ${this.config.shop}.`,
+        );
+        if (attempt < MAX_ATTEMPTS) {
+          await sleep(backoffMs(attempt));
+          continue;
+        }
+        throw lastError;
+      }
+
+      const text = await res.text();
+      let body: GraphQLResponse<T>;
+      try {
+        body = JSON.parse(text) as GraphQLResponse<T>;
+      } catch {
+        lastError = new ShopifyApiError(
+          `Shopify returned a non-JSON response (HTTP ${res.status}): ${text.slice(0, 200)}`,
+        );
+        // A non-JSON 5xx is a gateway error page — retry; non-JSON 2xx/4xx is not.
+        if (res.status >= 500 && attempt < MAX_ATTEMPTS) {
+          await sleep(backoffMs(attempt));
+          continue;
+        }
+        throw lastError;
+      }
+
+      if (body.extensions?.cost?.throttleStatus) {
+        this.lastThrottle = body.extensions.cost.throttleStatus;
+      }
+
+      if (body.errors && body.errors.length > 0) {
+        const access = body.errors.find(
+          (e) => e.extensions?.code === 'ACCESS_DENIED',
+        );
+        if (access) {
+          throw new ShopifyAuthError(
+            `Access denied: ${access.message}. The app is likely missing a required scope (write_customers / read_customers).`,
+          );
+        }
+        throw new ShopifyApiError(
+          body.errors.map((e) => e.message).join('; '),
+        );
+      }
+
+      if (!body.data) {
+        throw new ShopifyApiError('Shopify response contained no data.');
+      }
+      return body.data;
     }
 
-    if (!body.data) {
-      throw new ShopifyApiError('Shopify response contained no data.');
-    }
-    return body.data;
+    throw lastError;
   }
 
   /** Smoke-test: confirm the token works and required scopes are granted. */

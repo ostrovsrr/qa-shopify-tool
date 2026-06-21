@@ -85,8 +85,10 @@ function RuleGapList({ gaps }: { gaps: RuleGap[] }) {
 export function ImportPanel({ result }: Props) {
   const [health, setHealth] = useState<ShopifyHealth | null>(null);
   const [stores, setStores] = useState<ShopifyStore[]>([]);
-  // Multi-select: 1 store → normal import; 2+ stores → parallel batch import.
-  // The first selected store is the "primary" that drives the health/stats panel.
+  // Two explicit flows: 'single' (pick one store) or 'parallel' (pick 2+ stores,
+  // split the file across them). The first selected store is the "primary" that
+  // drives the health/stats panel.
+  const [importMode, setImportMode] = useState<'single' | 'parallel'>('single');
   const [selectedStoreIds, setSelectedStoreIds] = useState<string[]>([]);
   const primaryStoreId = selectedStoreIds[0];
   const [stats, setStats] = useState<StoreCustomerStats | null>(null);
@@ -202,7 +204,7 @@ export function ImportPanel({ result }: Props) {
       // terminal state and refreshes store stats once finished. 2+ stores → the
       // rows are split and imported in parallel, then merged into one report.
       const data =
-        selectedStoreIds.length > 1
+        importMode === 'parallel'
           ? await runBatchImport(result.validationId, selectedStoreIds)
           : await runImport(result.validationId, selectedStoreIds[0]);
       setFeedback(data);
@@ -291,6 +293,32 @@ export function ImportPanel({ result }: Props) {
   const polling = !!feedback && !isTerminal(feedback.status);
   const completed = feedback?.status === 'COMPLETED';
   const failed = !!feedback && isTerminal(feedback.status) && !completed;
+  const busy = running || polling;
+  // Show the merged results (cards + report buttons) whenever the run is terminal
+  // and produced rows — including a FAILED batch where some stores still imported.
+  const showResults = !!feedback && isTerminal(feedback.status) && feedback.totalRows > 0;
+
+  // Single needs exactly one store; parallel needs at least two.
+  const canImport =
+    importMode === 'parallel' ? selectedStoreIds.length >= 2 : selectedStoreIds.length === 1;
+
+  const switchMode = (mode: 'single' | 'parallel') => {
+    setImportMode(mode);
+    setError('');
+    // Collapse to a single selection when leaving parallel mode.
+    if (mode === 'single') setSelectedStoreIds((prev) => prev.slice(0, 1));
+  };
+
+  const toggleStore = (storeId: string) => {
+    setSelectedStoreIds((prev) => {
+      if (importMode === 'single') return [storeId];
+      return prev.includes(storeId)
+        ? prev.filter((id) => id !== storeId)
+        : [...prev, storeId];
+    });
+    setFeedback(null);
+    setError('');
+  };
 
   return (
     <div className="import-panel">
@@ -305,14 +333,14 @@ export function ImportPanel({ result }: Props) {
         <button
           className="btn btn-primary"
           onClick={handleRun}
-          disabled={
-            running || polling || health?.ok === false || selectedStoreIds.length === 0
-          }
+          disabled={running || polling || health?.ok === false || !canImport}
         >
           {running || polling
             ? 'Importing… (running in Shopify)'
-            : selectedStoreIds.length > 1
-              ? `Import to ${selectedStoreIds.length} stores in parallel`
+            : importMode === 'parallel'
+              ? selectedStoreIds.length >= 2
+                ? `Import to ${selectedStoreIds.length} stores in parallel`
+                : 'Import in parallel'
               : 'Import to test store'}
         </button>
       </div>
@@ -320,24 +348,43 @@ export function ImportPanel({ result }: Props) {
       {stores.length > 0 && (
         <>
           {stores.length > 1 && (
-            <p className="muted store-selector-hint">
-              Select one store, or several to split the file and import them in parallel.
-            </p>
+            <div className="import-mode-toggle" role="tablist" aria-label="Import mode">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={importMode === 'single'}
+                className={`mode-tab ${importMode === 'single' ? 'active' : ''}`}
+                onClick={() => switchMode('single')}
+                disabled={running || polling}
+              >
+                Single store import
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={importMode === 'parallel'}
+                className={`mode-tab ${importMode === 'parallel' ? 'active' : ''}`}
+                onClick={() => switchMode('parallel')}
+                disabled={running || polling}
+              >
+                Parallel import
+              </button>
+            </div>
           )}
+
+          <p className="muted store-selector-hint">
+            {importMode === 'parallel'
+              ? 'Select two or more stores — the file is split evenly across them and the results merge into one report.'
+              : 'Select the test store to import into.'}
+          </p>
+
           <div className="store-selector">
             {stores.map((store) => (
               <button
                 key={store.id}
                 className={`store-chip ${selectedStoreIds.includes(store.id) ? 'active' : ''}`}
-                onClick={() => {
-                  setSelectedStoreIds((prev) =>
-                    prev.includes(store.id)
-                      ? prev.filter((id) => id !== store.id)
-                      : [...prev, store.id],
-                  );
-                  setFeedback(null);
-                  setError('');
-                }}
+                onClick={() => toggleStore(store.id)}
+                disabled={busy}
                 type="button"
               >
                 <span>{store.label}</span>
@@ -345,10 +392,12 @@ export function ImportPanel({ result }: Props) {
               </button>
             ))}
           </div>
-          {selectedStoreIds.length > 1 && (
+
+          {importMode === 'parallel' && (
             <p className="muted">
-              Parallel import across <strong>{selectedStoreIds.length}</strong> stores · rows
-              are split evenly and the results merge into one report.
+              {selectedStoreIds.length >= 2
+                ? `Parallel import across ${selectedStoreIds.length} stores selected.`
+                : 'Select at least 2 stores to import in parallel.'}
             </p>
           )}
         </>
@@ -418,7 +467,7 @@ export function ImportPanel({ result }: Props) {
         </div>
       )}
 
-      {completed && s && (
+      {showResults && s && (
         <div className="import-results">
           <div className="import-toolbar">
             <span className="muted">

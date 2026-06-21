@@ -821,6 +821,36 @@ body {
   flex-wrap: wrap;
   justify-content: flex-end;
 }
+/* Segmented control: single vs parallel import flow. */
+.import-mode-toggle {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  margin: 12px 0 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.mode-tab {
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: calc(var(--radius) - 2px);
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.mode-tab:hover:not(:disabled) { color: var(--text); }
+.mode-tab.active {
+  background: var(--surface);
+  color: var(--primary);
+  box-shadow: var(--shadow);
+}
+.mode-tab:disabled { cursor: default; opacity: .6; }
+.store-selector-hint { margin: 4px 0 0; }
+
 .store-selector {
   display: flex;
   flex-wrap: wrap;
@@ -853,6 +883,10 @@ body {
 .store-chip.active {
   border-color: var(--primary);
   background: var(--info-bg);
+}
+.store-chip:disabled {
+  cursor: default;
+  opacity: .55;
 }
 .store-status {
   margin: 8px 0 12px;

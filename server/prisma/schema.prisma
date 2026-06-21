@@ -75,6 +75,9 @@ model ImportBatchJob {
   rowCount        Int      @default(0)
   successCount    Int      @default(0)
   errorCount      Int      @default(0)
+  // Times the reconcile poll has checked this job while non-terminal; a stuck job
+  // (perma-RUNNING or repeatedly erroring) is failed once it exceeds the max.
+  pollAttempts    Int      @default(0)
   createdAt       DateTime @default(now())
 
   importRun ImportRun @relation(fields: [importRunId], references: [id], onDelete: Cascade)

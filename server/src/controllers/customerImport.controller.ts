@@ -7,10 +7,7 @@ import {
 import { generateShopifyVerificationReport } from '../reports/shopifyVerificationReport';
 import { generateValidatorFeedbackMarkdown } from '../reports/validatorFeedbackReport';
 import {
-  cleanupCustomersByTag,
-  qaImportTagForRun,
-} from '../services/shopifyCleanup.service';
-import {
+  cleanupImportRunStores,
   reconcileImportRun,
   reconcileLatestImportForValidation,
   startBatchImport,
@@ -251,12 +248,11 @@ export async function cleanupImportRunHandler(
       return;
     }
 
-    const result = await cleanupCustomersByTag(
-      bodyParsed.data.storeId,
-      qaImportTagForRun(idParsed.data),
-    );
+    // Batch-aware: deletes across every store the import touched, not just one.
+    const result = await cleanupImportRunStores(idParsed.data, bodyParsed.data.storeId);
     res.json(result);
   } catch (err) {
+    if (handleShopifyError(err, res)) return;
     next(err);
   }
 }
