@@ -144,6 +144,19 @@ export async function fetchImportFeedback(importRunId: string): Promise<ImportFe
   return data;
 }
 
+// Parallel batch import: split the run across several stores. Returns the parent
+// ImportFeedback (status RUNNING); poll it like a normal import until terminal.
+export async function runBatchImport(
+  validationId: string,
+  storeIds: string[],
+): Promise<ImportFeedback> {
+  const { data } = await api.post<ImportFeedback>(
+    `/customer-import/${validationId}/run-batch`,
+    { storeIds },
+  );
+  return data;
+}
+
 // Latest import for a validation run, or null when none exists (404). Used to
 // restore/resume an import when a run is reopened from History.
 export async function fetchLatestImportForValidation(

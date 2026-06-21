@@ -35,10 +35,13 @@ model ImportRun {
   id              String            @id @default(uuid())
   validationId    String
   // storeId lets a later reconcile rebuild the Shopify client (getShopifyClient(storeId))
-  // when finalizing an async run; null falls back to the default store.
+  // when finalizing an async run; null falls back to the default store. Also null for
+  // a batch parent run, whose stores live on its ImportBatchJob children.
   storeId         String?
   shopDomain      String
-  bulkOperationId String
+  // Null for a batch parent (the bulk ops live on its ImportBatchJob children);
+  // set for a normal single-store run.
+  bulkOperationId String?
   // RUNNING (start persisted, bulk op queued) → COMPLETED | FAILED | CANCELED | EXPIRED
   status          String            @default("RUNNING")
   // Failure reason for the terminal error states; null while RUNNING/COMPLETED.
@@ -49,9 +52,35 @@ model ImportRun {
 
   validationRun ValidationRun     @relation(fields: [validationId], references: [id], onDelete: Cascade)
   rowResults    ImportRowResult[]
+  batchJobs     ImportBatchJob[]
 
   @@index([validationId])
   @@map("import_runs")
+}
+
+// One per-store bulk operation within a parallel batch import. The parent
+// ImportRun owns the merged rowResults; each job tracks its own store's bulk op
+// and the contiguous row slice it imported (recomputed from batchIndex/batchCount).
+model ImportBatchJob {
+  id              String   @id @default(uuid())
+  importRunId     String
+  storeId         String?
+  shopDomain      String
+  batchIndex      Int
+  batchCount      Int
+  // Null when the job failed to even start (e.g. store unhealthy at launch).
+  bulkOperationId String?
+  status          String   @default("RUNNING")
+  error           String?
+  rowCount        Int      @default(0)
+  successCount    Int      @default(0)
+  errorCount      Int      @default(0)
+  createdAt       DateTime @default(now())
+
+  importRun ImportRun @relation(fields: [importRunId], references: [id], onDelete: Cascade)
+
+  @@index([importRunId])
+  @@map("import_batch_jobs")
 }
 
 model ImportRowResult {
