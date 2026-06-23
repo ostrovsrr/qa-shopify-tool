@@ -3,6 +3,17 @@ import type { ImportBatchJob } from '@prisma/client';
 import prisma from '../db/prisma';
 import { getImportFeedback, ImportFeedback } from './importFeedback.service';
 import {
+  BuiltJsonl,
+  BulkResultLine,
+  fetchAndParseBulkResults,
+  fetchBulkOperationState,
+  MAX_JOB_POLL_ATTEMPTS,
+  runBulkMutation,
+  splitIntoBatches,
+  stagedUpload,
+  TERMINAL_BULK_STATUSES,
+} from './shopifyBulk';
+import {
   cleanupCustomersByTag,
   CleanupResult,
   qaImportTagForRun,
@@ -10,7 +21,6 @@ import {
 import {
   getShopifyClient,
   ShopifyAuthError,
-  ShopifyClient,
   ShopifyConfigError,
 } from './shopifyClient';
 
@@ -118,27 +128,23 @@ interface OriginalRowRecord {
   data: unknown;
 }
 
-interface BuiltJsonl {
-  jsonl: string;
-  /** input line index (0-based) → CSV rowNumber */
-  lineToRow: number[];
-}
-
+/** Build the JSONL bulk payload (one `{"input": CustomerInput}` line per row)
+ *  plus the per-line refs (CSV row numbers) the engine maps results back to. */
 function buildJsonl(
   rows: OriginalRowRecord[],
   mapping: Record<string, string> | null | undefined,
   importRunId: string,
-): BuiltJsonl {
+): BuiltJsonl<number> {
   const lines: string[] = [];
-  const lineToRow: number[] = [];
+  const lineRefs: number[] = [];
   for (const row of rows) {
     const original = (row.data ?? {}) as Record<string, string>;
     const mapped = mapRecord(original, mapping);
     const input = buildCustomerInput(mapped, importRunId);
     lines.push(JSON.stringify({ input }));
-    lineToRow.push(row.rowNumber);
+    lineRefs.push(row.rowNumber);
   }
-  return { jsonl: lines.join('\n'), lineToRow };
+  return { jsonl: lines.join('\n'), lineRefs };
 }
 
 // ── synthesized error code (no `code` on customerCreate userErrors) ──────────
@@ -161,207 +167,57 @@ function lastFieldSegment(field: unknown): string | null {
   return typeof last === 'string' ? last : null;
 }
 
-// ── staged upload → run → poll ───────────────────────────────────────────────
+// ── result-line parser for the generic engine ────────────────────────────────
 
-interface StagedTarget {
-  url: string;
-  resourceUrl: string;
-  parameters: { name: string; value: string }[];
-}
+/** Parse one customerCreate result line into a per-row outcome. customerCreate
+ *  userErrors carry no `code`, so we synthesize a stable one from the message. */
+function parseCustomerCreateLine(
+  line: BulkResultLine<number>,
+): ImportRowOutcome {
+  const rowNumber = line.ref ?? -1;
 
-async function stagedUpload(
-  client: ShopifyClient,
-  jsonl: string,
-): Promise<string> {
-  const data = await client.query<{
-    stagedUploadsCreate: {
-      stagedTargets: StagedTarget[];
-      userErrors: { field: string[]; message: string }[];
-    };
-  }>(
-    `mutation stagedUploadsCreate($input: [StagedUploadInput!]!) {
-      stagedUploadsCreate(input: $input) {
-        stagedTargets { url resourceUrl parameters { name value } }
-        userErrors { field message }
+  const payload = line.data.customerCreate as
+    | {
+        customer: { id: string } | null;
+        userErrors: { field: unknown; message: string }[];
       }
-    }`,
-    {
-      input: [
-        {
-          resource: 'BULK_MUTATION_VARIABLES',
-          filename: 'bulk_customers.jsonl',
-          mimeType: 'text/jsonl',
-          httpMethod: 'POST',
-        },
-      ],
-    },
-  );
+    | undefined;
 
-  const errs = data.stagedUploadsCreate.userErrors;
-  if (errs.length > 0) {
-    throw new Error(`stagedUploadsCreate failed: ${errs.map((e) => e.message).join('; ')}`);
-  }
-  const target = data.stagedUploadsCreate.stagedTargets[0];
-  if (!target) throw new Error('stagedUploadsCreate returned no target.');
-
-  // POST the file to the staged target (Google Cloud Storage). The provided
-  // form parameters MUST be appended before the file field, and the file last.
-  const form = new FormData();
-  for (const p of target.parameters) form.append(p.name, p.value);
-  form.append('file', new Blob([jsonl], { type: 'text/jsonl' }), 'bulk_customers.jsonl');
-
-  const uploadRes = await fetch(target.url, { method: 'POST', body: form });
-  if (uploadRes.status >= 300) {
-    const body = await uploadRes.text();
-    throw new Error(`Staged upload POST failed (HTTP ${uploadRes.status}): ${body.slice(0, 300)}`);
-  }
-
-  // bulkOperationRunMutation wants the "key" parameter value as stagedUploadPath.
-  const key = target.parameters.find((p) => p.name === 'key')?.value;
-  if (!key) throw new Error('Staged upload response missing "key" parameter.');
-  return key;
-}
-
-async function runBulkMutation(
-  client: ShopifyClient,
-  stagedUploadPath: string,
-): Promise<string> {
-  const data = await client.query<{
-    bulkOperationRunMutation: {
-      bulkOperation: { id: string; status: string } | null;
-      userErrors: { field: string[]; message: string; code: string | null }[];
-    };
-  }>(
-    `mutation bulkRun($mutation: String!, $path: String!) {
-      bulkOperationRunMutation(mutation: $mutation, stagedUploadPath: $path) {
-        bulkOperation { id status }
-        userErrors { field message code }
-      }
-    }`,
-    { mutation: CUSTOMER_CREATE_MUTATION, path: stagedUploadPath },
-  );
-
-  const errs = data.bulkOperationRunMutation.userErrors;
-  if (errs.length > 0) {
-    const inProgress = errs.find((e) => /already in progress|in progress/i.test(e.message));
-    if (inProgress) {
-      throw new Error(
-        'Another bulk operation is already running on this shop. Only one runs at a time — wait for it to finish and retry.',
-      );
-    }
-    throw new Error(`bulkOperationRunMutation failed: ${errs.map((e) => e.message).join('; ')}`);
-  }
-  const op = data.bulkOperationRunMutation.bulkOperation;
-  if (!op) throw new Error('bulkOperationRunMutation returned no operation.');
-  return op.id;
-}
-
-interface BulkOperationState {
-  id: string;
-  status: string;
-  errorCode: string | null;
-  objectCount: string | null;
-  url: string | null;
-  partialDataUrl: string | null;
-}
-
-// Shopify bulk-op statuses that mean the operation has stopped advancing.
-const TERMINAL_BULK_STATUSES = ['COMPLETED', 'FAILED', 'CANCELED', 'EXPIRED'];
-
-// A batch job is failed once the reconcile poll has checked it this many times
-// while still non-terminal — bounds a stuck job (perma-RUNNING or repeatedly
-// erroring). At the client's ~3s poll cadence this is ~15 minutes of watching.
-const MAX_JOB_POLL_ATTEMPTS = 300;
-
-// Single-shot poll: the async model advances one step per reconcile call instead
-// of blocking an HTTP request in a multi-minute loop.
-async function fetchBulkOperationState(
-  client: ShopifyClient,
-  id: string,
-): Promise<BulkOperationState> {
-  const data = await client.query<{ node: BulkOperationState | null }>(
-    `query pollBulk($id: ID!) {
-      node(id: $id) {
-        ... on BulkOperation { id status errorCode objectCount url partialDataUrl }
-      }
-    }`,
-    { id },
-  );
-  if (!data.node) throw new Error(`Bulk operation ${id} not found while polling.`);
-  return data.node;
-}
-
-async function fetchAndParseResults(
-  url: string,
-  lineToRow: number[],
-): Promise<ImportRowOutcome[]> {
-  const res = await fetch(url);
-  if (res.status >= 300) {
-    throw new Error(`Failed to download bulk results (HTTP ${res.status}).`);
-  }
-  const text = await res.text();
-  const parsed = text
-    .split('\n')
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .map((l) => JSON.parse(l) as Record<string, unknown>);
-
-  if (parsed.length === 0) return [];
-
-  // __lineNumber may be 0- or 1-based depending on context; detect from the
-  // minimum so the row mapping is robust either way.
-  const lineNumbers = parsed.map((p) => Number(p.__lineNumber));
-  const base = Math.min(...lineNumbers);
-
-  return parsed.map((line) => {
-    const idx = Number(line.__lineNumber) - base;
-    const rowNumber = lineToRow[idx] ?? -1;
-
-    // Payload may be at line.data.customerCreate or line.customerCreate.
-    const dataObj = (line.data ?? line) as Record<string, unknown>;
-    const payload = dataObj.customerCreate as
-      | {
-          customer: { id: string } | null;
-          userErrors: { field: unknown; message: string }[];
-        }
-      | undefined;
-
-    if (!payload) {
-      // Top-level error line (e.g. malformed variables) — treat as rejected.
-      const message =
-        typeof line.message === 'string' ? line.message : 'Unknown bulk error.';
-      return {
-        rowNumber,
-        accepted: false,
-        shopifyCustomerId: null,
-        shopifyField: null,
-        shopifyCode: synthesizeCode(message),
-        message,
-      };
-    }
-
-    if (payload.userErrors.length === 0 && payload.customer) {
-      return {
-        rowNumber,
-        accepted: true,
-        shopifyCustomerId: payload.customer.id,
-        shopifyField: null,
-        shopifyCode: null,
-        message: null,
-      };
-    }
-
-    const first = payload.userErrors[0];
-    const message = first?.message ?? 'Rejected by Shopify.';
+  if (!payload) {
+    // Top-level error line (e.g. malformed variables) — treat as rejected.
+    const message =
+      typeof line.raw.message === 'string' ? line.raw.message : 'Unknown bulk error.';
     return {
       rowNumber,
       accepted: false,
-      shopifyCustomerId: payload.customer?.id ?? null,
-      shopifyField: lastFieldSegment(first?.field),
+      shopifyCustomerId: null,
+      shopifyField: null,
       shopifyCode: synthesizeCode(message),
       message,
     };
-  });
+  }
+
+  if (payload.userErrors.length === 0 && payload.customer) {
+    return {
+      rowNumber,
+      accepted: true,
+      shopifyCustomerId: payload.customer.id,
+      shopifyField: null,
+      shopifyCode: null,
+      message: null,
+    };
+  }
+
+  const first = payload.userErrors[0];
+  const message = first?.message ?? 'Rejected by Shopify.';
+  return {
+    rowNumber,
+    accepted: false,
+    shopifyCustomerId: payload.customer?.id ?? null,
+    shopifyField: lastFieldSegment(first?.field),
+    shopifyCode: synthesizeCode(message),
+    message,
+  };
 }
 
 // ── orchestrator: start (fast) ───────────────────────────────────────────────
@@ -387,19 +243,19 @@ export async function startCustomerImport(
   }
 
   const importRunId = uuidv4();
-  const { jsonl, lineToRow } = buildJsonl(
+  const { jsonl, lineRefs } = buildJsonl(
     run.originalRows,
     run.columnMapping as Record<string, string> | null,
     importRunId,
   );
 
-  if (lineToRow.length === 0) {
+  if (lineRefs.length === 0) {
     return { ok: false, error: 'This validation run has no rows to import.' };
   }
 
   // Queue the op (seconds-scale); do NOT wait for it to finish here.
-  const stagedPath = await stagedUpload(client, jsonl);
-  const bulkOpId = await runBulkMutation(client, stagedPath);
+  const stagedPath = await stagedUpload(client, jsonl, 'bulk_customers.jsonl');
+  const bulkOpId = await runBulkMutation(client, CUSTOMER_CREATE_MUTATION, stagedPath);
 
   await prisma.importRun.create({
     data: {
@@ -545,8 +401,10 @@ async function finalizeCompletedRun(
   });
   if (!run || run.status !== 'RUNNING') return;
 
-  const lineToRow = lineToRowFromRows(run.validationRun.originalRows);
-  const outcomes = resultUrl ? await fetchAndParseResults(resultUrl, lineToRow) : [];
+  const lineRefs = lineToRowFromRows(run.validationRun.originalRows);
+  const outcomes = resultUrl
+    ? await fetchAndParseBulkResults(resultUrl, lineRefs, parseCustomerCreateLine)
+    : [];
 
   const flaggedRows = new Set(run.validationRun.issues.map((i) => i.rowNumber));
   const successCount = outcomes.filter((o) => o.accepted).length;
@@ -578,23 +436,6 @@ async function finalizeCompletedRun(
 }
 
 // ── parallel batch import across multiple stores ─────────────────────────────
-
-// Contiguous, balanced split (earlier batches get the +1 when it doesn't divide
-// evenly). Deterministic given the asc-ordered rows + n, so a later reconcile can
-// recompute any job's exact slice from (batchIndex, batchCount) without storing it.
-function splitIntoBatches<T>(items: T[], n: number): T[][] {
-  const batches: T[][] = Array.from({ length: Math.max(n, 0) }, () => []);
-  if (n <= 0) return batches;
-  const base = Math.floor(items.length / n);
-  const remainder = items.length % n;
-  let idx = 0;
-  for (let i = 0; i < n; i++) {
-    const size = base + (i < remainder ? 1 : 0);
-    batches[i] = items.slice(idx, idx + size);
-    idx += size;
-  }
-  return batches;
-}
 
 // Splits the run's rows across the selected stores and kicks off one bulk op per
 // store in parallel. Returns immediately with a parent ImportRun id; the per-store
@@ -639,8 +480,8 @@ export async function startBatchImport(
           };
         }
         const { jsonl } = buildJsonl(batch, mapping, parentId);
-        const stagedPath = await stagedUpload(client, jsonl);
-        const bulkOpId = await runBulkMutation(client, stagedPath);
+        const stagedPath = await stagedUpload(client, jsonl, 'bulk_customers.jsonl');
+        const bulkOpId = await runBulkMutation(client, CUSTOMER_CREATE_MUTATION, stagedPath);
         return {
           storeId,
           index,
@@ -822,8 +663,10 @@ async function finalizeCompletedJob(
   // Same split as startBatchImport → this job's exact rows → lineToRow.
   const slice =
     splitIntoBatches(parent.validationRun.originalRows, job.batchCount)[job.batchIndex] ?? [];
-  const lineToRow = slice.map((r) => r.rowNumber);
-  const outcomes = resultUrl ? await fetchAndParseResults(resultUrl, lineToRow) : [];
+  const lineRefs = slice.map((r) => r.rowNumber);
+  const outcomes = resultUrl
+    ? await fetchAndParseBulkResults(resultUrl, lineRefs, parseCustomerCreateLine)
+    : [];
 
   const flaggedRows = new Set(parent.validationRun.issues.map((i) => i.rowNumber));
   const successCount = outcomes.filter((o) => o.accepted).length;

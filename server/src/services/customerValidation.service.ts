@@ -167,11 +167,25 @@ export async function getValidationHistory(): Promise<ValidationHistoryItem[]> {
       comments: true,
       createdAt: true,
       updatedAt: true,
+      // Most recent import for this run, so History can flag "imported" + outcome.
+      importRuns: {
+        orderBy: { createdAt: 'desc' },
+        take: 1,
+        select: {
+          status: true,
+          successCount: true,
+          errorCount: true,
+          createdAt: true,
+        },
+      },
     },
     orderBy: { createdAt: 'desc' },
     take: 50,
   });
-  return runs;
+  return runs.map(({ importRuns, ...run }) => ({
+    ...run,
+    lastImport: importRuns[0] ?? null,
+  }));
 }
 
 export async function updateValidationMetadata(
@@ -199,9 +213,20 @@ export async function updateValidationMetadata(
         comments: true,
         createdAt: true,
         updatedAt: true,
+        importRuns: {
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+          select: {
+            status: true,
+            successCount: true,
+            errorCount: true,
+            createdAt: true,
+          },
+        },
       },
     });
-    return run;
+    const { importRuns, ...rest } = run;
+    return { ...rest, lastImport: importRuns[0] ?? null };
   } catch {
     return null;
   }

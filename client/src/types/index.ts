@@ -20,6 +20,13 @@ export interface ValidationResult {
   issues: ValidationIssue[];
 }
 
+export interface ValidationHistoryImport {
+  status: string;
+  successCount: number;
+  errorCount: number;
+  createdAt: string;
+}
+
 export interface ValidationHistoryItem {
   id: string;
   fileName: string;
@@ -33,6 +40,8 @@ export interface ValidationHistoryItem {
   comments: string | null;
   createdAt: string;
   updatedAt: string;
+  // Most recent Shopify import for this run; null if never imported.
+  lastImport: ValidationHistoryImport | null;
 }
 
 export interface UpdateMetadataPayload {
@@ -98,6 +107,14 @@ export interface BucketRow {
   message: string | null;
 }
 
+export interface RejectedRow {
+  rowNumber: number;
+  shopifyField: string | null;
+  shopifyCode: string | null;
+  message: string | null;
+  flaggedByValidator: boolean;
+}
+
 export interface FourBucketSummary {
   missingRule: { count: number; rows: BucketRow[] };
   falsePositive: { count: number; rows: BucketRow[] };
@@ -135,5 +152,6 @@ export interface ImportFeedback {
   createdAt: string;
   summary: FourBucketSummary;
   ruleGaps: RuleGap[];
+  rejectedRows: RejectedRow[];
   perStore: PerStoreResult[];
 }

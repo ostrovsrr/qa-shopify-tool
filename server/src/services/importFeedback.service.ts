@@ -26,6 +26,17 @@ export interface BucketRow {
   message: string | null;
 }
 
+// One Shopify-rejected row, with enough detail to explain WHY it was rejected.
+// flaggedByValidator distinguishes a row our rules already caught (rule working)
+// from a row Shopify rejected that we missed (a rule gap).
+export interface RejectedRow {
+  rowNumber: number;
+  shopifyField: string | null;
+  shopifyCode: string | null;
+  message: string | null;
+  flaggedByValidator: boolean;
+}
+
 export interface FourBucketSummary {
   // rejected by Shopify but NOT flagged by our validator → missing rule (highest value)
   missingRule: { count: number; rows: BucketRow[] };
@@ -69,12 +80,18 @@ export interface ImportFeedback {
   createdAt: Date;
   summary: FourBucketSummary;
   ruleGaps: RuleGap[];
+  // Every row Shopify rejected (capped at REJECTED_LIMIT), ordered by row number,
+  // with field/code/message so the UI can show what was rejected and why.
+  rejectedRows: RejectedRow[];
   // Per-store accepted/rejected split (one entry per store for a batch; a single
   // entry for a single-store run).
   perStore: PerStoreResult[];
 }
 
 const SAMPLE_LIMIT = 25;
+// Rejections are the highest-value detail, so surface more of them than the
+// per-bucket samples before truncating (UI shows the overflow count).
+const REJECTED_LIMIT = 200;
 
 function aggregateRuleGaps(
   rows: { rowNumber: number; shopifyField: string | null; shopifyCode: string | null; message: string | null }[],
@@ -132,6 +149,20 @@ export async function getImportFeedback(
     message: r.message,
   });
 
+  // Every rejection (both flagged and missed), ordered by row number, for the
+  // "what was rejected and why" table.
+  const rejectedRows: RejectedRow[] = run.rowResults
+    .filter((r) => !r.accepted)
+    .sort((a, b) => a.rowNumber - b.rowNumber)
+    .slice(0, REJECTED_LIMIT)
+    .map((r) => ({
+      rowNumber: r.rowNumber,
+      shopifyField: r.shopifyField,
+      shopifyCode: r.shopifyCode,
+      message: r.message,
+      flaggedByValidator: r.wasFlaggedByValidator,
+    }));
+
   // Per-store split. Label each store via its batch job; fall back to the run's
   // own shopDomain for the single/legacy (null storeId) group.
   const shopByStore = new Map<string, string>();
@@ -182,6 +213,7 @@ export async function getImportFeedback(
       confirmedClean: { count: confirmedClean },
     },
     ruleGaps: aggregateRuleGaps(missingRows),
+    rejectedRows,
     perStore,
   };
 }

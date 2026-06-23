@@ -8,15 +8,12 @@ import {
   fetchLatestImportForValidation,
   fetchShopifyStores,
   fetchStoreCustomerStats,
-  fetchValidatorFeedbackMarkdown,
   getImportReportDownloadUrl,
-  getValidatorFeedbackReportUrl,
   runBatchImport,
   runImport,
 } from '../api/validationApi';
 import {
   ImportFeedback,
-  RuleGap,
   ShopifyHealth,
   ShopifyStore,
   StoreCustomerStats,
@@ -50,45 +47,11 @@ function batchSizeFor(index: number, total: number, n: number): number {
   return base + (index < remainder ? 1 : 0);
 }
 
-function RuleGapList({ gaps }: { gaps: RuleGap[] }) {
-  if (gaps.length === 0) {
-    return <p className="muted">No rule gaps — every Shopify rejection was already flagged.</p>;
-  }
-  return (
-    <table className="issues-table">
-      <thead>
-        <tr>
-          <th>Field</th>
-          <th>Code</th>
-          <th>Rows</th>
-          <th>Existing validator</th>
-          <th>Sample message</th>
-        </tr>
-      </thead>
-      <tbody>
-        {gaps.map((g) => (
-          <tr key={`${g.shopifyField}|${g.shopifyCode}`}>
-            <td>{g.shopifyField ?? '—'}</td>
-            <td>{g.shopifyCode ?? '—'}</td>
-            <td>{g.count}</td>
-            <td>
-              {g.existingValidator ? (
-                <span title="A validator exists but missed these rows — likely a rule gap/bug.">
-                  {g.existingValidator} ⚠
-                </span>
-              ) : (
-                <span className="badge-missing" title="No validator covers this — candidate new rule.">
-                  none — new rule
-                </span>
-              )}
-            </td>
-            <td className="cell-message">{g.sampleMessages[0] ?? '—'}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
-}
+// RuleGapList renders the per-run rule-gap backlog. Hidden from the UI for now
+// (see the commented section in the results panel); restore the `RuleGap` import
+// and the JSX below if we bring the backlog table back.
+//
+// function RuleGapList({ gaps }: { gaps: RuleGap[] }) { ... }
 
 export function ImportPanel({ result }: Props) {
   const [stores, setStores] = useState<ShopifyStore[]>([]);
@@ -303,23 +266,27 @@ export function ImportPanel({ result }: Props) {
     window.open(getImportReportDownloadUrl(feedback.importRunId), '_blank');
   };
 
-  const handleDownloadFeedbackReport = () => {
-    if (!feedback) return;
-    window.open(getValidatorFeedbackReportUrl(feedback.importRunId), '_blank');
-  };
-
-  const handleCopyForClaude = async () => {
-    if (!feedback) return;
-    setError('');
-    setNotice('');
-    try {
-      const markdown = await fetchValidatorFeedbackMarkdown(feedback.importRunId);
-      await navigator.clipboard.writeText(markdown);
-      setNotice('Copied — paste into Claude to fix the validators.');
-    } catch (err) {
-      setError(errMessage(err, 'Could not copy the validator report.'));
-    }
-  };
+  // Validator-feedback exports are hidden from the UI for now. Restore these
+  // (and the toolbar buttons) along with the getValidatorFeedbackReportUrl /
+  // fetchValidatorFeedbackMarkdown imports to bring them back.
+  //
+  // const handleDownloadFeedbackReport = () => {
+  //   if (!feedback) return;
+  //   window.open(getValidatorFeedbackReportUrl(feedback.importRunId), '_blank');
+  // };
+  //
+  // const handleCopyForClaude = async () => {
+  //   if (!feedback) return;
+  //   setError('');
+  //   setNotice('');
+  //   try {
+  //     const markdown = await fetchValidatorFeedbackMarkdown(feedback.importRunId);
+  //     await navigator.clipboard.writeText(markdown);
+  //     setNotice('Copied — paste into Claude to fix the validators.');
+  //   } catch (err) {
+  //     setError(errMessage(err, 'Could not copy the validator report.'));
+  //   }
+  // };
 
   const refreshStoreStats = async (storeId: string) => {
     const st = await fetchStoreCustomerStats(storeId).catch(() => null);
@@ -598,7 +565,20 @@ export function ImportPanel({ result }: Props) {
       )}
 
       {error && <div className="error-banner">{error}</div>}
-      {notice && <div className="success-banner">{notice}</div>}
+      {/* Transient status (cleanup results etc.) — kept lighter than the success
+          headline so it doesn't compete with the run's hero number. Dismissible. */}
+      {notice && (
+        <div className="inline-notice">
+          <span>{notice}</span>
+          <button
+            className="inline-notice-close"
+            onClick={() => setNotice('')}
+            aria-label="Dismiss"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {failed && (
         <div className="error-banner">
@@ -632,13 +612,21 @@ export function ImportPanel({ result }: Props) {
               {feedback.totalRows}
             </span>
             <div className="toolbar-actions">
+              {/* Validator-feedback exports hidden for now — restore the buttons
+                  plus handleCopyForClaude/handleDownloadFeedbackReport if needed.
               <button className="btn btn-primary btn-sm" onClick={handleCopyForClaude}>
                 Copy for Claude
               </button>
               <button className="btn btn-outline btn-sm" onClick={handleDownloadFeedbackReport}>
                 Download .md
               </button>
-              <button className="btn btn-outline btn-sm" onClick={handleDownloadReport}>
+              */}
+              <button className="btn btn-outline" onClick={handleDownloadReport}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
                 Download verification report
               </button>
               <button
@@ -648,30 +636,91 @@ export function ImportPanel({ result }: Props) {
               >
                 {cleaningRun ? 'Cleaning...' : 'Clean this import'}
               </button>
-              <button className="btn btn-outline btn-sm" onClick={handleRefresh}>
-                Refresh
-              </button>
+              {/* Refresh removed here: the run is already terminal in this view,
+                  so re-fetching can't change the result. */}
             </div>
           </div>
 
+          {/* Prominent outcome headline — the number that matters most. */}
+          <div
+            className={`import-headline ${
+              feedback.errorCount > 0 ? 'import-headline-rejects' : 'import-headline-clean'
+            }`}
+          >
+            <span className="import-headline-icon" aria-hidden="true">
+              {feedback.errorCount > 0 ? '⚠' : '✓'}
+            </span>
+            <div className="import-headline-counts">
+              <span className="import-headline-numbers">
+                <strong className="import-num-accepted">{feedback.successCount}</strong> accepted
+                {' · '}
+                <strong className="import-num-rejected">{feedback.errorCount}</strong> rejected
+              </span>
+              <span className="import-headline-sub">
+                of {feedback.totalRows} row(s) imported to {feedback.shopDomain}
+              </span>
+            </div>
+          </div>
+
+          {/* Buckets are gray at 0 (color only when > 0) so a clean run doesn't
+              read as alarming, and grouped so the meaning is obvious. */}
+          <h3 className="subsection-title">Rejections</h3>
           <div className="cards-grid">
-            <div className="card card-error">
+            <div className={`card ${s.missingRule.count > 0 ? 'card-error' : 'card-zero'}`}>
               <span className="card-label">Missing rule (rejected, not flagged)</span>
               <span className="card-value">{s.missingRule.count}</span>
             </div>
-            <div className="card card-warning">
+            <div className={`card ${s.confirmedReject.count > 0 ? 'card-neutral' : 'card-zero'}`}>
+              <span className="card-label">Confirmed reject (rejected &amp; flagged)</span>
+              <span className="card-value">{s.confirmedReject.count}</span>
+            </div>
+          </div>
+
+          <h3 className="subsection-title">Validator accuracy</h3>
+          <div className="cards-grid">
+            <div className={`card ${s.falsePositive.count > 0 ? 'card-warning' : 'card-zero'}`}>
               <span className="card-label">False positive (flagged, accepted)</span>
               <span className="card-value">{s.falsePositive.count}</span>
             </div>
-            <div className="card card-neutral">
-              <span className="card-label">Confirmed reject</span>
-              <span className="card-value">{s.confirmedReject.count}</span>
-            </div>
-            <div className="card card-info">
-              <span className="card-label">Confirmed clean</span>
+            <div className={`card ${s.confirmedClean.count > 0 ? 'card-info' : 'card-zero'}`}>
+              <span className="card-label">Confirmed clean (accepted, not flagged)</span>
               <span className="card-value">{s.confirmedClean.count}</span>
             </div>
           </div>
+
+          {/* Detail path for the false-positive (over-strict) count, so the
+              number isn't a dead end. Collapsed by default. */}
+          {s.falsePositive.count > 0 && (
+            <details className="bucket-details">
+              <summary>
+                Show {s.falsePositive.count} over-strict row(s) — we flagged, Shopify
+                accepted
+              </summary>
+              <table className="issues-table">
+                <thead>
+                  <tr>
+                    <th>Row</th>
+                    <th>Field</th>
+                    <th>Our flag</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {s.falsePositive.rows.map((r) => (
+                    <tr key={r.rowNumber}>
+                      <td>{r.rowNumber}</td>
+                      <td>{r.shopifyField ?? '—'}</td>
+                      <td className="cell-message">{r.message ?? 'flagged by validator'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {s.falsePositive.count > s.falsePositive.rows.length && (
+                <p className="muted">
+                  Showing first {s.falsePositive.rows.length} of {s.falsePositive.count}.
+                </p>
+              )}
+            </details>
+          )}
 
           {feedback.perStore.length > 1 && (
             <>
@@ -701,34 +750,63 @@ export function ImportPanel({ result }: Props) {
             </>
           )}
 
-          <h3 className="subsection-title">Rule-gap backlog (this run)</h3>
-          <RuleGapList gaps={feedback.ruleGaps} />
-
-          {s.falsePositive.count > 0 && (
+          {/* What Shopify rejected, and why — the detail that matters most. */}
+          {feedback.rejectedRows.length > 0 ? (
             <>
               <h3 className="subsection-title">
-                Over-strict — we flagged, Shopify accepted
+                Rejected by Shopify — {feedback.errorCount} row(s)
               </h3>
-              <table className="issues-table">
+              <table className="issues-table rejected-table">
                 <thead>
                   <tr>
                     <th>Row</th>
                     <th>Field</th>
-                    <th>Our flag</th>
+                    <th>Code</th>
+                    <th>Why Shopify rejected it</th>
+                    <th>Caught by our rules?</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {s.falsePositive.rows.map((r) => (
+                  {feedback.rejectedRows.map((r) => (
                     <tr key={r.rowNumber}>
                       <td>{r.rowNumber}</td>
                       <td>{r.shopifyField ?? '—'}</td>
-                      <td className="cell-message">{r.message ?? 'flagged by validator'}</td>
+                      <td>
+                        {r.shopifyCode ? (
+                          <span className="reject-code">{r.shopifyCode}</span>
+                        ) : (
+                          '—'
+                        )}
+                      </td>
+                      <td className="cell-message">{r.message ?? 'Rejected by Shopify.'}</td>
+                      <td>
+                        {r.flaggedByValidator ? (
+                          <span className="reject-flagged-yes">✓ flagged</span>
+                        ) : (
+                          <span className="reject-flagged-no">✗ rule gap</span>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+              {feedback.errorCount > feedback.rejectedRows.length && (
+                <p className="muted">
+                  Showing first {feedback.rejectedRows.length} of {feedback.errorCount} rejections.
+                </p>
+              )}
             </>
+          ) : (
+            <p className="muted import-no-rejects">
+              ✓ No rejections — Shopify accepted every imported row.
+            </p>
           )}
+
+          {/* Rule-gap backlog hidden for now — restore the RuleGap import and the
+              RuleGapList helper to bring it back.
+          <h3 className="subsection-title">Rule-gap backlog (this run)</h3>
+          <RuleGapList gaps={feedback.ruleGaps} />
+          */}
         </div>
       )}
     </div>

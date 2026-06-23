@@ -31,6 +31,15 @@ export interface CustomerValidationRule {
   validate(rows: CustomerCsvRow[]): CustomerValidationIssue[];
 }
 
+// The most recent Shopify import for a validation run, so History can show at a
+// glance whether a run was imported and how it landed. Null = never imported.
+export interface ValidationHistoryImport {
+  status: string;
+  successCount: number;
+  errorCount: number;
+  createdAt: Date;
+}
+
 export interface ValidationHistoryItem {
   id: string;
   fileName: string;
@@ -44,6 +53,7 @@ export interface ValidationHistoryItem {
   comments: string | null;
   createdAt: Date;
   updatedAt: Date;
+  lastImport: ValidationHistoryImport | null;
 }
 
 export interface UpdateValidationMetadata {
