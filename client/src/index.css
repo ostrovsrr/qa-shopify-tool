@@ -241,6 +241,11 @@ body {
 .card-value { font-size: 32px; font-weight: 700; }
 .card-neutral { background: #f8fafc; }
 .card-neutral .card-label { color: var(--text-muted); }
+/* Zero-state: a count of 0 carries no signal, so it's muted gray (no alarm
+   color) — only non-zero buckets light up red/amber/blue. */
+.card-zero { background: #f8fafc; }
+.card-zero .card-label { color: var(--text-muted); }
+.card-zero .card-value { color: #94a3b8; }
 .card-error { background: var(--error-bg); border-color: var(--error-border); }
 .card-error .card-label { color: var(--error); }
 .card-error .card-value { color: var(--error); }
@@ -428,6 +433,11 @@ body {
 .badge-warning { background: var(--warning-bg); color: var(--warning); }
 .badge-info { background: var(--info-bg); color: var(--info); }
 .badge-success { background: var(--success-bg); color: var(--success); }
+/* Imported-to-Shopify badges. A solid fill makes "this run was imported" pop in
+   the History list versus the outline validation badges. */
+.badge-imported { background: var(--primary); color: var(--primary-text); }
+.badge-imported-rejects { background: var(--warning); color: #fff; }
+.badge-importing { background: #dbeafe; color: var(--primary); }
 
 .history-loading, .history-error, .history-empty {
   color: var(--text-muted);
@@ -985,3 +995,81 @@ body {
   font-weight: 600;
 }
 .cell-message { color: var(--text-muted); font-size: 13px; max-width: 360px; }
+
+/* ── Import outcome headline ─────────────────────────────────────────────── */
+.import-headline {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border-radius: var(--radius-lg);
+  padding: 16px 20px;
+  margin: 12px 0 18px;
+  border: 1px solid var(--border);
+}
+.import-headline-clean { background: var(--success-bg); border-color: var(--success-border); }
+.import-headline-rejects { background: var(--warning-bg); border-color: var(--warning-border); }
+.import-headline-icon {
+  font-size: 26px;
+  line-height: 1;
+  flex: none;
+}
+.import-headline-clean .import-headline-icon { color: var(--success); }
+.import-headline-rejects .import-headline-icon { color: var(--warning); }
+.import-headline-counts { display: flex; flex-direction: column; gap: 2px; }
+.import-headline-numbers { font-size: 20px; font-weight: 700; color: var(--text); }
+.import-num-accepted { color: var(--success); }
+.import-num-rejected { color: var(--error); }
+.import-headline-sub { font-size: 13px; color: var(--text-muted); }
+
+/* ── Rejected-rows table ─────────────────────────────────────────────────── */
+.rejected-table .reject-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--error-bg);
+  color: var(--error);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+.reject-flagged-yes { color: var(--success); font-weight: 600; white-space: nowrap; }
+.reject-flagged-no { color: var(--error); font-weight: 600; white-space: nowrap; }
+.import-no-rejects { color: var(--success); font-weight: 600; }
+
+/* Collapsible bucket detail (e.g. the over-strict false-positive rows). */
+.bucket-details { margin: 4px 0 8px; }
+.bucket-details > summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--primary);
+  padding: 6px 0;
+  list-style-position: inside;
+}
+.bucket-details > summary:hover { color: var(--primary-hover); }
+.bucket-details > table { margin-top: 8px; }
+
+/* Lightweight, dismissible status line — deliberately quieter than
+   .success-banner so it doesn't rival the accepted/rejected headline. */
+.inline-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--success);
+  color: var(--text);
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+.inline-notice-close {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 4px;
+}
+.inline-notice-close:hover { color: var(--text); }

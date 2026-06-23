@@ -1,6 +1,29 @@
 import { getShopifyClient } from './shopifyClient';
+import {
+  stagedUpload,
+  runBulkMutation,
+  fetchBulkOperationState,
+  fetchAndParseBulkResults,
+  TERMINAL_BULK_STATUSES,
+} from './shopifyBulk';
 
 const QA_IMPORT_TAG = 'qa-import';
+
+// customerDelete as a bulk mutation string (validated against the 2026-01 schema;
+// requires write_customers). One JSONL line per id supplies $input.
+const CUSTOMER_DELETE_MUTATION =
+  'mutation customerDelete($input: CustomerDeleteInput!) { customerDelete(input: $input) { deletedCustomerId userErrors { field message } } }';
+
+// Below this many tagged customers, the serial per-id loop is faster than a bulk
+// op (which pays a fixed staged-upload + poll-latency cost of a few seconds).
+// Above it, one bulk operation wins decisively.
+const BULK_DELETE_THRESHOLD = 50;
+
+// Bulk-op poll cadence + cap. ~150 * 2s ≈ 5 min, well beyond a typical teardown;
+// keeps the request synchronous (same blocking shape as the old serial loop).
+const POLL_INTERVAL_MS = 2000;
+const MAX_POLL_ATTEMPTS = 150;
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 interface CustomerNode {
   id: string;
@@ -77,6 +100,11 @@ export async function getStoreCustomerStats(
   storeId?: string,
 ): Promise<StoreCustomerStats> {
   const client = await getShopifyClient(storeId);
+  // The qa count MUST be derived the same way cleanup finds rows (the tag-aware
+  // `customers` connection): customersCount's `query` only supports created_at/id/
+  // updated_at and silently IGNORES a `tag:` term, so it would return the total and
+  // make the count disagree with what "Clean QA" actually deletes. Total has no tag
+  // filter, so the single customersCount is correct (and fast) for it.
   const [totalData, qaData] = await Promise.all([
     client.query<{ customersCount: { count: number } }>(
       `query customerCount {
@@ -99,11 +127,43 @@ export async function cleanupCustomersByTag(
   tag: string,
 ): Promise<CleanupResult> {
   const { shop, ids } = await fetchCustomerIdsByTag(storeId, tag);
+
+  if (ids.length === 0) {
+    return { storeId, shop, tag, found: 0, deleted: 0, failed: 0, errors: [] };
+  }
+
+  const client = await getShopifyClient(storeId);
+  const { deleted, errors } =
+    ids.length <= BULK_DELETE_THRESHOLD
+      ? await serialDeleteCustomers(client, ids)
+      : await bulkDeleteCustomers(client, ids);
+
+  return {
+    storeId,
+    shop,
+    tag,
+    found: ids.length,
+    deleted,
+    failed: errors.length,
+    errors,
+  };
+}
+
+interface DeleteOutcome {
+  deleted: number;
+  errors: CleanupResult['errors'];
+}
+
+// Serial per-id delete — for small teardowns where bulk staging overhead doesn't
+// pay off. Reuses one client instead of re-fetching it each iteration.
+async function serialDeleteCustomers(
+  client: Awaited<ReturnType<typeof getShopifyClient>>,
+  ids: string[],
+): Promise<DeleteOutcome> {
   const errors: CleanupResult['errors'] = [];
   let deleted = 0;
 
   for (const customerId of ids) {
-    const client = await getShopifyClient(storeId);
     const data = await client.query<DeletePayload>(
       `mutation deleteCustomer($id: ID!) {
         customerDelete(input: { id: $id }) {
@@ -126,15 +186,79 @@ export async function cleanupCustomersByTag(
     deleted++;
   }
 
-  return {
-    storeId,
-    shop,
-    tag,
-    found: ids.length,
-    deleted,
-    failed: errors.length,
-    errors,
-  };
+  return { deleted, errors };
+}
+
+// Bulk delete via a single bulkOperationRunMutation over a staged JSONL. Polls to
+// completion synchronously (same blocking shape as the serial loop, far fewer calls)
+// and parses per-line results back into the CleanupResult error list.
+async function bulkDeleteCustomers(
+  client: Awaited<ReturnType<typeof getShopifyClient>>,
+  ids: string[],
+): Promise<DeleteOutcome> {
+  const jsonl = ids.map((id) => JSON.stringify({ input: { id } })).join('\n');
+  const stagedPath = await stagedUpload(client, jsonl, 'bulk_customer_delete.jsonl');
+  const bulkOpId = await runBulkMutation(client, CUSTOMER_DELETE_MUTATION, stagedPath);
+
+  let state = await fetchBulkOperationState(client, bulkOpId);
+  for (
+    let attempt = 0;
+    !TERMINAL_BULK_STATUSES.includes(state.status) && attempt < MAX_POLL_ATTEMPTS;
+    attempt++
+  ) {
+    await sleep(POLL_INTERVAL_MS);
+    state = await fetchBulkOperationState(client, bulkOpId);
+  }
+
+  if (!TERMINAL_BULK_STATUSES.includes(state.status)) {
+    throw new Error(
+      `Bulk delete did not finish within ${(MAX_POLL_ATTEMPTS * POLL_INTERVAL_MS) / 1000}s; ` +
+        'it may still be running on Shopify — re-run cleanup shortly.',
+    );
+  }
+  if (state.status !== 'COMPLETED') {
+    throw new Error(
+      `Bulk delete ${state.status}${state.errorCode ? ` (${state.errorCode})` : ''}.`,
+    );
+  }
+  if (!state.url) {
+    throw new Error('Bulk delete completed but Shopify returned no result file.');
+  }
+
+  const errors: CleanupResult['errors'] = [];
+  let deleted = 0;
+
+  const outcomes = await fetchAndParseBulkResults<string, { ok: boolean; customerId: string; message?: string }>(
+    state.url,
+    ids,
+    ({ ref, data, raw }) => {
+      const payload = data.customerDelete as
+        | { deletedCustomerId: string | null; userErrors: { message: string }[] }
+        | undefined;
+
+      if (!payload) {
+        // Top-level error line (e.g. malformed input) — no mutation payload.
+        const message = typeof raw.message === 'string' ? raw.message : 'Unknown bulk delete error.';
+        return { ok: false, customerId: ref ?? 'unknown', message };
+      }
+      if (payload.userErrors.length === 0 && payload.deletedCustomerId) {
+        return { ok: true, customerId: ref ?? payload.deletedCustomerId };
+      }
+      const message =
+        payload.userErrors.map((e) => e.message).join('; ') || 'Delete rejected by Shopify.';
+      return { ok: false, customerId: ref ?? 'unknown', message };
+    },
+  );
+
+  for (const o of outcomes) {
+    if (o.ok) {
+      deleted++;
+    } else {
+      errors.push({ customerId: o.customerId, message: o.message ?? 'Unknown delete failure.' });
+    }
+  }
+
+  return { deleted, errors };
 }
 
 export function qaImportTagForRun(importRunId: string): string {

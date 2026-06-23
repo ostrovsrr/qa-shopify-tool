@@ -1,6 +1,40 @@
 import { useEffect, useRef, useState } from 'react';
 import { deleteValidation, fetchHistory, updateValidationMetadata } from '../api/validationApi';
-import { UpdateMetadataPayload, ValidationHistoryItem } from '../types';
+import {
+  UpdateMetadataPayload,
+  ValidationHistoryImport,
+  ValidationHistoryItem,
+} from '../types';
+
+// Shows whether a run was imported to Shopify and how it landed. Completed runs
+// surface the accepted/rejected split so the outcome is obvious at a glance.
+function ImportBadge({ lastImport }: { lastImport: ValidationHistoryImport | null }) {
+  if (!lastImport) return null;
+  const { status, successCount, errorCount } = lastImport;
+  if (status === 'COMPLETED') {
+    const clean = errorCount === 0;
+    return (
+      <span
+        className={`badge ${clean ? 'badge-imported' : 'badge-imported-rejects'}`}
+        title={`Imported to Shopify: ${successCount} accepted, ${errorCount} rejected`}
+      >
+        ⬆ Imported · {successCount}✓ / {errorCount}✗
+      </span>
+    );
+  }
+  if (status === 'RUNNING') {
+    return (
+      <span className="badge badge-importing" title="Import in progress">
+        ⬆ Importing…
+      </span>
+    );
+  }
+  return (
+    <span className="badge badge-error" title={`Import ${status.toLowerCase()}`}>
+      ⬆ Import {status.toLowerCase()}
+    </span>
+  );
+}
 
 interface Props {
   onOpen: (id: string) => void;
@@ -198,6 +232,7 @@ export function ValidationHistory({ onOpen, refreshTrigger }: Props) {
                 {item.errors === 0 && item.warnings === 0 && item.info === 0 && (
                   <span className="badge badge-success">Clean</span>
                 )}
+                <ImportBadge lastImport={item.lastImport} />
               </div>
 
               <div className="history-item-actions">
