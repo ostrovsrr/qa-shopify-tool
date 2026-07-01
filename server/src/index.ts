@@ -100,8 +100,13 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
 
 // ── Start ───────────────────────────────────────────────────────────────────
 
-app.listen(PORT, () => {
-  console.log(`Server listening on http://localhost:${PORT}`);
-});
+// Only bind the port when run directly (npm run dev/start). When the app is
+// imported — e.g. by Supertest in integration tests — skip listen so no port
+// is occupied and the process can exit cleanly.
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Server listening on http://localhost:${PORT}`);
+  });
+}
 
 export default app;

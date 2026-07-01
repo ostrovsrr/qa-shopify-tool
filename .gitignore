@@ -1,11 +1,11 @@
 # Dependencies
 node_modules/
 
-# Environment variables
+# Environment variables (never commit real secrets; .env.example is the tracked template)
 .env
 .env.local
 .env.*.local
-.env.example
+!.env.example
 # Build output
 dist/
 build/
@@ -42,6 +42,7 @@ prisma/*.db-journal
 !sample*.csv
 !template*.csv
 !examples/*.csv
+!sample/*.csv
 
 # OS files
 .DS_Store

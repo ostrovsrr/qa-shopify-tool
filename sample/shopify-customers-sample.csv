@@ -1,0 +1,12 @@
+First Name,Last Name,Email,Accepts Email Marketing,Accepts SMS Marketing,Default Address Address1,Default Address City,Default Address Province Code,Default Address Country Code,Default Address Zip,Phone,Tags,Note,Tax Exempt,Total Spent,Total Orders
+John,Doe,john@example.com,TRUE,FALSE,1 King St W,Toronto,ON,CA,M5V 3L9,4165551234,"vip, wholesale",Loyal customer since 2019,FALSE,199.99,3
+Amy,Lee,not-an-email,TRUE,FALSE,,,,,,123,,,FALSE,,
+Bob,Ray,dupe@shop.com,TRUE,FALSE,,,,,,4165550000,,,FALSE,,
+Bo,Ray,DUPE@shop.com,TRUE,FALSE,,,,,,(416) 555-0000,,,FALSE,,
+Cara,Fox,cara@shop.com,maybe,FALSE,,,,,,,,,nah,,
+Dan,Ash,dan@shop.com,FALSE,FALSE,9 Bay St,,XX,CA,NOTZIP,,,,FALSE,,
+ Erin ,Vale,erin@shop.com,TRUE,FALSE,,,,,,,"a,,b,",,FALSE,,
+Fay,Ng,fay@shop.com,TRUE,FALSE,,,,,,,,This note is intentionally very long to trip the LongNote rule. This note is intentionally very long to trip the LongNote rule. This note is intentionally very long to trip the LongNote rule. This note is intentionally very long to trip the LongNote rule. This note is intentionally very long to trip the LongNote rule. This note is intentionally very long to trip the LongNote rule. This note is intentionally very long to trip the LongNote rule. This note is intentionally very long to trip the LongNote rule.,FALSE,,
+<b>Gus</b>,Cole,gus@shop.com,TRUE,FALSE,,,,,,,,,FALSE,,
+,,,,,,,,,,,,Row with no First/Last/Email/Phone at all,,,
+Hana,Kim,hana@shop.com,TRUE,FALSE,,,,,,,,,FALSE,abc,-2
