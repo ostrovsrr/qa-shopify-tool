@@ -179,6 +179,34 @@ A sample file with intentional issues is provided at `sample/shopify-customers-s
 
 ---
 
+## Testing
+
+Run from `server/`:
+
+```bash
+npm run typecheck        # tsc --noEmit
+npm test                 # unit tests (validators + parser) — no database needed
+npm run test:integration # API tests against a real PostgreSQL (see below)
+```
+
+`npm test` covers every validation rule plus a full-pipeline "golden" snapshot
+and needs no setup. `npm run test:integration` drives the Express API end to end
+(upload → validate → persist → report) and **requires `TEST_DATABASE_URL` to
+point at a throwaway database** — the suite truncates tables between tests, so
+never point it at a database with real data. If `TEST_DATABASE_URL` is unset the
+integration tests skip themselves.
+
+```bash
+# example: run integration tests against a scratch database
+TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/shopify_csv_qa_test" \
+  npx prisma migrate deploy   # first time, with DATABASE_URL pointed at the scratch DB
+TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/shopify_csv_qa_test" \
+  npm run test:integration
+```
+
+CI (`.github/workflows/ci.yml`) runs all of the above on every push and pull
+request, standing up a disposable PostgreSQL for the integration job.
+
 ## Production Build
 
 ```bash
