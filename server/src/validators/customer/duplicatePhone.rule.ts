@@ -1,4 +1,5 @@
 import { CustomerCsvRow, CustomerValidationIssue, CustomerValidationRule } from '../../types';
+import { canonicalPhone } from '../../utils/normalize';
 
 export class DuplicatePhoneRule implements CustomerValidationRule {
   name = 'DuplicatePhoneRule';
@@ -10,7 +11,7 @@ export class DuplicatePhoneRule implements CustomerValidationRule {
     for (const row of rows) {
       const phone = row.normalized['Phone'] ?? '';
       if (!phone) continue;
-      const normalized = phone.replace(/\D/g, '');
+      const normalized = canonicalPhone(phone);
       if (!normalized) continue;
       const existing = phoneMap.get(normalized) ?? [];
       existing.push(row.rowNumber);
@@ -20,7 +21,7 @@ export class DuplicatePhoneRule implements CustomerValidationRule {
     for (const row of rows) {
       const phone = row.normalized['Phone'] ?? '';
       if (!phone) continue;
-      const normalized = phone.replace(/\D/g, '');
+      const normalized = canonicalPhone(phone);
       if (!normalized) continue;
       const duplicateRows = phoneMap.get(normalized) ?? [];
       if (duplicateRows.length > 1) {
