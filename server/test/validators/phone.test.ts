@@ -50,4 +50,18 @@ describe('DuplicatePhoneRule', () => {
   it('does not flag distinct numbers', () => {
     expect(rule.validate(makeRows([{ Phone: '5551110000' }, { Phone: '5552220000' }]))).toHaveLength(0);
   });
+
+  it('treats a NANP number with and without the +1 country code as the same number', () => {
+    const issues = rule.validate(
+      makeRows([{ Phone: '+12898851714' }, { Phone: '2898851714' }, { Phone: '+1 (289) 885-1714' }]),
+    );
+    // all three canonicalize to 2898851714 → every row is a duplicate
+    expect(issues).toHaveLength(3);
+    expect(issues.every((i) => i.issueType === 'DuplicatePhone')).toBe(true);
+  });
+
+  it('does not merge a genuine 11-digit non-NANP number with a 10-digit one', () => {
+    // 11 digits but not starting with "1", so nothing is stripped → not a match
+    expect(rule.validate(makeRows([{ Phone: '42898851714' }, { Phone: '2898851714' }]))).toHaveLength(0);
+  });
 });

@@ -1,4 +1,5 @@
 import { CustomerCsvRow, CustomerValidationIssue, CustomerValidationRule } from '../../types';
+import { canonicalPhone } from '../../utils/normalize';
 
 const SAFE_PHONE_REGEX = /^[0-9\s\-\(\)\+\.]+$/;
 // Matches Excel scientific notation for large numbers, e.g. 1.23456E+11
@@ -40,7 +41,9 @@ export class InvalidPhoneRule implements CustomerValidationRule {
         continue;
       }
 
-      const digits = phone.replace(/\D/g, '');
+      // Count digits on the canonical form so a leading NANP "1" country code
+      // isn't counted as an extra digit (keeps parity with DuplicatePhoneRule).
+      const digits = canonicalPhone(phone);
 
       if (digits.length < 10) {
         issues.push({
