@@ -410,16 +410,16 @@ async function finalizeCompletedRun(
   const successCount = outcomes.filter((o) => o.accepted).length;
   const errorCount = outcomes.length - successCount;
 
-  await prisma.$transaction(async (tx) => {
-    const claimed = await tx.importRun.updateMany({
-      where: { id: importRunId, status: 'RUNNING' },
-      data: { status: 'COMPLETED', successCount, errorCount },
-    });
-    // Another concurrent reconcile already finalized this run — don't double-insert.
-    if (claimed.count === 0) return;
+  await prisma.$transaction(
+    async (tx) => {
+      const claimed = await tx.importRun.updateMany({
+        where: { id: importRunId, status: 'RUNNING' },
+        data: { status: 'COMPLETED', successCount, errorCount },
+      });
+      // Another concurrent reconcile already finalized this run — don't double-insert.
+      if (claimed.count === 0) return;
 
-    await tx.importRowResult.createMany({
-      data: outcomes.map((o) => ({
+      const rows = outcomes.map((o) => ({
         id: uuidv4(),
         importRunId,
         storeId: run.storeId,
@@ -430,9 +430,18 @@ async function finalizeCompletedRun(
         shopifyField: o.shopifyField,
         message: o.message,
         wasFlaggedByValidator: flaggedRows.has(o.rowNumber),
-      })),
-    });
-  });
+      }));
+
+      // Chunk the insert so a single multi-row INSERT doesn't dominate the
+      // transaction budget on large runs (66k+ rows blew the 5s default).
+      const CHUNK = 5000;
+      for (let i = 0; i < rows.length; i += CHUNK) {
+        await tx.importRowResult.createMany({ data: rows.slice(i, i + CHUNK) });
+      }
+    },
+    // Large runs need far more than the 5s interactive-transaction default.
+    { timeout: 120_000, maxWait: 10_000 },
+  );
 }
 
 // ── parallel batch import across multiple stores ─────────────────────────────

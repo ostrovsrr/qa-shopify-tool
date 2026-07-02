@@ -16,6 +16,10 @@ export async function parseCsvBuffer(buffer: Buffer): Promise<ParsedCsv> {
         skip_empty_lines: false,
         relax_column_count: true,
         cast: false,
+        // Strip a leading UTF-8 BOM (Shopify/Excel exports include one). Without
+        // this the first header parses as "﻿<name>", so its column won't match
+        // mapping/validator lookups by exact header name.
+        bom: true,
       },
       (err, records: Record<string, string>[]) => {
         if (err) return reject(err);
