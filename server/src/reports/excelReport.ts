@@ -7,6 +7,7 @@ import {
   SHOPIFY_COLUMNS,
 } from '../services/columnMapping.service';
 import { CustomerValidationIssue, Severity } from '../types';
+import { canonicalPhone } from '../utils/normalize';
 import { AutoFixEntry, computeAutoFixes } from './autoFix';
 
 const SEVERITY_COLOURS: Record<Severity, string> = {
@@ -272,11 +273,26 @@ function addShopifyTemplateSheet(
     reverseMap[tgt] = src;
   }
 
+  // Completeness score per row: how many mapped source cells are non-empty.
+  // Used to pick which row of a duplicate group keeps its email/phone when
+  // moving duplicates to Note — the most-filled record wins.
+  const mappedSourceCols = Object.keys(columnMapping);
+  const completeness = new Map<number, number>();
+  for (const origRow of originalRows) {
+    const data = origRow.data as Record<string, string>;
+    let score = 0;
+    for (const src of mappedSourceCols) {
+      if ((data[src] ?? '').trim() !== '') score++;
+    }
+    completeness.set(origRow.rowNumber, score);
+  }
+
   // Assign duplicate-group numbers per row, grouped by a Shopify field's value.
   // Matches the DuplicateEmail/DuplicatePhone validator normalization so the
   // report stays consistent. `groups` maps rowNumber → group # (only for
-  // duplicates); `repeats` holds the 2nd+ occurrence rows of each group (the
-  // ones Shopify would reject as "taken" — the first occurrence imports fine).
+  // duplicates); `repeats` holds every group row except the keeper (the
+  // most-filled record, ties broken by earliest row) — those are the rows whose
+  // duplicated value is moved to Note when the option is on.
   const buildDuplicateGroups = (
     field: string,
     normalize: (value: string) => string,
@@ -304,26 +320,30 @@ function addShopifyTemplateSheet(
       const rowNumbers = byValue.get(value)!;
       if (rowNumbers.length < 2) continue;
       groupNumber++;
-      rowNumbers.forEach((rowNumber, idx) => {
+      let keeper = rowNumbers[0];
+      for (const rowNumber of rowNumbers) {
+        if ((completeness.get(rowNumber) ?? 0) > (completeness.get(keeper) ?? 0)) {
+          keeper = rowNumber;
+        }
+      }
+      for (const rowNumber of rowNumbers) {
         groups.set(rowNumber, groupNumber);
-        if (idx > 0) repeats.add(rowNumber);
-      });
+        if (rowNumber !== keeper) repeats.add(rowNumber);
+      }
     }
     return { groups, repeats };
   };
 
   const emailDupes = buildDuplicateGroups('Email', (v) => v.trim().toLowerCase());
-  const phoneDupes = buildDuplicateGroups('Phone', (v) => v.replace(/\D/g, ''));
+  const phoneDupes = buildDuplicateGroups('Phone', canonicalPhone);
   const emailGroups = emailDupes.groups;
   const phoneGroups = phoneDupes.groups;
 
-  // Moving duplicates into Note needs a Note column even when none was mapped
-  if (
-    moveDuplicatesToNotes &&
-    (emailDupes.repeats.size > 0 || phoneDupes.repeats.size > 0) &&
-    !effectiveColumns.includes('Note')
-  ) {
-    effectiveColumns.push('Note');
+  // Moving duplicates needs Note (moved value) and Tags (DuplicateEmailNotes /
+  // DuplicatePhoneNotes marker) columns even when neither was mapped
+  if (moveDuplicatesToNotes && (emailDupes.repeats.size > 0 || phoneDupes.repeats.size > 0)) {
+    if (!effectiveColumns.includes('Note')) effectiveColumns.push('Note');
+    if (!effectiveColumns.includes('Tags')) effectiveColumns.push('Tags');
   }
 
   // "Keep" columns pass through as trailing columns under their original names
@@ -378,16 +398,19 @@ function addShopifyTemplateSheet(
       rowData[shopifyCol] = rowFixes?.get(shopifyCol) ?? mapped[shopifyCol] ?? '';
     }
 
-    // Strip the duplicated identifier from 2nd+ occurrences and stash it in
-    // Note, so Shopify accepts the customer instead of rejecting it as "taken".
-    // Only the duplicated field is stripped — a row that's only an email
-    // duplicate keeps its phone, and vice versa. First occurrences keep both.
+    // Strip the duplicated identifier from every group row except the keeper
+    // (most-filled record) and stash it in Note, so Shopify accepts the
+    // customer instead of rejecting it as "taken". Only the duplicated field
+    // is stripped — a row that's only an email duplicate keeps its phone, and
+    // vice versa.
     if (moveDuplicatesToNotes) {
       const moved: string[] = [];
+      const dupTags: string[] = [];
       if (emailDupes.repeats.has(origRow.rowNumber)) {
         const email = String(rowData['Email'] ?? '');
         if (email) {
           moved.push(`Duplicate email: ${email}`);
+          dupTags.push('DuplicateEmailNotes');
           rowData['Email'] = '';
         }
       }
@@ -395,12 +418,17 @@ function addShopifyTemplateSheet(
         const phone = String(rowData['Phone'] ?? '');
         if (phone) {
           moved.push(`Duplicate phone: ${phone}`);
+          dupTags.push('DuplicatePhoneNotes');
           rowData['Phone'] = '';
         }
       }
       if (moved.length > 0) {
         const existingNote = String(rowData['Note'] ?? '').trim();
         rowData['Note'] = [existingNote, ...moved].filter(Boolean).join(' | ');
+        // Tag the stripped rows (never the keeper) so they're filterable in
+        // Shopify admin after import
+        const existingTags = String(rowData['Tags'] ?? '').trim();
+        rowData['Tags'] = [existingTags, ...dupTags].filter(Boolean).join(',');
       }
     }
 

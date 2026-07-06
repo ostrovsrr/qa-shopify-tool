@@ -91,7 +91,7 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
           </label>
           <label
             className="helios-tag-label"
-            title="In the Shopify Template sheet, 2nd+ rows of a duplicate group get the duplicated email/phone cleared and appended to Note instead, so Shopify still accepts the customer. Only the duplicated field is moved."
+            title="In the Shopify Template sheet, one row per duplicate group keeps the duplicated email/phone (the row with the most filled-in fields); the others get it cleared, appended to Note, and tagged DuplicateEmailNotes / DuplicatePhoneNotes so they're filterable in Shopify admin. Only the duplicated field is moved."
           >
             <input
               type="checkbox"
