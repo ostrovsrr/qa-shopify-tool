@@ -6,6 +6,7 @@ import {
 } from '../services/importFeedback.service';
 import { generateShopifyVerificationReport } from '../reports/shopifyVerificationReport';
 import { generateValidatorFeedbackMarkdown } from '../reports/validatorFeedbackReport';
+import { reportFileName } from '../utils/reportFileName';
 import {
   cleanupImportRunStores,
   reconcileImportRun,
@@ -183,14 +184,14 @@ export async function getImportReportHandler(
       return;
     }
 
-    const buffer = await generateShopifyVerificationReport(parsed.data);
+    const { buffer, sourceFileName } = await generateShopifyVerificationReport(parsed.data);
     res.setHeader(
       'Content-Type',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     );
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="shopify-verification-report-${parsed.data}.xlsx"`,
+      `attachment; filename="${reportFileName('shopify-import-validation', sourceFileName, 'xlsx')}"`,
     );
     res.send(buffer);
   } catch (err) {
@@ -212,17 +213,17 @@ export async function getValidatorFeedbackReportHandler(
       return;
     }
 
-    const markdown = await generateValidatorFeedbackMarkdown(parsed.data);
-    if (markdown === null) {
+    const report = await generateValidatorFeedbackMarkdown(parsed.data);
+    if (report === null) {
       res.status(404).json({ error: 'Import run not found.' });
       return;
     }
     res.type('text/markdown; charset=utf-8');
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="validator-feedback-${parsed.data}.md"`,
+      `attachment; filename="${reportFileName('validator-feedback', report.sourceFileName, 'md')}"`,
     );
-    res.send(markdown);
+    res.send(report.markdown);
   } catch (err) {
     if (handleShopifyError(err, res)) return;
     next(err);

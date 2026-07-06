@@ -23,6 +23,9 @@ model ValidationRun {
   // 2nd+ occurrences of a duplicate group and appends the value to Note instead,
   // so Shopify still accepts the customer on import.
   moveDuplicatesToNotes Boolean            @default(false)
+  // When on, duplicate-group rows whose names also match are merged into one
+  // customer row in the Shopify Template sheet (most-filled row wins).
+  mergeMatchingDuplicates Boolean          @default(false)
   ticketNumber       String?
   ticketName      String?
   comments        String?

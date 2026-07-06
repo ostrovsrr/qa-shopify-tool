@@ -41,7 +41,9 @@ interface ReportRowResult {
   wasFlaggedByValidator: boolean;
 }
 
-export async function generateShopifyVerificationReport(importRunId: string): Promise<Buffer> {
+export async function generateShopifyVerificationReport(
+  importRunId: string,
+): Promise<{ buffer: Buffer; sourceFileName: string }> {
   const importRun = await prisma.importRun.findUnique({
     where: { id: importRunId },
     include: {
@@ -123,7 +125,7 @@ export async function generateShopifyVerificationReport(importRunId: string): Pr
   addShopifyTemplateSheet(workbook, columnMapping, validationRun.originalRows, rowResults);
 
   const arrayBuffer = await workbook.xlsx.writeBuffer();
-  return Buffer.from(arrayBuffer);
+  return { buffer: Buffer.from(arrayBuffer), sourceFileName: validationRun.fileName };
 }
 
 function styleHeader(row: ExcelJS.Row, bgArgb: string) {

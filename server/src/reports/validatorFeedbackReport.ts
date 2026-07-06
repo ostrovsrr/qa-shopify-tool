@@ -60,7 +60,7 @@ function cell(value: string | null | undefined): string {
 
 export async function generateValidatorFeedbackMarkdown(
   importRunId: string,
-): Promise<string | null> {
+): Promise<{ markdown: string; sourceFileName: string } | null> {
   const importRun = await prisma.importRun.findUnique({
     where: { id: importRunId },
     include: {
@@ -85,13 +85,16 @@ export async function generateValidatorFeedbackMarkdown(
   // Not finished yet — degrade gracefully instead of emitting an empty report.
   const rowResults = importRun.rowResults as ReportRowResult[];
   if (rowResults.length === 0) {
-    return [
-      `# Validator feedback — import ${id8}`,
-      '',
-      `This import is **${importRun.status}** and has no per-row Shopify results yet.`,
-      'Re-run this report once the import has COMPLETED.',
-      '',
-    ].join('\n');
+    return {
+      markdown: [
+        `# Validator feedback — import ${id8}`,
+        '',
+        `This import is **${importRun.status}** and has no per-row Shopify results yet.`,
+        'Re-run this report once the import has COMPLETED.',
+        '',
+      ].join('\n'),
+      sourceFileName: validationRun.fileName,
+    };
   }
 
   const columnMapping =
@@ -238,5 +241,5 @@ export async function generateValidatorFeedbackMarkdown(
   );
   out.push('');
 
-  return out.join('\n');
+  return { markdown: out.join('\n'), sourceFileName: validationRun.fileName };
 }

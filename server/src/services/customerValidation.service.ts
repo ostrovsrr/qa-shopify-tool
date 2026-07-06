@@ -32,6 +32,7 @@ export async function validateCustomerCsv(
   columnMapping: Record<string, string> = {},
   heliosMigratedTag = false,
   moveDuplicatesToNotes = false,
+  mergeMatchingDuplicates = false,
 ): Promise<CustomerValidationResult> {
   const { rows: rawRows, headers } = await parseCsvBuffer(buffer);
 
@@ -75,6 +76,7 @@ export async function validateCustomerCsv(
         : undefined,
       heliosMigratedTag,
       moveDuplicatesToNotes,
+      mergeMatchingDuplicates,
       issues: {
         create: allIssues.map((issue) => ({
           id: uuidv4(),
@@ -113,6 +115,7 @@ export async function validateFromPreview(
   columnMapping: Record<string, string>,
   heliosMigratedTag = false,
   moveDuplicatesToNotes = false,
+  mergeMatchingDuplicates = false,
 ): Promise<CustomerValidationResult | null> {
   const entry = getPreview(uploadId);
   if (!entry) return null;
@@ -122,6 +125,7 @@ export async function validateFromPreview(
     columnMapping,
     heliosMigratedTag,
     moveDuplicatesToNotes,
+    mergeMatchingDuplicates,
   );
 }
 

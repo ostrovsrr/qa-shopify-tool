@@ -12,6 +12,7 @@ import {
 } from '../services/customerValidation.service';
 import { parseCsvBuffer } from '../services/csvParser.service';
 import { storePreview } from '../services/previewStore';
+import { reportFileName } from '../utils/reportFileName';
 
 const uuidSchema = z.string().uuid('Invalid validation ID format.');
 
@@ -26,6 +27,7 @@ const validateWithMappingSchema = z.object({
   columnMapping: z.record(z.string(), z.string()),
   heliosMigratedTag: z.boolean().default(true),
   moveDuplicatesToNotes: z.boolean().default(false),
+  mergeMatchingDuplicates: z.boolean().default(false),
 });
 
 // POST /api/customer-validation/preview
@@ -71,6 +73,7 @@ export async function validateWithMappingHandler(
       parsed.data.columnMapping,
       parsed.data.heliosMigratedTag,
       parsed.data.moveDuplicatesToNotes,
+      parsed.data.mergeMatchingDuplicates,
     );
     if (!result) {
       res.status(404).json({ error: 'Upload not found or expired. Please re-upload the file.' });
@@ -133,14 +136,14 @@ export async function getReportHandler(
       res.status(400).json({ error: parsed.error.errors[0].message });
       return;
     }
-    const buffer = await generateExcelReport(parsed.data);
+    const { buffer, sourceFileName } = await generateExcelReport(parsed.data);
     res.setHeader(
       'Content-Type',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     );
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="validation-report-${parsed.data}.xlsx"`,
+      `attachment; filename="${reportFileName('prevalidation', sourceFileName, 'xlsx')}"`,
     );
     res.send(buffer);
   } catch (err) {

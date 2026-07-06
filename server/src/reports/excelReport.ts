@@ -9,6 +9,7 @@ import {
 import { CustomerValidationIssue, Severity } from '../types';
 import { canonicalPhone } from '../utils/normalize';
 import { AutoFixEntry, computeAutoFixes } from './autoFix';
+import { mergeMatchingDuplicateRows, TemplateRow } from './mergeDuplicates';
 
 const SEVERITY_COLOURS: Record<Severity, string> = {
   Error: 'FFFEE2E2',
@@ -25,7 +26,9 @@ const HEADER_COLOURS: Record<string, string> = {
   'Shopify Template': 'FF004C3F',
 };
 
-export async function generateExcelReport(validationId: string): Promise<Buffer> {
+export async function generateExcelReport(
+  validationId: string,
+): Promise<{ buffer: Buffer; sourceFileName: string }> {
   const run = await prisma.validationRun.findUnique({
     where: { id: validationId },
     include: {
@@ -42,6 +45,7 @@ export async function generateExcelReport(validationId: string): Promise<Buffer>
     columnMapping: unknown;
     heliosMigratedTag: boolean;
     moveDuplicatesToNotes: boolean;
+    mergeMatchingDuplicates: boolean;
     originalRows: { rowNumber: number; data: unknown }[];
   };
 
@@ -73,6 +77,7 @@ export async function generateExcelReport(validationId: string): Promise<Buffer>
   const autoFixes = computeAutoFixes(runData.originalRows, columnMapping);
   const heliosMigratedTag: boolean = runData.heliosMigratedTag ?? false;
   const moveDuplicatesToNotes: boolean = runData.moveDuplicatesToNotes ?? false;
+  const mergeMatchingDuplicates: boolean = runData.mergeMatchingDuplicates ?? false;
 
   addSummarySheet(workbook, run, issues);
   addIssuesSheet(workbook, 'Errors', issues.filter((i) => i.severity === 'Error'));
@@ -85,10 +90,12 @@ export async function generateExcelReport(validationId: string): Promise<Buffer>
     autoFixes,
     heliosMigratedTag,
     moveDuplicatesToNotes,
+    issues,
+    mergeMatchingDuplicates,
   );
 
   const arrayBuffer = await workbook.xlsx.writeBuffer();
-  return Buffer.from(arrayBuffer);
+  return { buffer: Buffer.from(arrayBuffer), sourceFileName: run.fileName };
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +254,8 @@ function addShopifyTemplateSheet(
   autoFixes: AutoFixEntry[] = [],
   heliosMigratedTag = false,
   moveDuplicatesToNotes = false,
+  issues: CustomerValidationIssue[] = [],
+  mergeMatchingDuplicates = false,
 ) {
   const sheet = workbook.addWorksheet('Shopify Template');
 
@@ -265,54 +274,69 @@ function addShopifyTemplateSheet(
   const effectiveColumns: string[] =
     heliosMigratedTag && !tagsAlreadyMapped ? [...shopifyColumns, 'Tags'] : [...shopifyColumns];
 
-  // Reverse map (Shopify column → source CSV column, last one wins) — only used
-  // for the duplicate-group lookups below; cell values go through
-  // applyMappingToRecord so append targets are honoured.
-  const reverseMap: Record<string, string> = {};
-  for (const [src, tgt] of Object.entries(columnMapping)) {
-    reverseMap[tgt] = src;
+  // Build fix lookup: rowNumber → shopify column → fixed value
+  const fixMap = new Map<number, Map<string, string>>();
+  for (const fix of autoFixes) {
+    if (!fixMap.has(fix.rowNumber)) fixMap.set(fix.rowNumber, new Map());
+    fixMap.get(fix.rowNumber)!.set(fix.field, fix.fixedValue);
   }
 
-  // Completeness score per row: how many mapped source cells are non-empty.
-  // Used to pick which row of a duplicate group keeps its email/phone when
-  // moving duplicates to Note — the most-filled record wins.
-  const mappedSourceCols = Object.keys(columnMapping);
-  const completeness = new Map<number, number>();
-  for (const origRow of originalRows) {
+  // Build one Shopify-column-keyed record per row up front (mapped values with
+  // auto-fixes applied), so the optional merge pass and duplicate detection
+  // both see final values. Only mapped source columns contribute; unmapped
+  // columns are ignored.
+  let templateRows: TemplateRow[] = originalRows.map((origRow) => {
     const data = origRow.data as Record<string, string>;
-    let score = 0;
-    for (const src of mappedSourceCols) {
-      if ((data[src] ?? '').trim() !== '') score++;
-    }
-    completeness.set(origRow.rowNumber, score);
+    const mappedSources: Record<string, string> = {};
+    for (const src of Object.keys(columnMapping)) mappedSources[src] = data[src] ?? '';
+    const record = applyMappingToRecord(mappedSources, columnMapping);
+    const fixes = fixMap.get(origRow.rowNumber);
+    if (fixes) for (const [field, value] of fixes) record[field] = value;
+    return { rowNumber: origRow.rowNumber, record, mergedFrom: [] };
+  });
+
+  // Merge same-person duplicates (same email/phone AND matching non-empty
+  // name) before duplicate handling, so fully-merged groups stop being
+  // duplicates and move-to-Notes only deals with what remains.
+  if (mergeMatchingDuplicates) {
+    templateRows = mergeMatchingDuplicateRows(templateRows);
+  }
+  const anyMerges = templateRows.some((row) => row.mergedFrom.length > 0);
+
+  // Completeness score per surviving row (recomputed after merging, since a
+  // merged keeper absorbs fields). Used to pick which row of a duplicate group
+  // keeps its email/phone when moving duplicates to Note.
+  const completeness = new Map<number, number>();
+  for (const row of templateRows) {
+    completeness.set(
+      row.rowNumber,
+      Object.values(row.record).filter((v) => (v ?? '').trim() !== '').length,
+    );
   }
 
-  // Assign duplicate-group numbers per row, grouped by a Shopify field's value.
-  // Matches the DuplicateEmail/DuplicatePhone validator normalization so the
-  // report stays consistent. `groups` maps rowNumber → group # (only for
-  // duplicates); `repeats` holds every group row except the keeper (the
-  // most-filled record, ties broken by earliest row) — those are the rows whose
-  // duplicated value is moved to Note when the option is on.
+  // Assign duplicate-group numbers per surviving row, grouped by a Shopify
+  // field's value. Matches the DuplicateEmail/DuplicatePhone validator
+  // normalization so the report stays consistent. `groups` maps rowNumber →
+  // group # (only for duplicates); `repeats` holds every group row except the
+  // keeper (the most-filled record, ties broken by earliest row) — those are
+  // the rows whose duplicated value is moved to Note when the option is on.
   const buildDuplicateGroups = (
     field: string,
     normalize: (value: string) => string,
   ): { groups: Map<number, number>; repeats: Set<number> } => {
     const groups = new Map<number, number>();
     const repeats = new Set<number>();
-    const srcCol = reverseMap[field];
-    if (srcCol === undefined) return { groups, repeats };
 
     const order: string[] = [];
     const byValue = new Map<string, number[]>();
-    for (const origRow of originalRows) {
-      const data = origRow.data as Record<string, string>;
-      const normalized = normalize(data[srcCol] ?? '');
+    for (const row of templateRows) {
+      const normalized = normalize(row.record[field] ?? '');
       if (!normalized) continue;
       if (!byValue.has(normalized)) {
         byValue.set(normalized, []);
         order.push(normalized);
       }
-      byValue.get(normalized)!.push(origRow.rowNumber);
+      byValue.get(normalized)!.push(row.rowNumber);
     }
 
     let groupNumber = 0;
@@ -353,19 +377,42 @@ function addShopifyTemplateSheet(
     .filter((src) => !effectiveColumns.includes(src));
   effectiveColumns.push(...keptColumns);
 
-  // Duplicate-group columns lead, then Row Number, then the Shopify columns
+  // One leading marker column per Error issue type present in the run (an "X"
+  // per affected row) — filter a column to X in Excel to isolate the rows that
+  // need that fix. DuplicateEmail/DuplicatePhone are skipped: the duplicate-
+  // group columns already cover them.
+  const errorTypesByRow = new Map<number, Set<string>>();
+  const errorTypes: string[] = [];
+  for (const issue of issues) {
+    if (issue.severity !== 'Error') continue;
+    if (issue.issueType === 'DuplicateEmail' || issue.issueType === 'DuplicatePhone') continue;
+    if (!errorTypesByRow.has(issue.rowNumber)) errorTypesByRow.set(issue.rowNumber, new Set());
+    errorTypesByRow.get(issue.rowNumber)!.add(issue.issueType);
+    if (!errorTypes.includes(issue.issueType)) errorTypes.push(issue.issueType);
+  }
+  errorTypes.sort();
+  // Internal column keys are prefixed so an issue type can never collide with
+  // a Shopify column name
+  const errorKey = (type: string) => `err:${type}`;
+
+  // Marker columns lead (one per error type, duplicate groups, merged-rows
+  // audit trail when merging happened), then Row Number, then the Shopify
+  // columns
+  const leadingColumnCount = errorTypes.length + 3 + (anyMerges ? 1 : 0);
   sheet.columns = [
+    ...errorTypes.map((type) => ({ header: type, key: errorKey(type), width: 22 })),
     { header: 'Duplicate Group # (Email)', key: 'dupEmailGroup', width: 22 },
     { header: 'Duplicate Group # (Phone)', key: 'dupPhoneGroup', width: 22 },
+    ...(anyMerges ? [{ header: 'Merged From Rows', key: 'mergedFromRows', width: 18 }] : []),
     { header: 'Row Number', key: 'rowNumber', width: 12 },
     ...effectiveColumns.map((col) => ({ header: col, key: col, width: 26 })),
   ];
 
   styleHeader(sheet.getRow(1), HEADER_COLOURS['Shopify Template']);
 
-  // Highlight the two duplicate-group header cells in red
+  // Highlight the error and duplicate-group header cells in red
   const headerRow = sheet.getRow(1);
-  for (const c of [1, 2]) {
+  for (let c = 1; c <= errorTypes.length + 2; c++) {
     headerRow.getCell(c).fill = {
       type: 'pattern',
       pattern: 'solid',
@@ -373,29 +420,23 @@ function addShopifyTemplateSheet(
     };
   }
 
-  // Build fix lookup: rowNumber → shopify column → fixed value
-  const fixMap = new Map<number, Map<string, string>>();
-  for (const fix of autoFixes) {
-    if (!fixMap.has(fix.rowNumber)) fixMap.set(fix.rowNumber, new Map());
-    fixMap.get(fix.rowNumber)!.set(fix.field, fix.fixedValue);
-  }
-
-  for (const origRow of originalRows) {
-    const data = origRow.data as Record<string, string>;
-    const rowFixes = fixMap.get(origRow.rowNumber);
+  for (const row of templateRows) {
+    const rowFixes = fixMap.get(row.rowNumber);
     const rowData: Record<string, string | number> = {
-      rowNumber: origRow.rowNumber,
-      dupEmailGroup: emailGroups.get(origRow.rowNumber) ?? '',
-      dupPhoneGroup: phoneGroups.get(origRow.rowNumber) ?? '',
+      rowNumber: row.rowNumber,
+      dupEmailGroup: emailGroups.get(row.rowNumber) ?? '',
+      dupPhoneGroup: phoneGroups.get(row.rowNumber) ?? '',
     };
-
-    // Only mapped source columns contribute values; unmapped columns are ignored
-    const mappedSources: Record<string, string> = {};
-    for (const src of Object.keys(columnMapping)) mappedSources[src] = data[src] ?? '';
-    const mapped = applyMappingToRecord(mappedSources, columnMapping);
+    if (anyMerges) {
+      rowData.mergedFromRows = row.mergedFrom.join(', ');
+    }
+    const rowErrorTypes = errorTypesByRow.get(row.rowNumber);
+    for (const type of errorTypes) {
+      rowData[errorKey(type)] = rowErrorTypes?.has(type) ? 'X' : '';
+    }
 
     for (const shopifyCol of effectiveColumns) {
-      rowData[shopifyCol] = rowFixes?.get(shopifyCol) ?? mapped[shopifyCol] ?? '';
+      rowData[shopifyCol] = row.record[shopifyCol] ?? '';
     }
 
     // Strip the duplicated identifier from every group row except the keeper
@@ -406,7 +447,7 @@ function addShopifyTemplateSheet(
     if (moveDuplicatesToNotes) {
       const moved: string[] = [];
       const dupTags: string[] = [];
-      if (emailDupes.repeats.has(origRow.rowNumber)) {
+      if (emailDupes.repeats.has(row.rowNumber)) {
         const email = String(rowData['Email'] ?? '');
         if (email) {
           moved.push(`Duplicate email: ${email}`);
@@ -414,7 +455,7 @@ function addShopifyTemplateSheet(
           rowData['Email'] = '';
         }
       }
-      if (phoneDupes.repeats.has(origRow.rowNumber)) {
+      if (phoneDupes.repeats.has(row.rowNumber)) {
         const phone = String(rowData['Phone'] ?? '');
         if (phone) {
           moved.push(`Duplicate phone: ${phone}`);
@@ -442,16 +483,17 @@ function addShopifyTemplateSheet(
     if (rowFixes) {
       effectiveColumns.forEach((shopifyCol, colIdx) => {
         if (rowFixes.has(shopifyCol)) {
-          // +4: cols 1-2 are duplicate-group columns, col 3 is Row Number
-          const cell = excelRow.getCell(colIdx + 4);
+          const cell = excelRow.getCell(colIdx + leadingColumnCount + 1);
           cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: AUTO_FIX_GREEN } };
         }
       });
     }
   }
 
-  // +3 for the two duplicate-group columns and the Row Number column
-  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(effectiveColumns.length + 3)}1` };
+  sheet.autoFilter = {
+    from: 'A1',
+    to: `${columnIndexToLetter(effectiveColumns.length + leadingColumnCount)}1`,
+  };
 }
 
 function columnIndexToLetter(index: number): string {
