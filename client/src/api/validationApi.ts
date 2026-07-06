@@ -16,6 +16,15 @@ const api = axios.create({
   baseURL: '/api',
 });
 
+// Surface the server's { error } message instead of Axios's generic
+// "Request failed with status code N".
+api.interceptors.response.use(undefined, (err: unknown) => {
+  if (axios.isAxiosError(err) && typeof err.response?.data?.error === 'string') {
+    err.message = err.response.data.error;
+  }
+  return Promise.reject(err);
+});
+
 export async function previewCsv(file: File): Promise<CsvPreview> {
   const formData = new FormData();
   formData.append('file', file);
@@ -29,11 +38,13 @@ export async function validateWithMapping(
   uploadId: string,
   columnMapping: ColumnMapping,
   heliosMigratedTag: boolean,
+  moveDuplicatesToNotes: boolean,
 ): Promise<ValidationResult> {
   const { data } = await api.post<ValidationResult>('/customer-validation/validate', {
     uploadId,
     columnMapping,
     heliosMigratedTag,
+    moveDuplicatesToNotes,
   });
   return data;
 }

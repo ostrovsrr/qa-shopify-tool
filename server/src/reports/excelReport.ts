@@ -1,6 +1,11 @@
 import ExcelJS from 'exceljs';
 import prisma from '../db/prisma';
-import { SHOPIFY_COLUMNS } from '../services/columnMapping.service';
+import {
+  applyMappingToRecord,
+  KEEP_COLUMN,
+  resolveMappingTarget,
+  SHOPIFY_COLUMNS,
+} from '../services/columnMapping.service';
 import { CustomerValidationIssue, Severity } from '../types';
 import { AutoFixEntry, computeAutoFixes } from './autoFix';
 
@@ -35,6 +40,7 @@ export async function generateExcelReport(validationId: string): Promise<Buffer>
     originalColumns: unknown;
     columnMapping: unknown;
     heliosMigratedTag: boolean;
+    moveDuplicatesToNotes: boolean;
     originalRows: { rowNumber: number; data: unknown }[];
   };
 
@@ -65,12 +71,20 @@ export async function generateExcelReport(validationId: string): Promise<Buffer>
 
   const autoFixes = computeAutoFixes(runData.originalRows, columnMapping);
   const heliosMigratedTag: boolean = runData.heliosMigratedTag ?? false;
+  const moveDuplicatesToNotes: boolean = runData.moveDuplicatesToNotes ?? false;
 
   addSummarySheet(workbook, run, issues);
   addIssuesSheet(workbook, 'Errors', issues.filter((i) => i.severity === 'Error'));
   addIssuesSheet(workbook, 'Warnings', issues.filter((i) => i.severity === 'Warning'));
   addFullUploadedFileSheet(workbook, originalColumns, runData.originalRows);
-  addShopifyTemplateSheet(workbook, columnMapping, runData.originalRows, autoFixes, heliosMigratedTag);
+  addShopifyTemplateSheet(
+    workbook,
+    columnMapping,
+    runData.originalRows,
+    autoFixes,
+    heliosMigratedTag,
+    moveDuplicatesToNotes,
+  );
 
   const arrayBuffer = await workbook.xlsx.writeBuffer();
   return Buffer.from(arrayBuffer);
@@ -231,6 +245,7 @@ function addShopifyTemplateSheet(
   originalRows: { rowNumber: number; data: unknown }[],
   autoFixes: AutoFixEntry[] = [],
   heliosMigratedTag = false,
+  moveDuplicatesToNotes = false,
 ) {
   const sheet = workbook.addWorksheet('Shopify Template');
 
@@ -239,8 +254,9 @@ function addShopifyTemplateSheet(
     return;
   }
 
-  // Determine which Shopify columns are present, in canonical SHOPIFY_COLUMNS order
-  const mappedTargets = new Set(Object.values(columnMapping));
+  // Determine which Shopify columns are present, in canonical SHOPIFY_COLUMNS order.
+  // Append targets ("Add to Tags"/"Add to Note") count as Tags/Note.
+  const mappedTargets = new Set(Object.values(columnMapping).map(resolveMappingTarget));
   const shopifyColumns = SHOPIFY_COLUMNS.filter((col) => mappedTargets.has(col));
 
   // If appending HeliosMigrated tag and Tags isn't already mapped, add it as a trailing column
@@ -248,8 +264,9 @@ function addShopifyTemplateSheet(
   const effectiveColumns: string[] =
     heliosMigratedTag && !tagsAlreadyMapped ? [...shopifyColumns, 'Tags'] : [...shopifyColumns];
 
-  // Build reverse map: Shopify column → source CSV column(s)
-  // (multiple source columns can map to the same target — last one wins)
+  // Reverse map (Shopify column → source CSV column, last one wins) — only used
+  // for the duplicate-group lookups below; cell values go through
+  // applyMappingToRecord so append targets are honoured.
   const reverseMap: Record<string, string> = {};
   for (const [src, tgt] of Object.entries(columnMapping)) {
     reverseMap[tgt] = src;
@@ -257,14 +274,17 @@ function addShopifyTemplateSheet(
 
   // Assign duplicate-group numbers per row, grouped by a Shopify field's value.
   // Matches the DuplicateEmail/DuplicatePhone validator normalization so the
-  // report stays consistent. Returns rowNumber → group # (only for duplicates).
+  // report stays consistent. `groups` maps rowNumber → group # (only for
+  // duplicates); `repeats` holds the 2nd+ occurrence rows of each group (the
+  // ones Shopify would reject as "taken" — the first occurrence imports fine).
   const buildDuplicateGroups = (
     field: string,
     normalize: (value: string) => string,
-  ): Map<number, number> => {
-    const result = new Map<number, number>();
+  ): { groups: Map<number, number>; repeats: Set<number> } => {
+    const groups = new Map<number, number>();
+    const repeats = new Set<number>();
     const srcCol = reverseMap[field];
-    if (srcCol === undefined) return result;
+    if (srcCol === undefined) return { groups, repeats };
 
     const order: string[] = [];
     const byValue = new Map<string, number[]>();
@@ -284,13 +304,34 @@ function addShopifyTemplateSheet(
       const rowNumbers = byValue.get(value)!;
       if (rowNumbers.length < 2) continue;
       groupNumber++;
-      for (const rowNumber of rowNumbers) result.set(rowNumber, groupNumber);
+      rowNumbers.forEach((rowNumber, idx) => {
+        groups.set(rowNumber, groupNumber);
+        if (idx > 0) repeats.add(rowNumber);
+      });
     }
-    return result;
+    return { groups, repeats };
   };
 
-  const emailGroups = buildDuplicateGroups('Email', (v) => v.trim().toLowerCase());
-  const phoneGroups = buildDuplicateGroups('Phone', (v) => v.replace(/\D/g, ''));
+  const emailDupes = buildDuplicateGroups('Email', (v) => v.trim().toLowerCase());
+  const phoneDupes = buildDuplicateGroups('Phone', (v) => v.replace(/\D/g, ''));
+  const emailGroups = emailDupes.groups;
+  const phoneGroups = phoneDupes.groups;
+
+  // Moving duplicates into Note needs a Note column even when none was mapped
+  if (
+    moveDuplicatesToNotes &&
+    (emailDupes.repeats.size > 0 || phoneDupes.repeats.size > 0) &&
+    !effectiveColumns.includes('Note')
+  ) {
+    effectiveColumns.push('Note');
+  }
+
+  // "Keep" columns pass through as trailing columns under their original names
+  const keptColumns = Object.entries(columnMapping)
+    .filter(([, tgt]) => tgt === KEEP_COLUMN)
+    .map(([src]) => src)
+    .filter((src) => !effectiveColumns.includes(src));
+  effectiveColumns.push(...keptColumns);
 
   // Duplicate-group columns lead, then Row Number, then the Shopify columns
   sheet.columns = [
@@ -328,9 +369,39 @@ function addShopifyTemplateSheet(
       dupPhoneGroup: phoneGroups.get(origRow.rowNumber) ?? '',
     };
 
+    // Only mapped source columns contribute values; unmapped columns are ignored
+    const mappedSources: Record<string, string> = {};
+    for (const src of Object.keys(columnMapping)) mappedSources[src] = data[src] ?? '';
+    const mapped = applyMappingToRecord(mappedSources, columnMapping);
+
     for (const shopifyCol of effectiveColumns) {
-      const srcCol = reverseMap[shopifyCol];
-      rowData[shopifyCol] = rowFixes?.get(shopifyCol) ?? (srcCol !== undefined ? (data[srcCol] ?? '') : '');
+      rowData[shopifyCol] = rowFixes?.get(shopifyCol) ?? mapped[shopifyCol] ?? '';
+    }
+
+    // Strip the duplicated identifier from 2nd+ occurrences and stash it in
+    // Note, so Shopify accepts the customer instead of rejecting it as "taken".
+    // Only the duplicated field is stripped — a row that's only an email
+    // duplicate keeps its phone, and vice versa. First occurrences keep both.
+    if (moveDuplicatesToNotes) {
+      const moved: string[] = [];
+      if (emailDupes.repeats.has(origRow.rowNumber)) {
+        const email = String(rowData['Email'] ?? '');
+        if (email) {
+          moved.push(`Duplicate email: ${email}`);
+          rowData['Email'] = '';
+        }
+      }
+      if (phoneDupes.repeats.has(origRow.rowNumber)) {
+        const phone = String(rowData['Phone'] ?? '');
+        if (phone) {
+          moved.push(`Duplicate phone: ${phone}`);
+          rowData['Phone'] = '';
+        }
+      }
+      if (moved.length > 0) {
+        const existingNote = String(rowData['Note'] ?? '').trim();
+        rowData['Note'] = [existingNote, ...moved].filter(Boolean).join(' | ');
+      }
     }
 
     if (heliosMigratedTag) {

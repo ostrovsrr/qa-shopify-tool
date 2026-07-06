@@ -16,11 +16,63 @@ export const SHOPIFY_COLUMNS = [
   'Default Address Country Code',
   'Default Address Zip',
   'Default Address Phone',
-  'Total Spent',
-  'Total Orders',
 ] as const;
 
 export type ShopifyColumn = (typeof SHOPIFY_COLUMNS)[number];
+
+// Append targets: not real Shopify columns, but mapping directives. A source
+// column mapped to one of these has its value appended to the Tags/Note field
+// instead of replacing a column. Multiple source columns may use the same
+// append target.
+export const APPEND_TO_TAGS = 'Add to Tags';
+export const APPEND_TO_NOTE = 'Add to Note';
+
+// Pass-through directive: the source column is carried into the Shopify
+// Template as-is, under its original name. Multiple columns can be kept.
+export const KEEP_COLUMN = 'Keep';
+
+const TAGS_SEPARATOR = ',';
+const NOTE_SEPARATOR = ' | ';
+
+/**
+ * Apply a column mapping to a single record (CSV-header-keyed → Shopify-column-keyed).
+ * Unmapped keys are kept under their original name. Sources mapped to
+ * "Add to Tags" / "Add to Note" are appended (in CSV column order) to the
+ * Tags / Note fields rather than becoming columns of their own; empty values
+ * are skipped.
+ */
+export function applyMappingToRecord(
+  record: Record<string, string>,
+  mapping: Record<string, string>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  const tagAppends: string[] = [];
+  const noteAppends: string[] = [];
+  for (const [key, value] of Object.entries(record)) {
+    const target = mapping[key] ?? key;
+    if (target === APPEND_TO_TAGS || target === APPEND_TO_NOTE) {
+      const trimmed = (value ?? '').trim();
+      if (trimmed) (target === APPEND_TO_TAGS ? tagAppends : noteAppends).push(trimmed);
+      continue;
+    }
+    // "Keep" passes the column through under its original name
+    out[target === KEEP_COLUMN ? key : target] = value;
+  }
+  if (tagAppends.length > 0) {
+    out['Tags'] = [(out['Tags'] ?? '').trim(), ...tagAppends].filter(Boolean).join(TAGS_SEPARATOR);
+  }
+  if (noteAppends.length > 0) {
+    out['Note'] = [(out['Note'] ?? '').trim(), ...noteAppends].filter(Boolean).join(NOTE_SEPARATOR);
+  }
+  return out;
+}
+
+/** The real Shopify column an append target feeds into; non-append targets pass through. */
+export function resolveMappingTarget(target: string): string {
+  if (target === APPEND_TO_TAGS) return 'Tags';
+  if (target === APPEND_TO_NOTE) return 'Note';
+  return target;
+}
 
 function normalize(name: string): string {
   return name.toLowerCase().replace(/[\s\-_()./]/g, '');
@@ -127,15 +179,6 @@ const ALIAS_MAP: Record<string, ShopifyColumn> = {
   defaultaddresscompany: 'Default Address Company',
   // Default Address Phone
   defaultaddressphone: 'Default Address Phone',
-  // Total Spent
-  totalspent: 'Total Spent',
-  amountspent: 'Total Spent',
-  lifetimespend: 'Total Spent',
-  // Total Orders
-  totalorders: 'Total Orders',
-  ordercount: 'Total Orders',
-  numberoforders: 'Total Orders',
-  numorders: 'Total Orders',
 };
 
 const SHOPIFY_SET = new Set<string>(SHOPIFY_COLUMNS);

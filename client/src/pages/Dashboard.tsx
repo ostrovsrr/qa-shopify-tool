@@ -40,12 +40,21 @@ export function Dashboard() {
     }
   };
 
-  const handleValidate = async (mapping: ColumnMapping, heliosMigratedTag: boolean) => {
+  const handleValidate = async (
+    mapping: ColumnMapping,
+    heliosMigratedTag: boolean,
+    moveDuplicatesToNotes: boolean,
+  ) => {
     if (!preview) return;
     setLoading(true);
     setError('');
     try {
-      const data = await validateWithMapping(preview.uploadId, mapping, heliosMigratedTag);
+      const data = await validateWithMapping(
+        preview.uploadId,
+        mapping,
+        heliosMigratedTag,
+        moveDuplicatesToNotes,
+      );
       setResult(data);
       setUploadPhase('results');
       setHistoryRefresh((n) => n + 1);

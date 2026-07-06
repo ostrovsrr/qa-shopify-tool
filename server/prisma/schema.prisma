@@ -19,6 +19,10 @@ model ValidationRun {
   originalColumns Json?
   columnMapping      Json?
   heliosMigratedTag  Boolean               @default(false)
+  // When on, the Shopify Template sheet strips the duplicated email/phone from
+  // 2nd+ occurrences of a duplicate group and appends the value to Note instead,
+  // so Shopify still accepts the customer on import.
+  moveDuplicatesToNotes Boolean            @default(false)
   ticketNumber       String?
   ticketName      String?
   comments        String?

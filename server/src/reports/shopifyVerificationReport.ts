@@ -1,6 +1,11 @@
 import ExcelJS from 'exceljs';
 import prisma from '../db/prisma';
-import { SHOPIFY_COLUMNS } from '../services/columnMapping.service';
+import {
+  applyMappingToRecord,
+  KEEP_COLUMN,
+  resolveMappingTarget,
+  SHOPIFY_COLUMNS,
+} from '../services/columnMapping.service';
 import { CustomerValidationIssue, Severity } from '../types';
 
 const HEADER_COLOURS: Record<string, string> = {
@@ -457,10 +462,16 @@ function addShopifyTemplateSheet(
     return;
   }
 
-  const mappedTargets = new Set(Object.values(columnMapping));
-  const shopifyColumns = SHOPIFY_COLUMNS.filter((col) => mappedTargets.has(col));
-  const reverseMap: Record<string, string> = {};
-  for (const [src, tgt] of Object.entries(columnMapping)) reverseMap[tgt] = src;
+  // Append targets ("Add to Tags"/"Add to Note") count as Tags/Note.
+  const mappedTargets = new Set(Object.values(columnMapping).map(resolveMappingTarget));
+  const baseColumns = SHOPIFY_COLUMNS.filter((col) => mappedTargets.has(col));
+
+  // "Keep" columns pass through as trailing columns under their original names
+  const keptColumns = Object.entries(columnMapping)
+    .filter(([, tgt]) => tgt === KEEP_COLUMN)
+    .map(([src]) => src)
+    .filter((src) => !baseColumns.includes(src as (typeof baseColumns)[number]));
+  const shopifyColumns: string[] = [...baseColumns, ...keptColumns];
 
   const resultByRow = new Map(rowResults.map((r) => [r.rowNumber, r]));
   const columns = [
@@ -488,9 +499,13 @@ function addShopifyTemplateSheet(
       'Shopify Code': result?.shopifyCode ?? '',
       'Shopify Message': result?.message ?? '',
     };
+    // Only mapped source columns contribute values; unmapped columns are ignored
+    const mappedSources: Record<string, string> = {};
+    for (const src of Object.keys(columnMapping)) mappedSources[src] = data[src] ?? '';
+    const mapped = applyMappingToRecord(mappedSources, columnMapping);
+
     for (const shopifyCol of shopifyColumns) {
-      const srcCol = reverseMap[shopifyCol];
-      rowData[shopifyCol] = srcCol !== undefined ? (data[srcCol] ?? '') : '';
+      rowData[shopifyCol] = mapped[shopifyCol] ?? '';
     }
     sheet.addRow(rowData);
   }

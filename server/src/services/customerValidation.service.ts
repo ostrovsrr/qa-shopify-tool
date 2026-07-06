@@ -10,6 +10,7 @@ import {
 } from '../types';
 import { customerValidationRules } from '../validators/customer';
 import prisma from '../db/prisma';
+import { applyMappingToRecord } from './columnMapping.service';
 import { parseCsvBuffer } from './csvParser.service';
 import { getPreview } from './previewStore';
 
@@ -18,19 +19,11 @@ function applyColumnMapping(
   mapping: Record<string, string>,
 ): CustomerCsvRow[] {
   if (Object.keys(mapping).length === 0) return rows;
-  return rows.map((row) => {
-    const newOriginal: Record<string, string> = {};
-    const newNormalized: Record<string, string> = {};
-    for (const [key, value] of Object.entries(row.original)) {
-      const mapped = mapping[key] ?? key;
-      newOriginal[mapped] = value;
-    }
-    for (const [key, value] of Object.entries(row.normalized)) {
-      const mapped = mapping[key] ?? key;
-      newNormalized[mapped] = value;
-    }
-    return { ...row, original: newOriginal, normalized: newNormalized };
-  });
+  return rows.map((row) => ({
+    ...row,
+    original: applyMappingToRecord(row.original, mapping),
+    normalized: applyMappingToRecord(row.normalized, mapping),
+  }));
 }
 
 export async function validateCustomerCsv(
@@ -38,6 +31,7 @@ export async function validateCustomerCsv(
   fileName: string,
   columnMapping: Record<string, string> = {},
   heliosMigratedTag = false,
+  moveDuplicatesToNotes = false,
 ): Promise<CustomerValidationResult> {
   const { rows: rawRows, headers } = await parseCsvBuffer(buffer);
 
@@ -80,6 +74,7 @@ export async function validateCustomerCsv(
         ? (columnMapping as unknown as object)
         : undefined,
       heliosMigratedTag,
+      moveDuplicatesToNotes,
       issues: {
         create: allIssues.map((issue) => ({
           id: uuidv4(),
@@ -117,10 +112,17 @@ export async function validateFromPreview(
   uploadId: string,
   columnMapping: Record<string, string>,
   heliosMigratedTag = false,
+  moveDuplicatesToNotes = false,
 ): Promise<CustomerValidationResult | null> {
   const entry = getPreview(uploadId);
   if (!entry) return null;
-  return validateCustomerCsv(entry.buffer, entry.fileName, columnMapping, heliosMigratedTag);
+  return validateCustomerCsv(
+    entry.buffer,
+    entry.fileName,
+    columnMapping,
+    heliosMigratedTag,
+    moveDuplicatesToNotes,
+  );
 }
 
 export async function getValidationResult(

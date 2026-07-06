@@ -48,7 +48,7 @@ app.use(express.json());
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 }, // 50 MB
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB
   fileFilter: (_req, file, cb) => {
     const isCsv =
       file.mimetype === 'text/csv' ||
@@ -95,6 +95,14 @@ app.get('/api/customer-import/:id', getImportHandler);
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   console.error('[Error]', err.message);
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      res.status(413).json({ error: 'File is too large. The maximum upload size is 100 MB.' });
+      return;
+    }
+    res.status(400).json({ error: err.message });
+    return;
+  }
   res.status(500).json({ error: err.message ?? 'Internal server error.' });
 });
 

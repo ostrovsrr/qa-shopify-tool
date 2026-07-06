@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { ImportBatchJob } from '@prisma/client';
 import prisma from '../db/prisma';
+import { applyMappingToRecord } from './columnMapping.service';
 import { getImportFeedback, ImportFeedback } from './importFeedback.service';
 import {
   BuiltJsonl,
@@ -55,11 +56,7 @@ function mapRecord(
   mapping: Record<string, string> | null | undefined,
 ): Record<string, string> {
   if (!mapping || Object.keys(mapping).length === 0) return { ...original };
-  const out: Record<string, string> = {};
-  for (const [key, value] of Object.entries(original)) {
-    out[mapping[key] ?? key] = value;
-  }
-  return out;
+  return applyMappingToRecord(original, mapping);
 }
 
 function val(row: Record<string, string>, col: string): string {
