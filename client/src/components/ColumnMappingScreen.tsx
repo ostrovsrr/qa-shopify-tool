@@ -36,6 +36,7 @@ interface Props {
     mapping: ColumnMapping,
     heliosMigratedTag: boolean,
     moveDuplicatesToNotes: boolean,
+    mergeMatchingDuplicates: boolean,
   ) => void;
   onBack: () => void;
   loading: boolean;
@@ -51,6 +52,7 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
   });
   const [heliosMigratedTag, setHeliosMigratedTag] = useState(true);
   const [moveDuplicatesToNotes, setMoveDuplicatesToNotes] = useState(false);
+  const [mergeMatchingDuplicates, setMergeMatchingDuplicates] = useState(false);
 
   const mappedCount = Object.values(mapping).filter(Boolean).length;
 
@@ -59,7 +61,7 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
     for (const [src, tgt] of Object.entries(mapping)) {
       if (tgt) filtered[src] = tgt;
     }
-    onValidate(filtered, heliosMigratedTag, moveDuplicatesToNotes);
+    onValidate(filtered, heliosMigratedTag, moveDuplicatesToNotes, mergeMatchingDuplicates);
   };
 
   return (
@@ -100,6 +102,18 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
               disabled={loading}
             />
             Move duplicate emails/phones to Note
+          </label>
+          <label
+            className="helios-tag-label"
+            title="In the Shopify Template sheet, duplicate rows whose names also match (exactly, ignoring case) are merged into one customer: the most-filled row wins, empty fields fill from the others, tags are combined, notes concatenated. Marketing consent / tax exempt are never escalated to TRUE by a merge. A 'Merged From Rows' column shows what was absorbed."
+          >
+            <input
+              type="checkbox"
+              checked={mergeMatchingDuplicates}
+              onChange={(e) => setMergeMatchingDuplicates(e.target.checked)}
+              disabled={loading}
+            />
+            Merge matching duplicates
           </label>
           <button
             className="btn btn-primary"

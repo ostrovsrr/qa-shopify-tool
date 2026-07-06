@@ -44,6 +44,7 @@ export function Dashboard() {
     mapping: ColumnMapping,
     heliosMigratedTag: boolean,
     moveDuplicatesToNotes: boolean,
+    mergeMatchingDuplicates: boolean,
   ) => {
     if (!preview) return;
     setLoading(true);
@@ -54,6 +55,7 @@ export function Dashboard() {
         mapping,
         heliosMigratedTag,
         moveDuplicatesToNotes,
+        mergeMatchingDuplicates,
       );
       setResult(data);
       setUploadPhase('results');

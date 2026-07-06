@@ -12,7 +12,8 @@ An internal tool for validating Shopify Customer CSV files before import. Upload
   - **Add to Note** — appends the column's value to Note (`" | "`-separated); multiple columns can be appended
   - **Keep (as-is)** — carries the column into the Shopify Template sheet unchanged, under its original name
 - **15 validation rules** covering contacts, emails, phones, addresses, postal/province codes, tags, consent fields, HTML injection, and more
-- **Move duplicates to Note** (optional, per run) — for each duplicate email/phone group, the most-filled row keeps the value; the others get it cleared, appended to their Note, and tagged `DuplicateEmailNotes` / `DuplicatePhoneNotes` so Shopify accepts them on import and they stay filterable in admin
+- **Merge matching duplicates** (optional, per run) — duplicate rows whose names also match (exactly, case-insensitive, non-empty) are merged into one customer in the Shopify Template: most-filled row wins, empty fields fill from the others, tags union, notes concatenate, and consent/tax-exempt are never escalated to TRUE by a merge; a "Merged From Rows" column keeps the audit trail
+- **Move duplicates to Note** (optional, per run) — for each *remaining* duplicate email/phone group (runs after merging), the most-filled row keeps the value; the others get it cleared, appended to their Note, and tagged `DuplicateEmailNotes` / `DuplicatePhoneNotes` so Shopify accepts them on import and they stay filterable in admin
 - **HeliosMigrated tag** (optional, per run) — appends a `HeliosMigrated` tag to every row in the template
 - **Excel report** — Summary, Errors, Warnings, Full Uploaded File, and a **Shopify Template** sheet (mapped columns in Shopify order, duplicate-group markers, auto-fix highlights)
 - **Validation history** — recent runs with editable ticket number/name and comments
@@ -96,11 +97,63 @@ The app will be available at **http://localhost:5173**.
 ## Workflow
 
 1. **Upload** a CSV — the server parses it and returns headers + sample rows
-2. **Map columns** to Shopify fields (auto-suggestions are pre-filled); choose the per-run options (HeliosMigrated tag, Move duplicates to Note)
+2. **Map columns** to Shopify fields (auto-suggestions are pre-filled); choose the per-run options (HeliosMigrated tag, Merge matching duplicates, Move duplicates to Note)
 3. **Validate** — all 15 rules run against the mapped rows; results persist to PostgreSQL
 4. **Review** issues in the dashboard, or open past runs from History
 5. **Download** the Excel report — the Shopify Template sheet is the import-ready output
 6. *(Optional)* **Import into a test store** to compare Shopify's real accept/reject behavior against the validators
+
+---
+
+## Duplicate Handling (Shopify Template sheet)
+
+Shopify rejects a customer import row whose email or phone is already taken, so
+duplicates in the source file need a decision before import. Two per-run options
+(both off by default, chosen on the mapping screen) handle them. They only
+affect the **Shopify Template** sheet of the Excel report — the validators
+always report what's really in the source file, and the test-store import is
+untouched.
+
+### Merge matching duplicates
+
+Collapses rows that are *the same person* into one customer.
+
+- **When rows merge:** they share a normalized **email** (trimmed,
+  case-insensitive) *or* a normalized **phone** (digits only, NANP country code
+  stripped — `+1 (416) 555-0000` equals `416-555-0000`), **and** their names
+  also match (First + Last, case/whitespace-insensitive, and **non-empty** —
+  two nameless rows sharing an email never merge, since that usually means a
+  placeholder email, not one person). A matching name alone is never enough.
+- **How fields combine:** the most-filled row is the keeper (ties → earliest
+  row). The keeper's non-empty values win; its empty fields fill from the
+  absorbed rows in row order. Tags are unioned (case-insensitive), Notes are
+  concatenated with `" | "`.
+- **Consent is never escalated:** Accepts Email/SMS Marketing and Tax Exempt
+  end up TRUE only if *every* row that specified the field agreed; any conflict
+  resolves to FALSE.
+- **Audit trail:** a "Merged From Rows" column lists the CSV row numbers each
+  keeper absorbed. The Full Uploaded File sheet always retains every original
+  row. Transitive chains collapse too (A=B by email, B=C by phone, same name →
+  one customer).
+
+### Move duplicates to Note
+
+A lossless fallback for duplicates that *remain* — different people sharing a
+contact. Within each remaining duplicate group, the most-filled row keeps the
+email/phone; every other row gets the duplicated value cleared, appended to its
+Note (`Duplicate email: … | Duplicate phone: …`), and tagged
+`DuplicateEmailNotes` / `DuplicatePhoneNotes` so the affected customers are
+filterable in Shopify admin after import. Only the duplicated field is
+stripped — an email-only duplicate keeps its phone, and vice versa.
+
+### Both options together
+
+Order is always **merge first, then move to Note**: same-person duplicates
+collapse, duplicate groups are recomputed on the surviving rows (a merged
+keeper competes with its post-merge, fuller record), and only the genuinely
+distinct people who still share a contact go through the move-to-Note path.
+The result is unique by email and by phone *within the file* — collisions with
+customers already in the store are out of scope for a CSV-only tool.
 
 ---
 

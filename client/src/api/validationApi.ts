@@ -39,12 +39,14 @@ export async function validateWithMapping(
   columnMapping: ColumnMapping,
   heliosMigratedTag: boolean,
   moveDuplicatesToNotes: boolean,
+  mergeMatchingDuplicates: boolean,
 ): Promise<ValidationResult> {
   const { data } = await api.post<ValidationResult>('/customer-validation/validate', {
     uploadId,
     columnMapping,
     heliosMigratedTag,
     moveDuplicatesToNotes,
+    mergeMatchingDuplicates,
   });
   return data;
 }
