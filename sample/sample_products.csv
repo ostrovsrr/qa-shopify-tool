@@ -1,0 +1,6 @@
+Handle,Title,Body (HTML),Vendor,Type,Tags,Published,Option1 Name,Option1 Value,Option2 Name,Option2 Value,Variant SKU,Variant Price,Variant Compare At Price,Variant Taxable,Image Src,custom.fabric (product.metafields.custom.fabric),Featured (product.metafields.custom.is_featured)
+cool-tee,Cool Tee,<p>A soft cotton tee.</p>,Acme,Shirts,"summer,sale",TRUE,Size,Small,Color,Red,TEE-S-R,19.99,24.99,TRUE,https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder.png,Cotton,true
+cool-tee,,,,,,,Size,Large,Color,Red,TEE-L-R,21.99,,TRUE,,,
+cool-tee,,,,,,,,,,,,,,,https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-2.png,,
+plain-mug,Plain Mug,<p>An 11oz ceramic mug.</p>,Acme,Drinkware,gift,TRUE,,,,,MUG-1,9.99,,TRUE,,Ceramic,false
+bad-price,Bad Price Product,<p>This should be rejected.</p>,Acme,Misc,,TRUE,,,,,BAD-1,-5.00,,TRUE,,,

@@ -144,3 +144,124 @@ model ValidationIssue {
 
   @@map("validation_issues")
 }
+
+// ── Products ──
+
+// One CSV upload. The product CSV is already in Shopify template format, so there
+// is no validation/mapping step — we just persist what was uploaded, grouped by
+// Handle into products, and let the import be the truth.
+model ProductUploadRun {
+  id              String   @id @default(uuid())
+  fileName        String
+  // Number of products = distinct Handles in the CSV (the import unit), not rows.
+  productCount    Int
+  // The CSV header row, in order, so the original file shape is recoverable.
+  originalColumns Json?
+  ticketNumber    String?
+  ticketName      String?
+  comments        String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  originalRows ProductOriginalRow[]
+  importRuns   ProductImportRun[]
+
+  @@map("product_upload_runs")
+}
+
+// One import attempt of an upload into Shopify. For a single-store run this owns
+// the bulk op directly; for a parallel batch it is the parent that owns the merged
+// rowResults while the per-store bulk ops live on its ProductImportJob children.
+model ProductImportRun {
+  id           String @id @default(uuid())
+  uploadId     String
+  // storeId lets a later reconcile rebuild the Shopify client (getShopifyClient(storeId))
+  // when finalizing an async run; null falls back to the default store. Also null for
+  // a batch parent run, whose stores live on its ProductImportJob children.
+  storeId      String?
+  shopDomain   String
+  // Null for a batch parent (the bulk ops live on its ProductImportJob children);
+  // set for a normal single-store run.
+  bulkOperationId String?
+  // RUNNING (start persisted, bulk op queued) → COMPLETED | FAILED | CANCELED | EXPIRED
+  status       String  @default("RUNNING")
+  // Failure reason for the terminal error states; null while RUNNING/COMPLETED.
+  error        String?
+  successCount Int     @default(0)
+  errorCount   Int     @default(0)
+  createdAt    DateTime @default(now())
+
+  uploadRun  ProductUploadRun      @relation(fields: [uploadId], references: [id], onDelete: Cascade)
+  rowResults ProductImportResult[]
+  batchJobs  ProductImportJob[]
+
+  @@index([uploadId])
+  @@map("product_import_runs")
+}
+
+// One per-store bulk operation within a parallel batch import. The parent
+// ProductImportRun owns the merged rowResults; each job tracks its own store's
+// bulk op and the contiguous product slice it imported (recomputed from
+// batchIndex/batchCount).
+model ProductImportJob {
+  id              String  @id @default(uuid())
+  importRunId     String
+  storeId         String?
+  shopDomain      String
+  batchIndex      Int
+  batchCount      Int
+  // Null when the job failed to even start (e.g. store unhealthy at launch).
+  bulkOperationId String?
+  status          String  @default("RUNNING")
+  error           String?
+  // Counted in products, not CSV rows.
+  productCount    Int     @default(0)
+  successCount    Int     @default(0)
+  errorCount      Int     @default(0)
+  // Times the reconcile poll has checked this job while non-terminal; a stuck job
+  // (perma-RUNNING or repeatedly erroring) is failed once it exceeds the max.
+  pollAttempts    Int     @default(0)
+  createdAt       DateTime @default(now())
+
+  importRun ProductImportRun @relation(fields: [importRunId], references: [id], onDelete: Cascade)
+
+  @@index([importRunId])
+  @@map("product_import_jobs")
+}
+
+// One result per product (keyed by Handle). The report groups rejections by
+// (shopifyField, shopifyCode) directly off the real productSet userError code.
+model ProductImportResult {
+  id               String  @id @default(uuid())
+  importRunId      String
+  handle           String
+  accepted         Boolean
+  shopifyProductId String?
+  shopifyCode      String?
+  shopifyField     String?
+  message          String?
+  // Which store imported this product — for a batch it's the job's store, enabling
+  // the per-store accepted/rejected breakdown; null for a single-store run.
+  storeId          String?
+  createdAt        DateTime @default(now())
+
+  importRun ProductImportRun @relation(fields: [importRunId], references: [id], onDelete: Cascade)
+
+  @@index([importRunId])
+  @@map("product_import_results")
+}
+
+// The raw CSV rows for an upload, preserved in order so the original product CSV
+// is recoverable and groupable by Handle for input building.
+model ProductOriginalRow {
+  id          String @id @default(uuid())
+  uploadRunId String
+  rowNumber   Int
+  data        Json
+  createdAt   DateTime @default(now())
+
+  uploadRun ProductUploadRun @relation(fields: [uploadRunId], references: [id], onDelete: Cascade)
+
+  @@index([uploadRunId])
+  @@map("product_original_rows")
+}

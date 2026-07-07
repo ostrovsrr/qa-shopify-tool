@@ -4,7 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Internal tool for validating Shopify Customer CSV files before import. Upload a CSV, map columns, run 13 validation rules, store results in PostgreSQL, and download an Excel report.
+Internal QA tool for Shopify CSV migrations, with two sections served by one server, one client, and one PostgreSQL database:
+
+- **Customers** (`/customers`): validate a Customer CSV before import — upload, map columns, run the validation rules, store results, download an Excel report. Optionally import into Shopify test stores and compare validator predictions against real import results.
+- **Products** (`/products`): QA a Shopify product template CSV by importing it into one or more test stores (in parallel) and reporting which products imported and which Shopify rejected, grouped by `(field, code)`. **No validators/precheck and no column mapping** — the product CSV is already in Shopify template format, and the import unit is a **product** (one per CSV `Handle`, spanning multiple rows for variants/images), not a row. See `docs/products/` for the original design docs.
 
 ## Commands
 
@@ -37,15 +40,21 @@ cd server && npm install && npm run prisma:generate && npm run prisma:migrate
 cd ../client && npm install
 ```
 
-There are no tests or linter configs.
+The server has vitest tests (`npm run test`, `npm run test:integration`, `npm run typecheck` from `server/`). There are no linter configs.
 
 ## Architecture
 
-### Data flow
+### Data flow — Customers
 1. Client uploads CSV → `POST /api/customer-validation/preview` (returns parsed headers for column mapping)
 2. User maps CSV columns to Shopify fields on the `ColumnMappingScreen`
 3. Client submits mapping → `POST /api/customer-validation/validate` → runs all 13 rules, persists `ValidationRun`, `ValidationIssue`, and `OriginalCustomerRow` records to Postgres
 4. Client displays results; user can download `GET /api/customer-validation/report/:id` as Excel
+5. Optional: import into Shopify test stores via `/api/customer-import/*`
+
+### Data flow — Products
+1. Client uploads product CSV → `POST /api/product-upload` (parse + persist grouped by `Handle`; no mapping/validation)
+2. Client starts an import → `POST /api/product-import/:uploadId/run` (single store) or `/run-batch` (parallel across stores), then polls `GET /api/product-import/:id` until terminal
+3. Excel report via `GET /api/product-import/:id/report`; per-store product stats and QA cleanup via `/api/shopify/stores/:storeId/product-stats` and `/cleanup-qa-products` (the unsuffixed `/stats` and `/cleanup-qa` routes are the **customer** equivalents — don't mix them up: cleanup deletes qa-tagged customers vs products respectively)
 
 ### Backend (`server/src/`)
 - `controllers/customerValidation.controller.ts` — Express route handlers
@@ -56,14 +65,19 @@ There are no tests or linter configs.
 - `reports/excelReport.ts` — generates multi-sheet Excel (Summary, Errors, Warnings, Info, Original Rows With Issues)
 - `db/prisma.ts` — singleton Prisma client
 - `validators/customer/` — one file per rule (see below)
+- `services/shopifyBulk.ts`, `services/shopifyClient.ts`, `config/shopify.ts` — shared Shopify bulk-import engine used by both the customer and product flows (client requires customer + product scopes)
+- `services/productUpload.service.ts`, `productImport.service.ts`, `productCsvParser.ts`, `productCleanup.service.ts`, `productFeedback.service.ts`, `reports/productImportReport.ts` — products flow
 
 ### Frontend (`client/src/`)
-- `api/validationApi.ts` — Axios API client
-- `components/` — `UploadArea`, `ColumnMappingScreen`, `IssuesTable`, `SummaryCards`, `ValidationHistory`
+- React Router: `/customers` → `pages/CustomerDashboard.tsx`, `/products` → `pages/ProductDashboard.tsx` (switcher in each header)
+- `api/validationApi.ts` (customers) and `api/productApi.ts` (products) — Axios API clients
+- `components/` — customers: `UploadArea`, `ColumnMappingScreen`, `IssuesTable`, `SummaryCards`, `ValidationHistory`, `ImportPanel`; products: `ProductUploadArea`, `StoreImportControls`, `ProductResultsView`, `ProductHistory`
 - Vite proxies `/api` to `http://localhost:3001` (configured in `vite.config.ts`)
 
 ### Database (Prisma / PostgreSQL)
-Three models: `ValidationRun` (metadata, column mapping, counts), `ValidationIssue` (per-issue records), `OriginalCustomerRow` (raw CSV rows for export).
+One database (`shopify_csv_qa`). Customer models: `ValidationRun`, `ValidationIssue`, `OriginalCustomerRow`, `ImportRun`, `ImportBatchJob`, `ImportRowResult`. Product models: `ProductUploadRun`, `ProductImportRun`, `ProductImportJob`, `ProductImportResult`, `ProductOriginalRow`.
+
+**Migration caveat:** the live DB has intentional drift (`validation_runs.crossReferenceData` exists in the DB but not in `schema.prisma`). Never run bare `prisma migrate dev` — its drift check may offer a destructive reset. Create migrations with `--create-only`, review the SQL, and apply with `prisma migrate deploy`.
 
 ## Adding a Validation Rule
 
@@ -82,4 +96,5 @@ Three models: `ValidationRun` (metadata, column mapping, counts), `ValidationIss
 
 ## Sample Data
 
-`sample/shopify-customers-sample.csv` contains intentional errors covering all 13 rules — use it for manual testing.
+- `sample/shopify-customers-sample.csv` contains intentional errors covering all 13 rules — use it for manual customer-flow testing.
+- `sample/sample_products.csv` is a Shopify product template CSV for manual product-flow testing.

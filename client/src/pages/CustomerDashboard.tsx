@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { NavLink } from 'react-router-dom';
 import {
   fetchValidationResult,
   getReportDownloadUrl,
@@ -15,7 +16,7 @@ import { ColumnMapping, CsvPreview, ValidationResult } from '../types';
 
 type UploadPhase = 'upload' | 'mapping' | 'results';
 
-export function Dashboard() {
+export function CustomerDashboard() {
   const [uploadPhase, setUploadPhase] = useState<UploadPhase>('upload');
   const [preview, setPreview] = useState<CsvPreview | null>(null);
   const [result, setResult] = useState<ValidationResult | null>(null);
@@ -109,8 +110,16 @@ export function Dashboard() {
         <div className="header-inner">
           <div className="logo">
             <span className="logo-icon">🛍️</span>
-            <span className="logo-text">Shopify CSV QA Tool</span>
+            <span className="logo-text">Shopify QA Tool</span>
           </div>
+          <nav className="tab-nav section-nav">
+            <NavLink to="/customers" className={({ isActive }) => `tab-btn ${isActive ? 'active' : ''}`}>
+              Customers
+            </NavLink>
+            <NavLink to="/products" className={({ isActive }) => `tab-btn ${isActive ? 'active' : ''}`}>
+              Products
+            </NavLink>
+          </nav>
           <nav className="tab-nav">
             <button
               className={`tab-btn ${activeTab === 'upload' ? 'active' : ''}`}

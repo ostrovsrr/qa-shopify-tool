@@ -57,7 +57,12 @@ export interface HealthReport {
   error?: string;
 }
 
-const REQUIRED_SCOPES = ['write_customers', 'read_customers'];
+const REQUIRED_SCOPES = [
+  'write_customers',
+  'read_customers',
+  'write_products',
+  'read_products',
+];
 
 // Transient HTTP statuses worth retrying — Shopify's gateway returns 502/503/504
 // under load and 429 when throttled; these are not real failures of our request.
@@ -124,7 +129,7 @@ export class ShopifyClient {
       // Auth failures are never transient — surface immediately.
       if (res.status === 401 || res.status === 403) {
         throw new ShopifyAuthError(
-          `Shopify rejected the Admin token (HTTP ${res.status}). Check the selected store credentials and that the app has write_customers + read_customers scopes.`,
+          `Shopify rejected the Admin token (HTTP ${res.status}). Check the selected store credentials and that the app has write_customers + read_customers + write_products + read_products scopes.`,
         );
       }
 
@@ -165,7 +170,7 @@ export class ShopifyClient {
         );
         if (access) {
           throw new ShopifyAuthError(
-            `Access denied: ${access.message}. The app is likely missing a required scope (write_customers / read_customers).`,
+            `Access denied: ${access.message}. The app is likely missing a required scope (write_customers / read_customers / write_products / read_products).`,
           );
         }
         throw new ShopifyApiError(
