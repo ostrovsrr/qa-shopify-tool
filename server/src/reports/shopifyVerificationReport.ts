@@ -1,3 +1,4 @@
+import { Writable } from 'stream';
 import ExcelJS from 'exceljs';
 import prisma from '../db/prisma';
 import {
@@ -7,6 +8,13 @@ import {
   SHOPIFY_COLUMNS,
 } from '../services/columnMapping.service';
 import { CustomerValidationIssue, Severity } from '../types';
+
+// Written with ExcelJS's *streaming* workbook writer: every row is committed
+// (flushed to the output stream and freed) as it's built. This report has seven
+// sheets, three of which repeat every uploaded row (Rows With Shopify Result,
+// Full Uploaded File, Shopify Template), so on a large import the in-memory
+// workbook plus the writeBuffer copy would exhaust the V8 heap. Streaming keeps
+// memory roughly flat regardless of row count.
 
 const HEADER_COLOURS: Record<string, string> = {
   Summary: 'FF1E3A5F',
@@ -41,9 +49,14 @@ interface ReportRowResult {
   wasFlaggedByValidator: boolean;
 }
 
-export async function generateShopifyVerificationReport(
+// Streams the workbook to `stream`. `onReady(sourceFileName)` fires once, after
+// the DB read and before any bytes are written, so the caller can set the
+// Content-Disposition filename before the stream starts.
+export async function streamShopifyVerificationReport(
   importRunId: string,
-): Promise<{ buffer: Buffer; sourceFileName: string }> {
+  stream: Writable,
+  onReady: (sourceFileName: string) => void,
+): Promise<void> {
   const importRun = await prisma.importRun.findUnique({
     where: { id: importRunId },
     include: {
@@ -91,7 +104,15 @@ export async function generateShopifyVerificationReport(
     validationRun.originalRows.map((row) => [row.rowNumber, row.data as Record<string, string>]),
   );
 
-  const workbook = new ExcelJS.Workbook();
+  onReady(validationRun.fileName);
+
+  const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
+    stream,
+    useStyles: true,
+    // Inline strings — a shared-strings table would accumulate every distinct
+    // string in memory, defeating the point of streaming.
+    useSharedStrings: false,
+  });
   workbook.creator = 'Shopify CSV QA Tool';
   workbook.created = new Date();
 
@@ -124,8 +145,7 @@ export async function generateShopifyVerificationReport(
   addFullUploadedFileSheet(workbook, originalColumns, validationRun.originalRows);
   addShopifyTemplateSheet(workbook, columnMapping, validationRun.originalRows, rowResults);
 
-  const arrayBuffer = await workbook.xlsx.writeBuffer();
-  return { buffer: Buffer.from(arrayBuffer), sourceFileName: validationRun.fileName };
+  await workbook.commit();
 }
 
 function styleHeader(row: ExcelJS.Row, bgArgb: string) {
@@ -158,7 +178,7 @@ function summarizeIssues(issues: CustomerValidationIssue[] | undefined) {
 }
 
 function addSummarySheet(
-  workbook: ExcelJS.Workbook,
+  workbook: ExcelJS.stream.xlsx.WorkbookWriter,
   importRun: {
     id: string;
     validationId: string;
@@ -219,17 +239,20 @@ function addSummarySheet(
   sheet.addRow([]);
   const header = sheet.addRow(['Bucket', 'Meaning']);
   styleHeader(header, HEADER_COLOURS.Summary);
-  sheet.addRows([
+  const legend: [string, string][] = [
     ['Errors', 'Rows Shopify rejected. These are the highest priority fixes.'],
     ['Warnings', 'Rows our pre-check flagged but Shopify accepted. Review for over-strict rules.'],
     ['Info', 'Confirmed reject and confirmed clean row counts.'],
     ['Rows With Shopify Result', 'Full uploaded file plus Shopify status and pre-check issue summary.'],
     ['Shopify Template', 'Mapped Shopify import template plus Shopify result columns.'],
-  ]);
+  ];
+  for (const entry of legend) sheet.addRow(entry);
+
+  sheet.commit();
 }
 
 function addResultSheet(
-  workbook: ExcelJS.Workbook,
+  workbook: ExcelJS.stream.xlsx.WorkbookWriter,
   sheetName: 'Errors' | 'Warnings',
   results: ReportRowResult[],
   originalColumns: string[],
@@ -257,6 +280,7 @@ function addResultSheet(
     key: col,
     width: col === 'Shopify Message' || col.startsWith('Pre-check') ? 42 : 22,
   }));
+  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(columns.length)}1` };
   styleHeader(sheet.getRow(1), HEADER_COLOURS[sheetName]);
 
   for (const result of results) {
@@ -290,13 +314,14 @@ function addResultSheet(
         },
       };
     });
+    row.commit();
   }
 
-  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(columns.length)}1` };
+  sheet.commit();
 }
 
 function addInfoSheet(
-  workbook: ExcelJS.Workbook,
+  workbook: ExcelJS.stream.xlsx.WorkbookWriter,
   rowResults: ReportRowResult[],
   issuesByRow: Map<number, CustomerValidationIssue[]>,
 ) {
@@ -321,9 +346,11 @@ function addInfoSheet(
       rows: rows.map((r) => r.rowNumber).join(', '),
     });
   }
+
+  sheet.commit();
 }
 
-function addRuleGapsSheet(workbook: ExcelJS.Workbook, rowResults: ReportRowResult[]) {
+function addRuleGapsSheet(workbook: ExcelJS.stream.xlsx.WorkbookWriter, rowResults: ReportRowResult[]) {
   const sheet = workbook.addWorksheet('Rule Gaps');
   sheet.columns = [
     { header: 'Shopify Field', key: 'field', width: 24 },
@@ -359,10 +386,12 @@ function addRuleGapsSheet(workbook: ExcelJS.Workbook, rowResults: ReportRowResul
       message: group.messages[0] ?? '',
     });
   }
+
+  sheet.commit();
 }
 
 function addRowsWithShopifyResultSheet(
-  workbook: ExcelJS.Workbook,
+  workbook: ExcelJS.stream.xlsx.WorkbookWriter,
   originalColumns: string[],
   originalRows: OriginalRow[],
   rowResults: ReportRowResult[],
@@ -389,6 +418,7 @@ function addRowsWithShopifyResultSheet(
     key: col,
     width: col === 'Shopify Message' || col.startsWith('Pre-check') ? 42 : 22,
   }));
+  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(columns.length)}1` };
   styleHeader(sheet.getRow(1), HEADER_COLOURS['Rows With Shopify Result']);
 
   for (const origRow of originalRows) {
@@ -416,13 +446,14 @@ function addRowsWithShopifyResultSheet(
         fgColor: { argb: result.accepted ? RESULT_COLOURS.accepted : RESULT_COLOURS.rejected },
       };
     }
+    row.commit();
   }
 
-  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(columns.length)}1` };
+  sheet.commit();
 }
 
 function addFullUploadedFileSheet(
-  workbook: ExcelJS.Workbook,
+  workbook: ExcelJS.stream.xlsx.WorkbookWriter,
   originalColumns: string[],
   originalRows: OriginalRow[],
 ) {
@@ -430,6 +461,7 @@ function addFullUploadedFileSheet(
 
   if (originalColumns.length === 0 || originalRows.length === 0) {
     sheet.addRow(['No uploaded file data available.']);
+    sheet.commit();
     return;
   }
 
@@ -439,20 +471,21 @@ function addFullUploadedFileSheet(
     key: col,
     width: col === 'Row Number' ? 12 : 22,
   }));
+  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(allColumns.length)}1` };
   styleHeader(sheet.getRow(1), HEADER_COLOURS['Full Uploaded File']);
 
   for (const origRow of originalRows) {
     const data = origRow.data as Record<string, string>;
     const rowData: Record<string, string | number> = { 'Row Number': origRow.rowNumber };
     for (const col of originalColumns) rowData[col] = data[col] ?? '';
-    sheet.addRow(rowData);
+    sheet.addRow(rowData).commit();
   }
 
-  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(allColumns.length)}1` };
+  sheet.commit();
 }
 
 function addShopifyTemplateSheet(
-  workbook: ExcelJS.Workbook,
+  workbook: ExcelJS.stream.xlsx.WorkbookWriter,
   columnMapping: Record<string, string>,
   originalRows: OriginalRow[],
   rowResults: ReportRowResult[],
@@ -461,6 +494,7 @@ function addShopifyTemplateSheet(
 
   if (Object.keys(columnMapping).length === 0 || originalRows.length === 0) {
     sheet.addRow(['No column mapping was applied for this validation run.']);
+    sheet.commit();
     return;
   }
 
@@ -489,6 +523,7 @@ function addShopifyTemplateSheet(
     key: col,
     width: col === 'Shopify Message' ? 42 : 24,
   }));
+  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(columns.length)}1` };
   styleHeader(sheet.getRow(1), HEADER_COLOURS['Shopify Template']);
 
   for (const origRow of originalRows) {
@@ -509,10 +544,10 @@ function addShopifyTemplateSheet(
     for (const shopifyCol of shopifyColumns) {
       rowData[shopifyCol] = mapped[shopifyCol] ?? '';
     }
-    sheet.addRow(rowData);
+    sheet.addRow(rowData).commit();
   }
 
-  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(columns.length)}1` };
+  sheet.commit();
 }
 
 function columnIndexToLetter(index: number): string {

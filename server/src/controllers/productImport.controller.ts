@@ -1,7 +1,7 @@
 import { NextFunction, Request, Response } from 'express';
 import { z } from 'zod';
 import { getProductImportFeedback } from '../services/productFeedback.service';
-import { generateProductImportReport } from '../reports/productImportReport';
+import { streamProductImportReport } from '../reports/productImportReport';
 import {
   cleanupImportRunStores,
   reconcileLatestImportForUpload,
@@ -147,17 +147,27 @@ export async function getImportReportHandler(
       res.status(400).json({ error: parsed.error.errors[0].message });
       return;
     }
-    const buffer = await generateProductImportReport(parsed.data);
-    res.setHeader(
-      'Content-Type',
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    );
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="product-import-report-${parsed.data}.xlsx"`,
-    );
-    res.send(buffer);
+    // Stream the workbook straight to the response. Headers are set in the
+    // onReady callback, which fires after the DB read but before the first byte,
+    // so Content-Disposition is in place before streaming starts.
+    await streamProductImportReport(parsed.data, res, () => {
+      res.setHeader(
+        'Content-Type',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="product-import-report-${parsed.data}.xlsx"`,
+      );
+    });
   } catch (err) {
+    // Once streaming has begun the headers are flushed, so we can't send a JSON
+    // error — just tear the connection down. Otherwise fall through to the
+    // normal error handler (e.g. run-not-found).
+    if (res.headersSent) {
+      res.destroy();
+      return;
+    }
     next(err);
   }
 }
