@@ -14,7 +14,9 @@ import {
 } from './controllers/customerValidation.controller';
 import {
   cleanupQaCustomersHandler,
+  cleanupQaProductsHandler,
   shopifyHealthHandler,
+  shopifyStoreProductStatsHandler,
   shopifyStoreStatsHandler,
   shopifyStoresHandler,
 } from './controllers/shopifyHealth.controller';
@@ -28,6 +30,21 @@ import {
   runImportHandler,
   ruleGapBacklogHandler,
 } from './controllers/customerImport.controller';
+import {
+  deleteUploadHandler as deleteProductUploadHandler,
+  getHistoryHandler as getProductHistoryHandler,
+  getUploadHandler as getProductUploadHandler,
+  updateMetadataHandler as updateProductMetadataHandler,
+  uploadHandler as productUploadHandler,
+} from './controllers/productUpload.controller';
+import {
+  cleanupImportRunHandler as cleanupProductImportRunHandler,
+  getImportHandler as getProductImportHandler,
+  getImportReportHandler as getProductImportReportHandler,
+  getLatestImportForUploadHandler,
+  runBatchImportHandler as runProductBatchImportHandler,
+  runImportHandler as runProductImportHandler,
+} from './controllers/productImport.controller';
 
 dotenv.config();
 
@@ -89,6 +106,27 @@ app.get('/api/customer-import/:id/report', getImportReportHandler);
 app.get('/api/customer-import/:id/feedback-report', getValidatorFeedbackReportHandler);
 app.post('/api/customer-import/:id/cleanup', cleanupImportRunHandler);
 app.get('/api/customer-import/:id', getImportHandler);
+
+// ── Product stats + cleanup (distinct from the customer routes above) ────────
+app.get('/api/shopify/stores/:storeId/product-stats', shopifyStoreProductStatsHandler);
+app.post('/api/shopify/stores/:storeId/cleanup-qa-products', cleanupQaProductsHandler);
+
+// ── Product upload (parse + persist; no mapping/validate) ────────────────────
+// Order matters: /history must precede /:id so it isn't captured as an id.
+app.post('/api/product-upload', upload.single('file'), productUploadHandler);
+app.get('/api/product-upload/history', getProductHistoryHandler);
+app.get('/api/product-upload/:id', getProductUploadHandler);
+app.patch('/api/product-upload/:id/metadata', updateProductMetadataHandler);
+app.delete('/api/product-upload/:id', deleteProductUploadHandler);
+
+// ── Product import (async start → reconcile-on-poll, single + parallel batch) ─
+// Order matters: literal segments (/by-upload) precede /:id.
+app.post('/api/product-import/:uploadId/run', runProductImportHandler);
+app.post('/api/product-import/:uploadId/run-batch', runProductBatchImportHandler);
+app.get('/api/product-import/by-upload/:uploadId', getLatestImportForUploadHandler);
+app.get('/api/product-import/:id/report', getProductImportReportHandler);
+app.post('/api/product-import/:id/cleanup', cleanupProductImportRunHandler);
+app.get('/api/product-import/:id', getProductImportHandler);
 
 // ── Error handler ───────────────────────────────────────────────────────────
 

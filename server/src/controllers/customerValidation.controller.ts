@@ -1,6 +1,6 @@
 import { NextFunction, Request, Response } from 'express';
 import { z } from 'zod';
-import { generateExcelReport } from '../reports/excelReport';
+import { streamExcelReport } from '../reports/excelReport';
 import { suggestMapping } from '../services/columnMapping.service';
 import {
   deleteValidationRun,
@@ -136,17 +136,27 @@ export async function getReportHandler(
       res.status(400).json({ error: parsed.error.errors[0].message });
       return;
     }
-    const { buffer, sourceFileName } = await generateExcelReport(parsed.data);
-    res.setHeader(
-      'Content-Type',
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    );
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="${reportFileName('prevalidation', sourceFileName, 'xlsx')}"`,
-    );
-    res.send(buffer);
+    // Stream the workbook straight to the response. Headers are set in the
+    // onReady callback, which fires after the DB read but before the first byte
+    // is written, so Content-Disposition is in place before streaming starts.
+    await streamExcelReport(parsed.data, res, (sourceFileName) => {
+      res.setHeader(
+        'Content-Type',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${reportFileName('prevalidation', sourceFileName, 'xlsx')}"`,
+      );
+    });
   } catch (err) {
+    // Once streaming has begun the headers are already flushed, so we can't send
+    // a JSON error — just tear the connection down. Otherwise fall through to the
+    // normal error handler (e.g. run-not-found → 500).
+    if (res.headersSent) {
+      res.destroy();
+      return;
+    }
     next(err);
   }
 }

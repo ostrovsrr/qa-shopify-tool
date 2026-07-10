@@ -191,9 +191,15 @@ export async function fetchAndParseBulkResults<R, O>(
   if (parsed.length === 0) return [];
 
   // __lineNumber may be 0- or 1-based depending on context; detect from the
-  // minimum so the row mapping is robust either way.
-  const lineNumbers = parsed.map((p) => Number(p.__lineNumber));
-  const base = Math.min(...lineNumbers);
+  // minimum so the row mapping is robust either way. Fold with a loop rather
+  // than Math.min(...lineNumbers) — spreading a large result set (100k+ lines)
+  // passes every element as an argument and overflows the engine's argument
+  // limit ("Maximum call stack size exceeded").
+  let base = Infinity;
+  for (const p of parsed) {
+    const n = Number(p.__lineNumber);
+    if (n < base) base = n;
+  }
 
   return parsed.map((line) => {
     const idx = Number(line.__lineNumber) - base;

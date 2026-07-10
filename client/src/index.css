@@ -70,6 +70,10 @@ body {
 .logo-text { font-size: 17px; font-weight: 700; color: var(--text); }
 
 .tab-nav { display: flex; gap: 4px; }
+/* Customers | Products section switch — NavLinks render as anchors, so strip the
+   link styling to match the button tabs. Sits centered between the logo and the
+   per-section tabs via the header's space-between. */
+.section-nav .tab-btn { text-decoration: none; }
 .tab-btn {
   padding: 6px 16px;
   border: none;

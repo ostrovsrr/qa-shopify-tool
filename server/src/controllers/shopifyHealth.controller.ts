@@ -10,6 +10,10 @@ import {
   getStoreCustomerStats,
   QA_IMPORT_TAG,
 } from '../services/shopifyCleanup.service';
+import {
+  cleanupProductsByTag,
+  getStoreProductStats,
+} from '../services/productCleanup.service';
 
 // GET /api/shopify/stores - safe store list for the UI.
 export function shopifyStoresHandler(
@@ -66,6 +70,50 @@ export async function shopifyStoreStatsHandler(
   try {
     const stats = await getStoreCustomerStats(req.params.storeId);
     res.json(stats);
+  } catch (err) {
+    if (err instanceof ShopifyConfigError) {
+      res.status(503).json({ error: err.message });
+      return;
+    }
+    if (err instanceof ShopifyAuthError) {
+      res.status(401).json({ error: err.message });
+      return;
+    }
+    next(err);
+  }
+}
+
+// GET /api/shopify/stores/:storeId/product-stats - total + QA-tagged product counts.
+export async function shopifyStoreProductStatsHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const stats = await getStoreProductStats(req.params.storeId);
+    res.json(stats);
+  } catch (err) {
+    if (err instanceof ShopifyConfigError) {
+      res.status(503).json({ error: err.message });
+      return;
+    }
+    if (err instanceof ShopifyAuthError) {
+      res.status(401).json({ error: err.message });
+      return;
+    }
+    next(err);
+  }
+}
+
+// POST /api/shopify/stores/:storeId/cleanup-qa-products - delete all qa-import tagged products.
+export async function cleanupQaProductsHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const result = await cleanupProductsByTag(req.params.storeId, QA_IMPORT_TAG);
+    res.json(result);
   } catch (err) {
     if (err instanceof ShopifyConfigError) {
       res.status(503).json({ error: err.message });

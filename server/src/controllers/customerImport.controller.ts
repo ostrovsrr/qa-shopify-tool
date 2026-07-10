@@ -4,7 +4,7 @@ import {
   getImportFeedback,
   getRuleGapBacklog,
 } from '../services/importFeedback.service';
-import { generateShopifyVerificationReport } from '../reports/shopifyVerificationReport';
+import { streamShopifyVerificationReport } from '../reports/shopifyVerificationReport';
 import { generateValidatorFeedbackMarkdown } from '../reports/validatorFeedbackReport';
 import { reportFileName } from '../utils/reportFileName';
 import {
@@ -184,17 +184,25 @@ export async function getImportReportHandler(
       return;
     }
 
-    const { buffer, sourceFileName } = await generateShopifyVerificationReport(parsed.data);
-    res.setHeader(
-      'Content-Type',
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    );
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="${reportFileName('shopify-import-validation', sourceFileName, 'xlsx')}"`,
-    );
-    res.send(buffer);
+    // Stream the workbook straight to the response. Headers are set in the
+    // onReady callback, which fires after the DB read but before the first byte.
+    await streamShopifyVerificationReport(parsed.data, res, (sourceFileName) => {
+      res.setHeader(
+        'Content-Type',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${reportFileName('shopify-import-validation', sourceFileName, 'xlsx')}"`,
+      );
+    });
   } catch (err) {
+    // Once streaming has begun the headers are flushed, so we can't send a JSON
+    // error — just tear the connection down.
+    if (res.headersSent) {
+      res.destroy();
+      return;
+    }
     next(err);
   }
 }

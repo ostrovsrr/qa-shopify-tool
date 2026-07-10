@@ -155,3 +155,90 @@ export interface ImportFeedback {
   rejectedRows: RejectedRow[];
   perStore: PerStoreResult[];
 }
+
+// ── Products ─────────────────────────────────────────────────────────────────
+// UpdateMetadataPayload, ShopifyHealth, ShopifyStore, and PerStoreResult are
+// shared with the customer flow above.
+
+// Result of uploading a product CSV (parse + persist; no mapping/validate).
+export interface UploadSummary {
+  uploadId: string;
+  fileName: string;
+  productCount: number;
+  rowCount: number;
+  headers: string[];
+}
+
+export interface UploadDetail {
+  id: string;
+  fileName: string;
+  productCount: number;
+  rowCount: number;
+  ticketNumber: string | null;
+  ticketName: string | null;
+  comments: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProductHistoryImport {
+  status: string;
+  successCount: number;
+  errorCount: number;
+  createdAt: string;
+}
+
+export interface ProductHistoryItem {
+  id: string;
+  fileName: string;
+  productCount: number;
+  ticketNumber: string | null;
+  ticketName: string | null;
+  comments: string | null;
+  createdAt: string;
+  updatedAt: string;
+  // Most recent Shopify import for this upload; null if never imported.
+  lastImport: ProductHistoryImport | null;
+}
+
+export interface StoreProductStats {
+  storeId?: string;
+  shop: string;
+  totalProducts: number;
+  qaImportProducts: number;
+}
+
+export interface ProductCleanupResult {
+  storeId?: string;
+  shop: string;
+  tag: string;
+  found: number;
+  deleted: number;
+  failed: number;
+  errors: { productId: string; message: string }[];
+}
+
+export interface RejectionGroup {
+  shopifyField: string | null;
+  shopifyCode: string | null;
+  count: number;
+  sampleMessages: string[];
+  sampleHandles: string[];
+}
+
+export interface ProductImportFeedback {
+  importRunId: string;
+  uploadId: string;
+  storeId: string | null;
+  shopDomain: string;
+  status: string;
+  error: string | null;
+  successCount: number;
+  errorCount: number;
+  totalProducts: number;
+  accepted: number;
+  rejected: number;
+  createdAt: string;
+  rejectionGroups: RejectionGroup[];
+  perStore: PerStoreResult[];
+}

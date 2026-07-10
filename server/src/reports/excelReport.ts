@@ -1,3 +1,4 @@
+import { Writable } from 'stream';
 import ExcelJS from 'exceljs';
 import prisma from '../db/prisma';
 import {
@@ -26,9 +27,17 @@ const HEADER_COLOURS: Record<string, string> = {
   'Shopify Template': 'FF004C3F',
 };
 
-export async function generateExcelReport(
+// The report is written with ExcelJS's *streaming* workbook writer: each row is
+// committed (flushed to the output stream and freed) as it's built, so the whole
+// workbook is never held in memory at once. This is what keeps a 160k+ row report
+// from exhausting the V8 heap. `onReady(fileName)` fires once, after the DB read
+// and before any bytes are written, so the caller can set response headers
+// (Content-Disposition) before the stream starts.
+export async function streamExcelReport(
   validationId: string,
-): Promise<{ buffer: Buffer; sourceFileName: string }> {
+  stream: Writable,
+  onReady: (sourceFileName: string) => void,
+): Promise<void> {
   const run = await prisma.validationRun.findUnique({
     where: { id: validationId },
     include: {
@@ -70,14 +79,23 @@ export async function generateExcelReport(
       ? (runData.columnMapping as Record<string, string>)
       : {};
 
-  const workbook = new ExcelJS.Workbook();
-  workbook.creator = 'Shopify CSV QA Tool';
-  workbook.created = new Date();
-
   const autoFixes = computeAutoFixes(runData.originalRows, columnMapping);
   const heliosMigratedTag: boolean = runData.heliosMigratedTag ?? false;
   const moveDuplicatesToNotes: boolean = runData.moveDuplicatesToNotes ?? false;
   const mergeMatchingDuplicates: boolean = runData.mergeMatchingDuplicates ?? false;
+
+  // Headers must be set before the workbook writes its first byte.
+  onReady(run.fileName);
+
+  const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
+    stream,
+    useStyles: true,
+    // Inline strings — a shared-strings table would accumulate every distinct
+    // string in memory, defeating the point of streaming.
+    useSharedStrings: false,
+  });
+  workbook.creator = 'Shopify CSV QA Tool';
+  workbook.created = new Date();
 
   addSummarySheet(workbook, run, issues);
   addIssuesSheet(workbook, 'Errors', issues.filter((i) => i.severity === 'Error'));
@@ -94,8 +112,7 @@ export async function generateExcelReport(
     mergeMatchingDuplicates,
   );
 
-  const arrayBuffer = await workbook.xlsx.writeBuffer();
-  return { buffer: Buffer.from(arrayBuffer), sourceFileName: run.fileName };
+  await workbook.commit();
 }
 
 // ---------------------------------------------------------------------------
@@ -110,7 +127,7 @@ function styleHeader(row: ExcelJS.Row, bgArgb: string) {
 }
 
 function addSummarySheet(
-  workbook: ExcelJS.Workbook,
+  workbook: ExcelJS.stream.xlsx.WorkbookWriter,
   run: {
     id: string;
     fileName: string;
@@ -170,10 +187,15 @@ function addSummarySheet(
       fgColor: { argb: SEVERITY_COLOURS[severity] },
     };
   }
+
+  // Summary is small and sets a column width after adding rows (getColumn(3)),
+  // so commit the whole sheet at once rather than per row — column metadata is
+  // written when the sheet is committed.
+  sheet.commit();
 }
 
 function addIssuesSheet(
-  workbook: ExcelJS.Workbook,
+  workbook: ExcelJS.stream.xlsx.WorkbookWriter,
   sheetName: 'Errors' | 'Warnings' | 'Info',
   issues: CustomerValidationIssue[],
 ) {
@@ -189,8 +211,11 @@ function addIssuesSheet(
     { header: 'Suggested Fix', key: 'suggestedFix', width: 55 },
   ];
 
+  // autoFilter is serialized when the sheet is committed, so it can be set up front.
+  sheet.autoFilter = { from: 'A1', to: 'G1' };
   styleHeader(sheet.getRow(1), HEADER_COLOURS[sheetName]);
 
+  const colour = SEVERITY_COLOURS[sheetName === 'Errors' ? 'Error' : sheetName === 'Warnings' ? 'Warning' : 'Info'];
   for (const issue of issues) {
     const row = sheet.addRow({
       rowNumber: issue.rowNumber,
@@ -201,17 +226,17 @@ function addIssuesSheet(
       message: issue.message,
       suggestedFix: issue.suggestedFix,
     });
-    const colour = SEVERITY_COLOURS[issue.severity];
     row.eachCell((cell) => {
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: colour } };
     });
+    row.commit();
   }
 
-  sheet.autoFilter = { from: 'A1', to: 'G1' };
+  sheet.commit();
 }
 
 function addFullUploadedFileSheet(
-  workbook: ExcelJS.Workbook,
+  workbook: ExcelJS.stream.xlsx.WorkbookWriter,
   originalColumns: string[],
   originalRows: { rowNumber: number; data: unknown }[],
 ) {
@@ -219,6 +244,7 @@ function addFullUploadedFileSheet(
 
   if (originalColumns.length === 0 || originalRows.length === 0) {
     sheet.addRow(['No uploaded file data available.']);
+    sheet.commit();
     return;
   }
 
@@ -229,6 +255,7 @@ function addFullUploadedFileSheet(
     width: col === 'Row Number' ? 12 : 22,
   }));
 
+  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(allColumns.length)}1` };
   styleHeader(sheet.getRow(1), HEADER_COLOURS['Full Uploaded File']);
 
   for (const origRow of originalRows) {
@@ -237,10 +264,10 @@ function addFullUploadedFileSheet(
     for (const col of originalColumns) {
       rowData[col] = data[col] ?? '';
     }
-    sheet.addRow(rowData);
+    sheet.addRow(rowData).commit();
   }
 
-  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(allColumns.length)}1` };
+  sheet.commit();
 }
 
 const AUTO_FIX_GREEN = 'FFD1FAE5';
@@ -248,7 +275,7 @@ const AUTO_FIX_GREEN = 'FFD1FAE5';
 const HELIOS_TAG = 'HeliosMigrated';
 
 function addShopifyTemplateSheet(
-  workbook: ExcelJS.Workbook,
+  workbook: ExcelJS.stream.xlsx.WorkbookWriter,
   columnMapping: Record<string, string>,
   originalRows: { rowNumber: number; data: unknown }[],
   autoFixes: AutoFixEntry[] = [],
@@ -261,6 +288,7 @@ function addShopifyTemplateSheet(
 
   if (Object.keys(columnMapping).length === 0 || originalRows.length === 0) {
     sheet.addRow(['No column mapping was applied for this validation run.']);
+    sheet.commit();
     return;
   }
 
@@ -408,6 +436,10 @@ function addShopifyTemplateSheet(
     ...effectiveColumns.map((col) => ({ header: col, key: col, width: 26 })),
   ];
 
+  sheet.autoFilter = {
+    from: 'A1',
+    to: `${columnIndexToLetter(effectiveColumns.length + leadingColumnCount)}1`,
+  };
   styleHeader(sheet.getRow(1), HEADER_COLOURS['Shopify Template']);
 
   // Highlight the error and duplicate-group header cells in red
@@ -488,12 +520,11 @@ function addShopifyTemplateSheet(
         }
       });
     }
+
+    excelRow.commit();
   }
 
-  sheet.autoFilter = {
-    from: 'A1',
-    to: `${columnIndexToLetter(effectiveColumns.length + leadingColumnCount)}1`,
-  };
+  sheet.commit();
 }
 
 function columnIndexToLetter(index: number): string {
