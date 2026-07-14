@@ -66,3 +66,4 @@ coverage/
 # Temporary files
 tmp/
 temp/
+.gstack/
