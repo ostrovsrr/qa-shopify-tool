@@ -9,6 +9,7 @@ import {
   startBatchProductImport,
   startProductImport,
 } from '../services/productImport.service';
+import { recordAction } from '../services/actionLog.service';
 import { ShopifyAuthError, ShopifyConfigError } from '../services/shopifyClient';
 
 // Shopify config/auth failures map to dedicated status codes; everything else
@@ -207,6 +208,16 @@ export async function cleanupImportRunHandler(
     // 202 + cleanup runs to poll — a real teardown is a bulk delete that can take
     // minutes, and blocking the request on it cannot survive a hosting proxy.
     const runs = await cleanupImportRunStores(idParsed.data, bodyParsed.data.storeId);
+    // Destructive: deletes the records this import created, in every store it
+    // touched. Log it per store, so the audit names each shop that lost records.
+    for (const run of runs) {
+      await recordAction(req, {
+        action: 'CLEANUP_IMPORT_PRODUCTS',
+        target: idParsed.data,
+        storeId: run.storeId,
+        detail: { tag: run.tag, cleanupRunId: run.id, found: run.found },
+      });
+    }
     res.status(202).json(runs);
   } catch (err) {
     if (handleShopifyError(err, res)) return;

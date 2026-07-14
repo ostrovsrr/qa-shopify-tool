@@ -29,6 +29,11 @@ export interface ValidationHistoryImport {
 
 export interface ValidationHistoryItem {
   id: string;
+  // Who uploaded it. Display only — never a filter on who may open it.
+  createdBy: string | null;
+  // Set when the raw rows were purged for retention: the report can no longer be
+  // rebuilt, so the UI says so instead of offering a download that would fail.
+  piiPurgedAt: string | null;
   fileName: string;
   fileType: string;
   totalRows: number;
@@ -193,6 +198,9 @@ export interface ProductHistoryImport {
 
 export interface ProductHistoryItem {
   id: string;
+  // See ValidationHistoryItem — the two flows are twins.
+  createdBy: string | null;
+  piiPurgedAt: string | null;
   fileName: string;
   productCount: number;
   ticketNumber: string | null;

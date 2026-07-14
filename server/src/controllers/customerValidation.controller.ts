@@ -12,6 +12,7 @@ import {
 } from '../services/customerValidation.service';
 import { parseCsvFile } from '../services/csvParser.service';
 import { removeUploadFile } from '../services/uploadFile';
+import { actorFrom, recordAction } from '../services/actionLog.service';
 import { storePreview } from '../services/previewStore';
 import { reportFileName } from '../utils/reportFileName';
 
@@ -79,6 +80,7 @@ export async function validateWithMappingHandler(
       parsed.data.heliosMigratedTag,
       parsed.data.moveDuplicatesToNotes,
       parsed.data.mergeMatchingDuplicates,
+      actorFrom(req),
     );
     if (!result) {
       res.status(404).json({ error: 'Upload not found or expired. Please re-upload the file.' });
@@ -101,7 +103,15 @@ export async function uploadHandler(
       res.status(400).json({ error: 'No file uploaded. Send a CSV as multipart/form-data field "file".' });
       return;
     }
-    const result = await validateCustomerCsv(req.file.path, req.file.originalname);
+    const result = await validateCustomerCsv(
+      req.file.path,
+      req.file.originalname,
+      {},
+      false,
+      false,
+      false,
+      actorFrom(req),
+    );
     res.status(200).json(result);
   } catch (err) {
     next(err);
@@ -226,6 +236,8 @@ export async function deleteValidationHandler(
       res.status(404).json({ error: 'Validation run not found.' });
       return;
     }
+    // Destructive, and in a shared workspace anyone can do it to anyone's run.
+    await recordAction(req, { action: 'DELETE_VALIDATION_RUN', target: parsed.data });
     res.json({ message: 'Validation run deleted successfully.' });
   } catch (err) {
     next(err);

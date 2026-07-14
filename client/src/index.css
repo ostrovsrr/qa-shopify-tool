@@ -1077,3 +1077,38 @@ body {
   padding: 2px 4px;
 }
 .inline-notice-close:hover { color: var(--text); }
+
+/* ── Actor badge ──────────────────────────────────────────────────────────────
+   The name shown on runs you upload. A LABEL, NOT A LOGIN — nothing is gated on
+   it (see api/actor.ts), so it must not be styled to look like a sign-in. */
+.actor-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+.actor-badge-set {
+  background: none;
+  border: 1px solid #d5d8de;
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 13px;
+  color: #5c6270;
+  cursor: pointer;
+}
+.actor-badge-set:hover { border-color: #5b6dfa; }
+.actor-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #5b6dfa;
+  display: inline-block;
+  margin-right: 6px;
+}
+.actor-input {
+  border: 1px solid #d5d8de;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 13px;
+  width: 120px;
+}

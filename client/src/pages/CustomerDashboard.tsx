@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { ActorBadge } from '../components/ActorBadge';
 import { NavLink } from 'react-router-dom';
 import {
   fetchValidationResult,
@@ -134,6 +135,7 @@ export function CustomerDashboard() {
               History
             </button>
           </nav>
+          <ActorBadge />
         </div>
       </header>
 

@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { ActorBadge } from '../components/ActorBadge';
 import { NavLink } from 'react-router-dom';
 import { fetchUpload, uploadProductCsv } from '../api/productApi';
 import { ProductHistory } from '../components/ProductHistory';
@@ -91,6 +92,7 @@ export function ProductDashboard() {
               History
             </button>
           </nav>
+          <ActorBadge />
         </div>
       </header>
 

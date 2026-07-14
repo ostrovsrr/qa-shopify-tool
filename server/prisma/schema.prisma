@@ -7,8 +7,32 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ATTRIBUTION IS NOT AUTHORIZATION.
+//
+// `createdBy` exists so a colleague can find their own run in a shared history, and
+// so the destructive-action log names a person. It is for DISPLAY and AUDIT.
+//
+// It MUST NEVER appear in a WHERE clause that gates access. The moment it does, it
+// has become an authorization mechanism — one that arrived through the back door
+// with none of the tests, none of the threat model, and none of the review that a
+// real one would get. The tool is a deliberately SHARED workspace (decision
+// 7a56f7f2): everybody sees every run. If that ever changes, it changes as a
+// designed feature, not as a filter someone added to a query.
+//
+// Until Cloudflare Access lands, the value is supplied by the CLIENT and is
+// therefore trivially spoofable. That is fine for the thing it is for (knowing who
+// to ask about a run) and disqualifying for anything else.
+// ─────────────────────────────────────────────────────────────────────────────
+
 model ValidationRun {
   id              String                @id @default(uuid())
+  // Who uploaded this. Display + audit ONLY — see the note above.
+  createdBy       String?
+  // When the raw uploaded rows were purged for retention (D13). Non-null means the
+  // run's aggregate results survive but the source rows are gone, so the Excel
+  // report can no longer be rebuilt and the UI says so rather than erroring.
+  piiPurgedAt     DateTime?
   fileName        String
   fileType        String                @default("CUSTOMER")
   totalRows       Int
@@ -170,6 +194,11 @@ model ValidationIssue {
 // Handle into products, and let the import be the truth.
 model ProductUploadRun {
   id              String   @id @default(uuid())
+  // Display + audit ONLY. See the note above ValidationRun — the same rule applies,
+  // because customers and products are twins.
+  createdBy       String?
+  // See ValidationRun.piiPurgedAt.
+  piiPurgedAt     DateTime?
   fileName        String
   // Number of products = distinct Handles in the CSV (the import unit), not rows.
   productCount    Int
@@ -291,6 +320,39 @@ model ProductOriginalRow {
 
   @@index([uploadRunId])
   @@map("product_original_rows")
+}
+
+// Append-only record of every DESTRUCTIVE action, so "who deleted the QA products
+// I was halfway through checking?" has an answer.
+//
+// The tool has six routes that destroy things: deleting a validation run, deleting a
+// product upload, the two whole-store QA cleanups, and the two run-scoped cleanups.
+// Four of those delete records from a REAL Shopify store, by tag, across the whole
+// store. In a shared workspace, any colleague can fire any of them at any store.
+//
+// This is a LOG, not a permission check. It does not stop anyone doing anything; it
+// makes what they did legible afterwards. Nothing reads it to make a decision — see
+// the attribution note above ValidationRun.
+model ActionLog {
+  id        String   @id @default(uuid())
+  // Who, per the request. Spoofable until Cloudflare Access lands; useful anyway,
+  // because the failure mode this guards against is a mistake, not an attack.
+  actor     String
+  // 'DELETE_VALIDATION_RUN' | 'DELETE_PRODUCT_UPLOAD' | 'CLEANUP_STORE_CUSTOMERS' |
+  // 'CLEANUP_STORE_PRODUCTS' | 'CLEANUP_IMPORT_CUSTOMERS' | 'CLEANUP_IMPORT_PRODUCTS'
+  action    String
+  // What it was aimed at: a run id, an upload id, or a store id.
+  target    String
+  // The store, when the action reached Shopify. Null for a database-only delete.
+  storeId   String?
+  // Anything worth knowing later: the tag deleted, the row count, the run it
+  // reversed. Never raw CSV data — this table is not a PII sink.
+  detail    Json?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([storeId])
+  @@map("action_log")
 }
 
 // One row per BUSY store: the lock that keeps two operations off the same Shopify

@@ -18,6 +18,8 @@ export interface UploadSummary {
 export async function createProductUpload(
   filePath: string,
   fileName: string,
+  // Display + audit only. NEVER a filter on who may see this upload.
+  createdBy?: string,
 ): Promise<UploadSummary> {
   const parsed = await parseProductCsvFile(filePath);
   const uploadId = uuidv4();
@@ -30,6 +32,7 @@ export async function createProductUpload(
       await tx.productUploadRun.create({
         data: {
           id: uploadId,
+          createdBy: createdBy ?? null,
           fileName,
           productCount: parsed.groups.length,
           originalColumns: parsed.headers,
@@ -103,6 +106,8 @@ export async function getUploadHistory(): Promise<ProductHistoryItem[]> {
     orderBy: { createdAt: 'desc' },
     select: {
       id: true,
+      createdBy: true,
+      piiPurgedAt: true,
       fileName: true,
       productCount: true,
       ticketNumber: true,

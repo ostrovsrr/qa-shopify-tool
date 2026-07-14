@@ -8,6 +8,7 @@ import {
 import { getStoreCustomerStats, QA_IMPORT_TAG } from '../services/shopifyCleanup.service';
 import { getStoreProductStats } from '../services/productCleanup.service';
 import { reconcileCleanupRun, startCleanupRun } from '../services/cleanupRun.service';
+import { recordAction } from '../services/actionLog.service';
 
 // GET /api/shopify/stores - safe store list for the UI.
 export function shopifyStoresHandler(
@@ -110,6 +111,13 @@ export async function cleanupQaProductsHandler(
 ): Promise<void> {
   try {
     const run = await startCleanupRun('PRODUCT', req.params.storeId, QA_IMPORT_TAG);
+    // Deletes BY TAG across an ENTIRE store. The highest blast radius in the app.
+    await recordAction(req, {
+      action: 'CLEANUP_STORE_PRODUCTS',
+      target: req.params.storeId,
+      storeId: req.params.storeId,
+      detail: { tag: QA_IMPORT_TAG, cleanupRunId: run.id, found: run.found },
+    });
     res.status(202).json(run);
   } catch (err) {
     if (err instanceof ShopifyConfigError) {
@@ -133,6 +141,13 @@ export async function cleanupQaCustomersHandler(
 ): Promise<void> {
   try {
     const run = await startCleanupRun('CUSTOMER', req.params.storeId, QA_IMPORT_TAG);
+    // Deletes BY TAG across an ENTIRE store. The highest blast radius in the app.
+    await recordAction(req, {
+      action: 'CLEANUP_STORE_CUSTOMERS',
+      target: req.params.storeId,
+      storeId: req.params.storeId,
+      detail: { tag: QA_IMPORT_TAG, cleanupRunId: run.id, found: run.found },
+    });
     res.status(202).json(run);
   } catch (err) {
     if (err instanceof ShopifyConfigError) {

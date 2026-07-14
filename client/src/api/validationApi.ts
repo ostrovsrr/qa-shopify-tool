@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { attachActorHeader } from './actor';
 import { awaitCleanupRuns, CleanupRun } from './cleanupPoller';
 import {
   ColumnMapping,
@@ -16,6 +17,9 @@ import {
 const api = axios.create({
   baseURL: '/api',
 });
+
+// Every request says who made it — display + audit only, never authorization.
+attachActorHeader(api);
 
 // Surface the server's { error } message instead of Axios's generic
 // "Request failed with status code N".

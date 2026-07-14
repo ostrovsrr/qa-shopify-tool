@@ -33,6 +33,8 @@ export async function validateCustomerCsv(
   heliosMigratedTag = false,
   moveDuplicatesToNotes = false,
   mergeMatchingDuplicates = false,
+  // Display + audit only. NEVER a filter on who may see this run.
+  createdBy?: string,
 ): Promise<CustomerValidationResult> {
   const { rows: rawRows, headers } = await parseCsvFile(filePath);
 
@@ -70,6 +72,7 @@ export async function validateCustomerCsv(
       await tx.validationRun.create({
         data: {
           id: validationId,
+          createdBy: createdBy ?? null,
           fileName,
           fileType: 'CUSTOMER',
           totalRows: rawRows.length,
@@ -135,6 +138,7 @@ export async function validateFromPreview(
   heliosMigratedTag = false,
   moveDuplicatesToNotes = false,
   mergeMatchingDuplicates = false,
+  createdBy?: string,
 ): Promise<CustomerValidationResult | null> {
   const entry = getPreview(uploadId);
   if (!entry) return null;
@@ -145,6 +149,7 @@ export async function validateFromPreview(
     heliosMigratedTag,
     moveDuplicatesToNotes,
     mergeMatchingDuplicates,
+    createdBy,
   );
   // The validate step consumed the preview — delete it, which unlinks the temp
   // file, rather than leaving merchant PII on disk until the TTL. The UI never
@@ -186,6 +191,8 @@ export async function getValidationHistory(): Promise<ValidationHistoryItem[]> {
   const runs = await prisma.validationRun.findMany({
     select: {
       id: true,
+      createdBy: true,
+      piiPurgedAt: true,
       fileName: true,
       fileType: true,
       totalRows: true,

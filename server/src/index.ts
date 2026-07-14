@@ -50,6 +50,7 @@ import prisma from './db/prisma';
 import { resumePendingImports } from './services/importResume.service';
 import { sweepOrphanUploads, uploadStorage } from './services/uploadFile';
 import { errorHandler, requestId } from './middleware/errorHandler';
+import { getActionLog } from './services/actionLog.service';
 
 dotenv.config();
 
@@ -108,6 +109,14 @@ app.delete('/api/customer-validation/:validationId', deleteValidationHandler);
 // ── Shopify test-store import + feedback loop ────────────────────────────────
 app.get('/api/shopify/health', shopifyHealthHandler);
 app.get('/api/shopify/stores', shopifyStoresHandler);
+
+// GET /api/action-log — who destroyed what. Read-only; nothing in the app makes a
+// decision from this table (see services/actionLog.service.ts).
+app.get('/api/action-log', (_req, res, next) => {
+  getActionLog()
+    .then((entries) => res.json(entries))
+    .catch(next);
+});
 app.get('/api/shopify/stores/:storeId/stats', shopifyStoreStatsHandler);
 app.post('/api/shopify/stores/:storeId/cleanup-qa', cleanupQaCustomersHandler);
 // Cleanup is async for both flows: the POST routes return 202 with a run, and this
