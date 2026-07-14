@@ -18,7 +18,7 @@ import {
   ShopifyAuthError,
   ShopifyConfigError,
 } from './shopifyClient';
-import { getShopifyConfig, resolveStoreId } from '../config/shopify';
+import { getShopifyConfig } from '../config/shopify';
 import {
   acquireStoreLock,
   acquireStoreLocks,
@@ -426,7 +426,7 @@ function groupsFromOriginalRows(rows: OriginalRowRecord[]): ProductGroup[] {
 
 export async function startProductImport(
   uploadId: string,
-  storeId?: string,
+  storeId: string,
 ): Promise<RunProductImportResult> {
   const upload = await prisma.productUploadRun.findUnique({
     where: { id: uploadId },
@@ -470,7 +470,7 @@ export async function startProductImport(
   //    explicit one for the same store.
   try {
     await prisma.$transaction(async (tx) => {
-      await acquireStoreLock(tx, resolveStoreId(storeId) ?? storeId ?? 'default', {
+      await acquireStoreLock(tx, storeId, {
         ownerType: 'PRODUCT_IMPORT_RUN',
         ownerId: importRunId,
         operation: 'a product import',
@@ -479,8 +479,8 @@ export async function startProductImport(
         data: {
           id: importRunId,
           uploadId,
-          storeId: storeId ?? null,
-          shopDomain: health.shop ?? shopDomainFor(storeId ?? ''),
+          storeId,
+          shopDomain: health.shop ?? shopDomainFor(storeId),
           bulkOperationId: null,
           status: 'PENDING',
           successCount: 0,
@@ -758,15 +758,12 @@ export async function startBatchProductImport(
     await prisma.$transaction(async (tx) => {
       await acquireStoreLocks(
         tx,
-        planned.map((p) => resolveStoreId(p.storeId) ?? p.storeId),
-        (storeId) => {
-          const job = planned.find((p) => (resolveStoreId(p.storeId) ?? p.storeId) === storeId)!;
-          return {
-            ownerType: 'PRODUCT_IMPORT_JOB',
-            ownerId: job.id,
-            operation: 'a product import',
-          };
-        },
+        planned.map((p) => p.storeId),
+        (storeId) => ({
+          ownerType: 'PRODUCT_IMPORT_JOB',
+          ownerId: planned.find((p) => p.storeId === storeId)!.id,
+          operation: 'a product import',
+        }),
       );
       await tx.productImportRun.create({
         data: {

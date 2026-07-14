@@ -3,7 +3,7 @@ import type { CleanupRun, ImportBatchJob } from '@prisma/client';
 import prisma from '../db/prisma';
 import { buildTemplateDataset } from '../reports/templateDataset';
 import { TemplateRow } from '../reports/mergeDuplicates';
-import { getShopifyConfig, resolveStoreId } from '../config/shopify';
+import { getShopifyConfig } from '../config/shopify';
 import {
   acquireStoreLock,
   acquireStoreLocks,
@@ -252,7 +252,7 @@ function parseCustomerCreateLine(
 // by the GET poll), so no HTTP request is held open while Shopify processes.
 export async function startCustomerImport(
   validationId: string,
-  storeId?: string,
+  storeId: string,
 ): Promise<RunImportResult> {
   const run = await prisma.validationRun.findUnique({
     where: { id: validationId },
@@ -295,7 +295,7 @@ export async function startCustomerImport(
   //    explicit one for the same store.
   try {
     await prisma.$transaction(async (tx) => {
-      await acquireStoreLock(tx, resolveStoreId(storeId) ?? storeId ?? 'default', {
+      await acquireStoreLock(tx, storeId, {
         ownerType: 'IMPORT_RUN',
         ownerId: importRunId,
         operation: 'a customer import',
@@ -304,8 +304,8 @@ export async function startCustomerImport(
         data: {
           id: importRunId,
           validationId,
-          storeId: storeId ?? null,
-          shopDomain: health.shop ?? shopDomainFor(storeId ?? ''),
+          storeId,
+          shopDomain: health.shop ?? shopDomainFor(storeId),
           bulkOperationId: null,
           status: 'PENDING',
           successCount: 0,
@@ -626,15 +626,12 @@ export async function startBatchImport(
     await prisma.$transaction(async (tx) => {
       await acquireStoreLocks(
         tx,
-        planned.map((p) => resolveStoreId(p.storeId) ?? p.storeId),
-        (storeId) => {
-          const job = planned.find((p) => (resolveStoreId(p.storeId) ?? p.storeId) === storeId)!;
-          return {
-            ownerType: 'IMPORT_JOB',
-            ownerId: job.id,
-            operation: 'a customer import',
-          };
-        },
+        planned.map((p) => p.storeId),
+        (storeId) => ({
+          ownerType: 'IMPORT_JOB',
+          ownerId: planned.find((p) => p.storeId === storeId)!.id,
+          operation: 'a customer import',
+        }),
       );
       await tx.importRun.create({
         data: {

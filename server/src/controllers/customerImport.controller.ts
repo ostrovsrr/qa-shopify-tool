@@ -37,12 +37,18 @@ function handleShopifyError(err: unknown, res: Response): boolean {
 }
 
 const uuidSchema = z.string().uuid('Invalid id format.');
+// storeId is REQUIRED. It used to be optional, and an absent one silently meant
+// "the first configured store" — so "I forgot to pick a store" and "I meant store1"
+// were the same request, and the difference showed up as real customers in a real
+// store. Say which store you mean.
 const runImportSchema = z.object({
-  storeId: z.string().min(1).optional(),
+  storeId: z.string().min(1, 'Select a store to import into.'),
 });
 const runBatchSchema = z.object({
   storeIds: z.array(z.string().min(1)).min(1, 'Select at least one store.'),
 });
+// Still optional, and legitimately so: omitting it means "clean up every store this
+// import touched", which for a batch is several. It is not a default-store fallback.
 const cleanupImportSchema = z.object({
   storeId: z.string().min(1).optional(),
 });

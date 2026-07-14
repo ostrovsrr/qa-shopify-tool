@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { CleanupRun } from '@prisma/client';
 import prisma from '../db/prisma';
-import { getShopifyConfig, resolveStoreId } from '../config/shopify';
+import { getShopifyConfig } from '../config/shopify';
 import { getShopifyClient } from './shopifyClient';
 import {
   acquireStoreLock,
@@ -86,6 +86,25 @@ export async function startCleanupRun(
   const adapter = adapterFor(entity);
   const runId = uuidv4();
 
+  // A run with no store recorded cannot be cleaned up: there is nowhere to delete
+  // from. This only reaches us via a LEGACY row written before storeId was required
+  // (when an absent store silently meant "the first one"). Guessing a store and
+  // deleting by tag from it is the single worst thing this code could do, so say so
+  // instead.
+  if (!storeId) {
+    return prisma.cleanupRun.create({
+      data: {
+        entity,
+        storeId: null,
+        shopDomain: 'unknown',
+        tag,
+        importRunId: importRunId ?? null,
+        status: 'FAILED',
+        error: 'This run has no store recorded, so its records cannot be cleaned up automatically.',
+      },
+    });
+  }
+
   // ── Take the store's busy-lock and write the row in ONE transaction, BEFORE we
   //    so much as list what we are about to delete.
   //
@@ -102,7 +121,7 @@ export async function startCleanupRun(
   //    while we hold the store.
   try {
     await prisma.$transaction(async (tx) => {
-      await acquireStoreLock(tx, resolveStoreId(storeId) ?? storeId ?? 'default', {
+      await acquireStoreLock(tx, storeId, {
         ownerType: 'CLEANUP_RUN',
         ownerId: runId,
         operation: entity === 'CUSTOMER' ? 'a customer cleanup' : 'a product cleanup',
