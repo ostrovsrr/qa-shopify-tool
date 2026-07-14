@@ -18,6 +18,7 @@ import {
   ShopifyAuthError,
   ShopifyConfigError,
 } from './shopifyClient';
+import { getShopifyConfig } from '../config/shopify';
 import { getProductImportFeedback, ProductImportFeedback } from './productFeedback.service';
 import { cleanupProductsByTag, CleanupResult } from './productCleanup.service';
 import { normalizeRecord } from '../utils/normalize';
@@ -631,82 +632,62 @@ export async function startBatchProductImport(
   const parentId = uuidv4();
   const batches = splitIntoBatches(groups, storeIds.length);
 
-  // Per-store failure is captured as a FAILED job rather than aborting the whole
-  // batch (which would strand the bulk ops already started on other stores).
-  const jobs = await Promise.all(
-    storeIds.map(async (storeId, index) => {
-      const batch = batches[index] ?? [];
-      if (batch.length === 0) return null; // fewer products than stores
-      try {
-        const client = await getShopifyClient(storeId);
-        const health = await client.verifyConnection();
-        if (!health.ok) {
-          return {
-            storeId,
-            index,
-            shopDomain: health.shop ?? storeId,
-            batchCount: storeIds.length,
-            bulkOperationId: null as string | null,
-            status: 'FAILED',
-            error: health.error ?? 'Store not healthy.',
-            productCount: batch.length,
-          };
-        }
-        const locationId = await fetchLocationId(client);
-        const { jsonl } = buildProductLines(batch, parentId, locationId);
-        const stagedPath = await stagedUpload(client, jsonl, 'bulk_products.jsonl');
-        const bulkOpId = await runBulkMutation(client, PRODUCT_SET_MUTATION, stagedPath);
-        return {
-          storeId,
-          index,
-          shopDomain: health.shop ?? storeId,
-          batchCount: storeIds.length,
-          bulkOperationId: bulkOpId as string | null,
-          status: 'RUNNING',
-          error: null as string | null,
-          productCount: batch.length,
-        };
-      } catch (err) {
-        return {
-          storeId,
-          index,
-          shopDomain: storeId,
-          batchCount: storeIds.length,
-          bulkOperationId: null as string | null,
-          status: 'FAILED',
-          error: (err as Error).message,
-          productCount: batch.length,
-        };
-      }
-    }),
-  );
+  // ── 1. PLAN the jobs. No Shopify calls: every field here comes from the CSV
+  //       or from env config, so this cannot fail halfway through.
+  const planned = storeIds
+    .map((storeId, index) => ({
+      id: uuidv4(),
+      storeId,
+      index,
+      batch: batches[index] ?? [],
+      // The shop domain is in env config, so we do NOT need verifyConnection()
+      // to know it. That is what lets the whole plan be persisted before we
+      // talk to Shopify at all.
+      shopDomain: shopDomainFor(storeId),
+    }))
+    .filter((p) => p.batch.length > 0); // fewer products than stores
 
-  const realJobs = jobs.filter((j): j is NonNullable<typeof j> => j !== null);
-  if (realJobs.length === 0) {
+  if (planned.length === 0) {
     return { ok: false, error: 'No products to import.' };
   }
 
+  // ── 2. PRE-PERSIST the parent and EVERY job as PENDING, in ONE transaction,
+  //       BEFORE any Shopify call.
+  //
+  //       This is the whole ballgame. The rollup in reconcileBatchRun asks
+  //       `fresh.every(j => TERMINAL.includes(j.status))` over the jobs it finds
+  //       in the DB. If jobs are written as they complete, a crash mid-fan-out
+  //       leaves 2 of 5 rows on disk, every() sees two terminal jobs, agrees,
+  //       and rolls the parent up to COMPLETED — reporting a successful import
+  //       of three stores that never received anything.
+  //
+  //       Writing all N jobs up front as PENDING makes that impossible: PENDING
+  //       is not in TERMINAL_BULK_STATUSES, so the unstarted jobs are on disk and
+  //       hold the rollup open. A partial fan-out can no longer lie; the worst it
+  //       can do is leave the run unfinished, which resumePendingJobs() then
+  //       picks up. Pinned by test/integration/batchRollup.test.ts.
   await prisma.productImportRun.create({
     data: {
       id: parentId,
       uploadId,
+      // NULL is correct here and stays correct: a batch parent spans many stores.
       storeId: null,
-      shopDomain: realJobs.map((j) => j.shopDomain).join(', ').slice(0, 250),
+      shopDomain: planned.map((p) => p.shopDomain).join(', ').slice(0, 250),
       bulkOperationId: null,
       status: 'RUNNING',
       successCount: 0,
       errorCount: 0,
       batchJobs: {
-        create: realJobs.map((j) => ({
-          id: uuidv4(),
-          storeId: j.storeId,
-          shopDomain: j.shopDomain,
-          batchIndex: j.index,
-          batchCount: j.batchCount,
-          bulkOperationId: j.bulkOperationId,
-          status: j.status,
-          error: j.error,
-          productCount: j.productCount,
+        create: planned.map((p) => ({
+          id: p.id,
+          storeId: p.storeId,
+          shopDomain: p.shopDomain,
+          batchIndex: p.index,
+          batchCount: storeIds.length,
+          bulkOperationId: null,
+          status: 'PENDING',
+          error: null,
+          productCount: p.batch.length,
           successCount: 0,
           errorCount: 0,
         })),
@@ -714,7 +695,71 @@ export async function startBatchProductImport(
     },
   });
 
+  // ── 3. FAN OUT. Each job moves PENDING → RUNNING (with its bulk op id) or
+  //       PENDING → FAILED. A per-store failure is captured on that job rather
+  //       than aborting the batch, which would strand the bulk ops already
+  //       started on the other stores.
+  await Promise.all(planned.map((p) => launchBatchJob(p.id, p.storeId, p.batch, parentId)));
+
   return { ok: true, importRunId: parentId };
+}
+
+/** Resolve a store's shop domain from env config, without touching the network.
+ *  Falls back to the store id so a misconfigured store still yields a row. */
+function shopDomainFor(storeId: string): string {
+  const result = getShopifyConfig(storeId);
+  return result.ok ? result.config.shop : storeId;
+}
+
+/**
+ * Start one pre-persisted batch job: verify the store, stage the JSONL, submit the
+ * bulk mutation, and record the bulk operation id.
+ *
+ * The job row already exists (PENDING) before this runs, so every exit path here
+ * is an UPDATE. If the process dies part-way, the row stays PENDING — non-terminal,
+ * so it holds the parent's rollup open — and resumePendingJobs() picks it up.
+ */
+async function launchBatchJob(
+  jobId: string,
+  storeId: string,
+  batch: ProductGroup[],
+  parentId: string,
+): Promise<void> {
+  try {
+    const client = await getShopifyClient(storeId);
+    const health = await client.verifyConnection();
+    if (!health.ok) {
+      await prisma.productImportJob.update({
+        where: { id: jobId },
+        data: { status: 'FAILED', error: health.error ?? 'Store not healthy.' },
+      });
+      return;
+    }
+
+    const locationId = await fetchLocationId(client);
+    const { jsonl } = buildProductLines(batch, parentId, locationId);
+    const stagedPath = await stagedUpload(client, jsonl, 'bulk_products.jsonl');
+    const bulkOpId = await runBulkMutation(client, PRODUCT_SET_MUTATION, stagedPath);
+
+    // The gap between runBulkMutation returning and this write landing is the
+    // one window where a crash leaves a bulk op running on Shopify that we have
+    // no id for. resumePendingJobs() closes it by ADOPTING the shop's
+    // currentBulkOperation rather than submitting a second one (Shopify allows
+    // only one per shop, so a naive re-submit would just fail).
+    await prisma.productImportJob.update({
+      where: { id: jobId },
+      data: {
+        status: 'RUNNING',
+        bulkOperationId: bulkOpId,
+        shopDomain: health.shop ?? shopDomainFor(storeId),
+      },
+    });
+  } catch (err) {
+    await prisma.productImportJob.update({
+      where: { id: jobId },
+      data: { status: 'FAILED', error: (err as Error).message },
+    });
+  }
 }
 
 // Advances a batch parent: polls each non-terminal job once, merges completed
