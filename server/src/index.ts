@@ -1,5 +1,7 @@
 import cors from 'cors';
 import dotenv from 'dotenv';
+import fs from 'fs';
+import path from 'path';
 import express from 'express';
 import multer from 'multer';
 import {
@@ -70,6 +72,22 @@ app.use(express.json());
 
 // Tag every request, so a "it broke" from a colleague can be found in the log.
 app.use(requestId);
+
+// ── Liveness probe ──────────────────────────────────────────────────────────
+//
+// Deliberately does NOT touch Shopify. A platform health check that calls a
+// third-party API means an outage at Shopify — or one expired token — makes the
+// platform conclude OUR container is unhealthy and kill it, taking every in-flight
+// import with it. The probe answers one question: is this process serving?
+//
+// It does check the database, because a server that cannot reach Postgres cannot do
+// anything useful and should be restarted.
+app.get('/api/health', (_req, res) => {
+  prisma
+    .$queryRaw`SELECT 1`
+    .then(() => res.json({ ok: true }))
+    .catch((err: Error) => res.status(503).json({ ok: false, error: err.message }));
+});
 
 // ── File upload ─────────────────────────────────────────────────────────────
 
@@ -155,6 +173,27 @@ app.get('/api/product-import/by-upload/:uploadId', getLatestImportForUploadHandl
 app.get('/api/product-import/:id/report', getProductImportReportHandler);
 app.post('/api/product-import/:id/cleanup', cleanupProductImportRunHandler);
 app.get('/api/product-import/:id', getProductImportHandler);
+
+// ── Static client (production) ──────────────────────────────────────────────
+//
+// Hosted, the server serves the built React app as well as the API — one container,
+// one origin, no CORS. In dev this block is skipped and Vite serves the client on
+// 5173, proxying /api here.
+//
+// The SPA fallback deliberately runs AFTER every /api route: React Router owns
+// /customers and /products, so any non-API path that is not a real file must return
+// index.html rather than a 404. It must NOT swallow unmatched /api/* — those should
+// still 404 as JSON, or a typo'd endpoint would return an HTML page and the client
+// would report a bewildering parse error instead of "not found".
+const CLIENT_DIST = path.resolve(__dirname, '../../client/dist');
+
+if (process.env.NODE_ENV === 'production' && fs.existsSync(CLIENT_DIST)) {
+  app.use(express.static(CLIENT_DIST));
+
+  app.get(/^(?!\/api\/).*/, (_req, res) => {
+    res.sendFile(path.join(CLIENT_DIST, 'index.html'));
+  });
+}
 
 // ── Error handler ───────────────────────────────────────────────────────────
 //
