@@ -39,8 +39,27 @@ import { TERMINAL_BULK_STATUSES } from './shopifyBulk';
 // one who has to make that true. See docs/DEPLOY.md.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Days a run's raw uploaded rows are kept. 0 disables the purge entirely. */
-export const RETENTION_DAYS = Number(process.env.RETENTION_DAYS ?? 30);
+/**
+ * Days a run's raw uploaded rows are kept. UNSET OR 0 = NEVER PURGE.
+ *
+ * ── WHY THIS DEFAULTS TO OFF ────────────────────────────────────────────────
+ *
+ * It used to default to 30, and that was a genuinely bad call. On 2026-07-14 the
+ * dev server was restarted after a routine migration and the boot-time purge
+ * immediately and irreversibly deleted the raw rows of 47 real validation runs —
+ * months of a colleague's work — because nobody had set a variable they did not
+ * know existed. No warning, no dry run, no confirmation. The data was not
+ * recoverable.
+ *
+ * A destructive, irreversible sweep must never run because someone FORGOT to
+ * configure something. The safe state has to be the default state. Retention is now
+ * opt-in: you set a number, on purpose, having thought about it.
+ *
+ * The cost of this default is that PII lives forever until someone turns retention
+ * on. That is a real cost, and it is the smaller one: unset retention is a liability
+ * you can fix any day; deleted merchant data is gone.
+ */
+export const RETENTION_DAYS = Number(process.env.RETENTION_DAYS ?? 0);
 
 export interface PurgeSummary {
   validationRuns: number;
@@ -67,6 +86,34 @@ export async function purgeExpiredPii(): Promise<PurgeSummary> {
   if (!Number.isFinite(RETENTION_DAYS) || RETENTION_DAYS <= 0) return summary;
 
   const before = cutoff();
+
+  // ── SAY WHAT YOU ARE ABOUT TO DESTROY, BEFORE YOU DESTROY IT ──────────────
+  //
+  // The first run of this against a database with real history in it deleted 47
+  // runs' worth of raw rows and said nothing until afterwards. An irreversible
+  // sweep gets to announce itself: count the victims, print the number, and — the
+  // first time it would delete anything — REFUSE, until a human has seen the number
+  // and said yes.
+  //
+  // RETENTION_CONFIRMED=1 is that yes. It is deliberately a second, separate
+  // variable: setting RETENTION_DAYS is a policy decision, and confirming that you
+  // accept what it will delete from THIS database, right now, is a different one.
+  const doomed =
+    (await prisma.validationRun.count({ where: { createdAt: { lt: before }, piiPurgedAt: null } })) +
+    (await prisma.productUploadRun.count({
+      where: { createdAt: { lt: before }, piiPurgedAt: null },
+    }));
+
+  if (doomed > 0 && process.env.RETENTION_CONFIRMED !== '1') {
+    console.warn(
+      `[retention] REFUSING TO PURGE. RETENTION_DAYS=${RETENTION_DAYS} would irreversibly ` +
+        `delete the uploaded rows of ${doomed} existing run(s) (everything before ` +
+        `${before.toISOString().slice(0, 10)}). Their reports could no longer be rebuilt.\n` +
+        `[retention] If that is what you want, set RETENTION_CONFIRMED=1. ` +
+        `To keep the data, set RETENTION_DAYS=0.`,
+    );
+    return summary;
+  }
 
   // ── customers ─────────────────────────────────────────────────────────────
   const staleValidations = await prisma.validationRun.findMany({

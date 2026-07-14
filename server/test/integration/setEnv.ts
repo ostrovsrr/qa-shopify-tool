@@ -17,6 +17,15 @@ process.env.UPLOAD_DIR = require('path').join(
   'qa-shopify-uploads-integration',
 );
 
+// ── Retention: the suite opts in, exactly like a real deployment must ────────
+//
+// Retention now defaults to OFF and refuses to purge an existing database without
+// an explicit confirmation, because defaulting it ON destroyed 47 runs of real work
+// on 2026-07-14. The tests exercise the purge, so they turn it on ON PURPOSE — which
+// is the whole point of the design: nothing is deleted unless someone said so.
+process.env.RETENTION_DAYS = process.env.RETENTION_DAYS ?? '30';
+process.env.RETENTION_CONFIRMED = process.env.RETENTION_CONFIRMED ?? '1';
+
 // ── Shopify: cut the network at the knees ────────────────────────────────────
 //
 // This file used to override DATABASE_URL and NOTHING ELSE, which left the real

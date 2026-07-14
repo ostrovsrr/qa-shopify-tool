@@ -68,11 +68,28 @@ every in-flight import with it.
 - **Disk.** Ephemeral is correct. Uploads land in `UPLOAD_DIR` and are deleted as soon
   as they are consumed; orphans are swept hourly. Nothing else is written to disk.
 
-## Data retention — make the number true
+## Data retention — OFF by default, and it will not surprise you
 
-`RETENTION_DAYS` (default 30) purges the raw uploaded rows of old runs. The aggregate
-QA results survive; the personal data does not. A run whose import is still in flight
-is never purged, however old.
+`RETENTION_DAYS` purges the raw uploaded rows of old runs. The aggregate QA results
+survive; the personal data does not. A run whose import is still in flight is never
+purged, however old.
+
+**It is OFF unless you set it.** It used to default to 30 days, and on 2026-07-14 a
+routine server restart silently and irreversibly deleted the raw rows of 47 real
+validation runs — because nobody had set a variable they did not know existed. An
+irreversible sweep must never run because someone *forgot* something.
+
+So there are two switches, on purpose:
+
+```bash
+RETENTION_DAYS=30       # the policy: how long rows live
+RETENTION_CONFIRMED=1   # "yes, I accept what that deletes from THIS database, now"
+```
+
+With `RETENTION_DAYS` set but `RETENTION_CONFIRMED` unset, the first sweep that would
+destroy anything **refuses**, and logs exactly how many existing runs it was about to
+gut. Read that number, then decide. Deciding the policy and accepting what it does to
+the data already in front of you are two different decisions.
 
 **This is theatre unless it is aligned with the database's backup window.** A 30-day
 purge on a database with 35-day point-in-time recovery deletes nothing meaningful: the

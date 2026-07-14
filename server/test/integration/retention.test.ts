@@ -192,6 +192,32 @@ runIf('PII retention', () => {
     expect((await purgeExpiredPii()).validationRuns).toBe(0);
   });
 
+  // ── THE SECOND SAFETY CATCH ───────────────────────────────────────────────
+
+  it('REFUSES to purge an existing database until a human has confirmed', async () => {
+    const id = await seedValidation(ancient());
+
+    // This is what actually went wrong: the purge ran on a routine boot and deleted
+    // 47 real runs before anyone knew it existed. Even with retention deliberately
+    // switched on, the FIRST sweep that would destroy something now stops, prints how
+    // many runs it is about to gut, and waits to be told yes.
+    const previous = process.env.RETENTION_CONFIRMED;
+    delete process.env.RETENTION_CONFIRMED;
+    try {
+      const summary = await purgeExpiredPii();
+
+      expect(summary.validationRuns).toBe(0);
+      expect(await rowsFor(id)).toBe(2); // untouched
+      const run = await prisma.validationRun.findUniqueOrThrow({ where: { id } });
+      expect(run.piiPurgedAt).toBeNull();
+    } finally {
+      process.env.RETENTION_CONFIRMED = previous;
+    }
+
+    // Confirmed → it proceeds. The gate is a gate, not a wall.
+    expect((await purgeExpiredPii()).validationRuns).toBe(1);
+  });
+
   // ── the twin ──────────────────────────────────────────────────────────────
 
   it('applies the same rules to product uploads', async () => {
