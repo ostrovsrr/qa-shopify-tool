@@ -90,6 +90,9 @@ export interface StoreCustomerStats {
   qaImportCustomers: number;
 }
 
+// The aggregate of one or more async CleanupRuns (one per store), folded together
+// by awaitCleanupRuns. `errors` keys on a plain `id` — the customer and product
+// flows are twins and there was no reason for their shapes to differ.
 export interface CleanupResult {
   storeId?: string;
   shop: string;
@@ -97,7 +100,7 @@ export interface CleanupResult {
   found: number;
   deleted: number;
   failed: number;
-  errors: { customerId: string; message: string }[];
+  errors: { id: string; message: string }[];
 }
 
 export interface BucketRow {
@@ -208,6 +211,7 @@ export interface StoreProductStats {
   qaImportProducts: number;
 }
 
+// The product twin of CleanupResult — same shape, same engine behind it.
 export interface ProductCleanupResult {
   storeId?: string;
   shop: string;
@@ -215,7 +219,7 @@ export interface ProductCleanupResult {
   found: number;
   deleted: number;
   failed: number;
-  errors: { productId: string; message: string }[];
+  errors: { id: string; message: string }[];
 }
 
 export interface RejectionGroup {

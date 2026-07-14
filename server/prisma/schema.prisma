@@ -292,3 +292,51 @@ model ProductOriginalRow {
   @@index([uploadRunId])
   @@map("product_original_rows")
 }
+
+// One cleanup attempt against ONE store. Cleanup used to run entirely inside the
+// HTTP request, polling Shopify for up to 300s (150 attempts x 2s) — deliberately,
+// per the old comment. That cannot work hosted: platform proxies give up around
+// 100s, so the request dies while the delete is still running and the user is told
+// nothing. Cleanup is now persisted and advanced one step per poll, exactly like an
+// import run.
+//
+// Serves BOTH flows (customers and products are twins); `entity` says which.
+model CleanupRun {
+  id              String   @id @default(uuid())
+  // 'CUSTOMER' | 'PRODUCT'
+  entity          String
+  storeId         String?
+  shopDomain      String
+  // The tag whose records are being deleted: the base 'qa-import' for a whole-store
+  // teardown, or 'qa-import-<importRunId>' to reverse exactly one import.
+  tag             String
+  // Set when this cleanup is reversing a specific import run, so the UI can tie
+  // them together. Null for a whole-store "Clean QA" sweep.
+  importRunId     String?
+  // PENDING (row written, bulk delete NOT yet submitted) → RUNNING → COMPLETED |
+  // FAILED | CANCELED | EXPIRED. PENDING exists for the same reason it does on
+  // imports: never take a side effect you have not recorded. A crash between
+  // submitting the delete and saving its id would otherwise leave records being
+  // deleted from a real store with no trace of it.
+  status          String   @default("PENDING")
+  bulkOperationId String?
+  error           String?
+  // How many tagged records were found; how many Shopify actually deleted.
+  found           Int      @default(0)
+  deleted         Int      @default(0)
+  failedCount     Int      @default(0)
+  // The ids Shopify refused to delete, with its reason. [{ id, message }]
+  errors          Json?
+  // The ids submitted, in order — the bulk result file maps back to them by line.
+  // Needed because the reconcile happens in a LATER request than the submit.
+  submittedIds    Json?
+  pollAttempts    Int      @default(0)
+  // See ImportRun.claimedAt.
+  claimedAt       DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([importRunId])
+  @@index([status])
+  @@map("cleanup_runs")
+}

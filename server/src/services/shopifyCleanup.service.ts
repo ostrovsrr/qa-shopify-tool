@@ -137,6 +137,33 @@ export async function cleanupCustomersByTag(
   };
 }
 
+/**
+ * The customer half of the entity-agnostic cleanup engine (cleanupRun.service.ts).
+ * Everything cleanup does is identical across customers and products except these
+ * four things, so this is all the engine needs to run a customer teardown.
+ */
+export const customerCleanupAdapter = {
+  entity: 'CUSTOMER' as const,
+  bulkThreshold: BULK_DELETE_THRESHOLD,
+  fetchIdsByTag: fetchCustomerIdsByTag,
+  serialDelete: async (
+    client: Awaited<ReturnType<typeof getShopifyClient>>,
+    ids: string[],
+  ): Promise<{ deleted: number; errors: { id: string; message: string }[] }> => {
+    const out = await serialDeleteCustomers(client, ids);
+    return {
+      deleted: out.deleted,
+      errors: out.errors.map((e) => ({ id: e.customerId, message: e.message })),
+    };
+  },
+  deleteSpec: {
+    mutation: CUSTOMER_DELETE_MUTATION,
+    filename: 'bulk_customer_delete.jsonl',
+    payloadKey: 'customerDelete',
+    deletedIdKey: 'deletedCustomerId',
+  },
+};
+
 interface DeleteOutcome {
   deleted: number;
   errors: CleanupResult['errors'];

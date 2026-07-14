@@ -5,15 +5,9 @@ import {
   ShopifyAuthError,
   ShopifyConfigError,
 } from '../services/shopifyClient';
-import {
-  cleanupCustomersByTag,
-  getStoreCustomerStats,
-  QA_IMPORT_TAG,
-} from '../services/shopifyCleanup.service';
-import {
-  cleanupProductsByTag,
-  getStoreProductStats,
-} from '../services/productCleanup.service';
+import { getStoreCustomerStats, QA_IMPORT_TAG } from '../services/shopifyCleanup.service';
+import { getStoreProductStats } from '../services/productCleanup.service';
+import { reconcileCleanupRun, startCleanupRun } from '../services/cleanupRun.service';
 
 // GET /api/shopify/stores - safe store list for the UI.
 export function shopifyStoresHandler(
@@ -105,15 +99,18 @@ export async function shopifyStoreProductStatsHandler(
   }
 }
 
-// POST /api/shopify/stores/:storeId/cleanup-qa-products - delete all qa-import tagged products.
+// POST /api/shopify/stores/:storeId/cleanup-qa-products - delete all qa-import
+// tagged products. Returns 202 with a cleanup run to poll; a large teardown is a
+// bulk operation that can take minutes, and blocking the request on it was what
+// made these routes unusable behind a hosting proxy.
 export async function cleanupQaProductsHandler(
   req: Request,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
   try {
-    const result = await cleanupProductsByTag(req.params.storeId, QA_IMPORT_TAG);
-    res.json(result);
+    const run = await startCleanupRun('PRODUCT', req.params.storeId, QA_IMPORT_TAG);
+    res.status(202).json(run);
   } catch (err) {
     if (err instanceof ShopifyConfigError) {
       res.status(503).json({ error: err.message });
@@ -127,15 +124,44 @@ export async function cleanupQaProductsHandler(
   }
 }
 
-// POST /api/shopify/stores/:storeId/cleanup-qa - delete all qa-import tagged customers.
+// POST /api/shopify/stores/:storeId/cleanup-qa - delete all qa-import tagged
+// customers. Returns 202 with a cleanup run to poll. See above.
 export async function cleanupQaCustomersHandler(
   req: Request,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
   try {
-    const result = await cleanupCustomersByTag(req.params.storeId, QA_IMPORT_TAG);
-    res.json(result);
+    const run = await startCleanupRun('CUSTOMER', req.params.storeId, QA_IMPORT_TAG);
+    res.status(202).json(run);
+  } catch (err) {
+    if (err instanceof ShopifyConfigError) {
+      res.status(503).json({ error: err.message });
+      return;
+    }
+    if (err instanceof ShopifyAuthError) {
+      res.status(401).json({ error: err.message });
+      return;
+    }
+    next(err);
+  }
+}
+
+// GET /api/cleanup/:id - advance a cleanup by one step and return its state.
+// Reconcile-on-poll, exactly like an import run: a 300s bulk delete becomes a
+// handful of cheap requests instead of one that outlives the proxy.
+export async function getCleanupRunHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const run = await reconcileCleanupRun(req.params.id);
+    if (!run) {
+      res.status(404).json({ error: 'Cleanup run not found.' });
+      return;
+    }
+    res.json(run);
   } catch (err) {
     if (err instanceof ShopifyConfigError) {
       res.status(503).json({ error: err.message });

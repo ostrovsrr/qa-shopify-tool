@@ -325,22 +325,29 @@ export interface BulkDeleteSpec {
 }
 
 /**
- * Delete ids via a single bulkOperationRunMutation over a staged JSONL, block
- * until it finishes, and fold the per-line results into a deleted count + errors.
+ * Stage the ids and kick off the delete. Returns the bulk operation id WITHOUT
+ * waiting for it to finish — the caller persists that id and advances the
+ * operation one step per poll (see cleanupRun.service.ts).
  *
- * Shared by the customer and product cleanup services, which were previously
- * line-for-line identical here apart from the entity nouns.
+ * This is the non-blocking half. Blocking in-request for up to 300s is what makes
+ * the cleanup routes unusable behind a hosting proxy that gives up around 100s.
  */
-export async function bulkDeleteByIds(
+export async function submitBulkDelete(
   client: ShopifyClient,
   ids: string[],
   spec: BulkDeleteSpec,
-): Promise<BulkDeleteOutcome> {
+): Promise<string> {
   const jsonl = ids.map((id) => JSON.stringify({ input: { id } })).join('\n');
   const stagedPath = await stagedUpload(client, jsonl, spec.filename);
-  const bulkOpId = await runBulkMutation(client, spec.mutation, stagedPath);
-  const url = await awaitBulkOperationResultUrl(client, bulkOpId);
+  return runBulkMutation(client, spec.mutation, stagedPath);
+}
 
+/** Fold a finished delete operation's result file into a deleted count + errors. */
+export async function parseBulkDeleteResults(
+  url: string,
+  ids: string[],
+  spec: BulkDeleteSpec,
+): Promise<BulkDeleteOutcome> {
   type LineOutcome = { ok: boolean; id: string; message?: string };
 
   const outcomes = await fetchAndParseBulkResults<string, LineOutcome>(
@@ -379,6 +386,23 @@ export async function bulkDeleteByIds(
     }
   }
   return { deleted, errors };
+}
+
+/**
+ * Submit a delete and BLOCK until it finishes.
+ *
+ * ⚠ Blocks the request for up to 300s (see awaitBulkOperationResultUrl). Kept only
+ * for callers that are already synchronous and small. The hosted cleanup path uses
+ * submitBulkDelete + parseBulkDeleteResults and polls instead.
+ */
+export async function bulkDeleteByIds(
+  client: ShopifyClient,
+  ids: string[],
+  spec: BulkDeleteSpec,
+): Promise<BulkDeleteOutcome> {
+  const bulkOpId = await submitBulkDelete(client, ids, spec);
+  const url = await awaitBulkOperationResultUrl(client, bulkOpId);
+  return parseBulkDeleteResults(url, ids, spec);
 }
 
 // ── parallel batch split ─────────────────────────────────────────────────────

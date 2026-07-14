@@ -137,6 +137,33 @@ export async function cleanupProductsByTag(
   };
 }
 
+/**
+ * The product half of the entity-agnostic cleanup engine (cleanupRun.service.ts).
+ * The twin of customerCleanupAdapter — everything cleanup does is identical across
+ * the two flows except these four things.
+ */
+export const productCleanupAdapter = {
+  entity: 'PRODUCT' as const,
+  bulkThreshold: BULK_DELETE_THRESHOLD,
+  fetchIdsByTag: fetchProductIdsByTag,
+  serialDelete: async (
+    client: Awaited<ReturnType<typeof getShopifyClient>>,
+    ids: string[],
+  ): Promise<{ deleted: number; errors: { id: string; message: string }[] }> => {
+    const out = await serialDeleteProducts(client, ids);
+    return {
+      deleted: out.deleted,
+      errors: out.errors.map((e) => ({ id: e.productId, message: e.message })),
+    };
+  },
+  deleteSpec: {
+    mutation: PRODUCT_DELETE_MUTATION,
+    filename: 'bulk_product_delete.jsonl',
+    payloadKey: 'productDelete',
+    deletedIdKey: 'deletedProductId',
+  },
+};
+
 interface DeleteOutcome {
   deleted: number;
   errors: CleanupResult['errors'];

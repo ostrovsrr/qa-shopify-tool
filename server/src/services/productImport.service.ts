@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import type { ProductImportJob } from '@prisma/client';
+import type { CleanupRun, ProductImportJob } from '@prisma/client';
 import prisma from '../db/prisma';
 import {
   BuiltJsonl,
@@ -27,7 +27,7 @@ import {
   ResumableStore,
 } from './importResume.service';
 import { getProductImportFeedback, ProductImportFeedback } from './productFeedback.service';
-import { cleanupProductsByTag, CleanupResult } from './productCleanup.service';
+import { startCleanupRuns } from './cleanupRun.service';
 import { normalizeRecord } from '../utils/normalize';
 import { ProductCsvRow, ProductGroup, ProductImportOutcome } from '../types';
 
@@ -563,10 +563,18 @@ export async function reconcileLatestImportForUpload(
 // A batch spreads its products over all its jobs' stores (all sharing the
 // qa-import-<importRunId> tag); a single run uses its own store (or the caller's
 // fallback). Results are aggregated into one CleanupResult.
+/**
+ * Reverse one import: delete everything it created, across every store it touched.
+ *
+ * Returns the cleanup runs to poll rather than a finished result — a teardown of a
+ * real migration is a bulk delete that can take minutes, and waiting for it inside
+ * the request is what made this route impossible to host (a proxy gives up around
+ * 100s; the old code polled for up to 300).
+ */
 export async function cleanupImportRunStores(
   importRunId: string,
   fallbackStoreId?: string,
-): Promise<CleanupResult> {
+): Promise<CleanupRun[]> {
   const run = await prisma.productImportRun.findUnique({
     where: { id: importRunId },
     include: { batchJobs: { select: { storeId: true } } },
@@ -578,22 +586,8 @@ export async function cleanupImportRunStores(
       ? [...new Set(run.batchJobs.map((j) => j.storeId ?? undefined))]
       : [run?.storeId ?? fallbackStoreId];
 
-  // Each store is a separate shop, so clean them concurrently instead of
-  // store-after-store.
-  const results = await Promise.all(
-    storeIds.map((storeId) => cleanupProductsByTag(storeId, tag)),
-  );
-
-  if (results.length === 1) return results[0];
-  return {
-    storeId: undefined,
-    shop: results.map((r) => r.shop).join(', '),
-    tag,
-    found: results.reduce((n, r) => n + r.found, 0),
-    deleted: results.reduce((n, r) => n + r.deleted, 0),
-    failed: results.reduce((n, r) => n + r.failed, 0),
-    errors: results.flatMap((r) => r.errors),
-  };
+  // Each store is a separate shop, so start them concurrently.
+  return startCleanupRuns('PRODUCT', storeIds, tag, importRunId);
 }
 
 // Download + parse results and write rowResults, but only if THIS call wins the

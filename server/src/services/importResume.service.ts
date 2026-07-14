@@ -151,12 +151,18 @@ export async function resumeStore(store: ResumableStore): Promise<ResumeSummary>
 export async function resumePendingImports(): Promise<ResumeSummary> {
   const total: ResumeSummary = { adopted: 0, relaunched: 0, failed: 0, skipped: 0 };
 
-  const [{ customerResumableStores }, { productResumableStores }] = await Promise.all([
-    import('./shopifyImport.service'),
-    import('./productImport.service'),
-  ]);
+  const [{ customerResumableStores }, { productResumableStores }, { cleanupResumableStores }] =
+    await Promise.all([
+      import('./shopifyImport.service'),
+      import('./productImport.service'),
+      import('./cleanupRun.service'),
+    ]);
 
-  const stores = [...customerResumableStores(), ...productResumableStores()];
+  const stores = [
+    ...customerResumableStores(),
+    ...productResumableStores(),
+    ...cleanupResumableStores(),
+  ];
 
   for (const store of stores) {
     const s = await resumeStore(store);

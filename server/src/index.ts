@@ -14,6 +14,7 @@ import {
 } from './controllers/customerValidation.controller';
 import {
   cleanupQaCustomersHandler,
+  getCleanupRunHandler,
   cleanupQaProductsHandler,
   shopifyHealthHandler,
   shopifyStoreProductStatsHandler,
@@ -98,6 +99,10 @@ app.get('/api/shopify/health', shopifyHealthHandler);
 app.get('/api/shopify/stores', shopifyStoresHandler);
 app.get('/api/shopify/stores/:storeId/stats', shopifyStoreStatsHandler);
 app.post('/api/shopify/stores/:storeId/cleanup-qa', cleanupQaCustomersHandler);
+// Cleanup is async for both flows: the POST routes return 202 with a run, and this
+// advances it one step per call. A bulk teardown can take minutes; the old code
+// blocked the request for up to 300s, which no hosting proxy will tolerate.
+app.get('/api/cleanup/:id', getCleanupRunHandler);
 // Order matters: literal segments (/feedback, /by-validation) must precede /:id
 // so they aren't captured as an id.
 app.post('/api/customer-import/:validationId/run', runImportHandler);

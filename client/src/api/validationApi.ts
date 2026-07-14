@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { awaitCleanupRuns, CleanupRun } from './cleanupPoller';
 import {
   ColumnMapping,
   CleanupResult,
@@ -124,11 +125,14 @@ export async function fetchStoreCustomerStats(
   return data;
 }
 
+// Cleanup is async on the server: the POST returns 202 with a run, and the delete
+// is advanced one step per poll. awaitCleanupRuns watches it to completion and
+// returns the same shape the UI already renders.
 export async function cleanupQaCustomers(storeId: string): Promise<CleanupResult> {
-  const { data } = await api.post<CleanupResult>(
+  const { data } = await api.post<CleanupRun>(
     `/shopify/stores/${encodeURIComponent(storeId)}/cleanup-qa`,
   );
-  return data;
+  return awaitCleanupRuns([data]);
 }
 
 export async function checkShopifyHealth(storeId?: string): Promise<ShopifyHealth> {
@@ -182,13 +186,14 @@ export async function fetchLatestImportForValidation(
   return status === 200 ? data : null;
 }
 
+// Batch-aware: one cleanup run per store the import touched. Poll them all.
 export async function cleanupImportRun(
   importRunId: string,
   storeId?: string,
 ): Promise<CleanupResult> {
-  const { data } = await api.post<CleanupResult>(
+  const { data } = await api.post<CleanupRun[]>(
     `/customer-import/${importRunId}/cleanup`,
     { storeId },
   );
-  return data;
+  return awaitCleanupRuns(data);
 }

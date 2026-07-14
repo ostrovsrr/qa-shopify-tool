@@ -258,8 +258,10 @@ export async function cleanupImportRunHandler(
     }
 
     // Batch-aware: deletes across every store the import touched, not just one.
-    const result = await cleanupImportRunStores(idParsed.data, bodyParsed.data.storeId);
-    res.json(result);
+    // 202 + cleanup runs to poll — a real teardown is a bulk delete that can take
+    // minutes, and blocking the request on it cannot survive a hosting proxy.
+    const runs = await cleanupImportRunStores(idParsed.data, bodyParsed.data.storeId);
+    res.status(202).json(runs);
   } catch (err) {
     if (handleShopifyError(err, res)) return;
     next(err);
