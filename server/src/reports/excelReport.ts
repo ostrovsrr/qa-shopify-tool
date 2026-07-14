@@ -52,7 +52,7 @@ export async function streamExcelReport(
   // The raw rows this report is built FROM were purged for retention (D13). Say so
   // — a 410 with a sentence beats a workbook full of blanks or a 500 that reads
   // like a bug the user should report.
-  if (run.piiPurgedAt) throw new HttpError(410, purgedMessage());
+  if (run.piiPurgedAt) throw new HttpError(410, purgedMessage(run.piiPurgedAt));
 
   // Cast to include JSON fields that Prisma's stale generated types don't yet expose
   const runData = run as typeof run & {

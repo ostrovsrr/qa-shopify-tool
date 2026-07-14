@@ -71,8 +71,18 @@ describe('retention is off unless someone turns it on', () => {
     expect(RETENTION_DAYS).toBe(90);
   });
 
-  it('says how long data is kept, so the UI can explain a purged run', async () => {
+  it('explains a purged run by WHEN it was purged, not by the live setting', async () => {
     const { purgedMessage } = await loadRetention({ RETENTION_DAYS: '90' });
-    expect(purgedMessage()).toContain('90 days');
+
+    // A run's purge is a historical fact with a date on it.
+    expect(purgedMessage(new Date('2026-07-14T19:34:00Z'))).toContain('2026-07-14');
+
+    // The first version interpolated the LIVE RETENTION_DAYS. The moment retention
+    // was switched off (RETENTION_DAYS=0) — which is exactly what you do after it
+    // deletes something it should not have — every already-purged run started saying
+    // its rows "were deleted after 0 days". Nonsense, and the kind of detail that
+    // makes a user distrust everything else on the page.
+    expect(purgedMessage()).not.toMatch(/\d+ days/);
+    expect(purgedMessage(new Date())).not.toMatch(/\d+ days/);
   });
 });

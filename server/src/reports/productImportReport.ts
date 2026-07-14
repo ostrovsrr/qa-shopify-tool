@@ -77,7 +77,7 @@ export async function streamProductImportReport(
   if (!run) throw new Error(`Import run "${importRunId}" not found.`);
 
   // See excelReport — the source rows were purged for retention (D13).
-  if (run.uploadRun.piiPurgedAt) throw new HttpError(410, purgedMessage());
+  if (run.uploadRun.piiPurgedAt) throw new HttpError(410, purgedMessage(run.uploadRun.piiPurgedAt));
 
   const originalColumns = Array.isArray(run.uploadRun.originalColumns)
     ? (run.uploadRun.originalColumns as string[])

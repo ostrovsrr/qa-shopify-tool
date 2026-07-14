@@ -276,7 +276,7 @@ export async function startCustomerImport(
       ok: false,
       // A purged run has no rows for a reason, and 'no rows to import' would read
       // like a bug in the upload rather than the retention policy doing its job.
-      error: run.piiPurgedAt ? purgedMessage() : 'This validation run has no rows to import.',
+      error: run.piiPurgedAt ? purgedMessage(run.piiPurgedAt) : 'This validation run has no rows to import.',
     };
   }
 
@@ -581,7 +581,7 @@ export async function startBatchImport(
       ok: false,
       // A purged run has no rows for a reason, and 'no rows to import' would read
       // like a bug in the upload rather than the retention policy doing its job.
-      error: run.piiPurgedAt ? purgedMessage() : 'This validation run has no rows to import.',
+      error: run.piiPurgedAt ? purgedMessage(run.piiPurgedAt) : 'This validation run has no rows to import.',
     };
   }
 

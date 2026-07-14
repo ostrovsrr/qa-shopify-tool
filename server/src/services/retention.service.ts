@@ -171,11 +171,23 @@ export async function purgeExpiredPii(): Promise<PurgeSummary> {
   return summary;
 }
 
-/** The message shown wherever a purged run's rows are needed. Says what happened and
- *  why, rather than failing with something that reads like a bug. */
-export function purgedMessage(): string {
+/**
+ * The message shown wherever a purged run's rows are needed.
+ *
+ * Describes what happened to THIS RUN, not what the policy happens to say right now.
+ * The first version interpolated the live RETENTION_DAYS, so the moment retention was
+ * switched off (RETENTION_DAYS=0) every already-purged run started claiming its rows
+ * "were deleted after 0 days" — nonsense, and exactly the sort of detail that makes a
+ * user distrust everything else on the page.
+ *
+ * A run's purge is a historical fact with a date on it. Use the date.
+ */
+export function purgedMessage(purgedAt?: Date | null): string {
+  const when = purgedAt
+    ? ` on ${purgedAt.toISOString().slice(0, 10)}`
+    : '';
   return (
-    `The uploaded rows for this run were deleted after ${RETENTION_DAYS} days, ` +
-    'so its report can no longer be rebuilt. Re-upload the CSV to run it again.'
+    `The uploaded rows for this run were deleted${when} under the data-retention ` +
+    'policy, so its report can no longer be rebuilt. Re-upload the CSV to run it again.'
   );
 }

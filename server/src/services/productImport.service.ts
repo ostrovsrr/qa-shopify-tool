@@ -450,7 +450,7 @@ export async function startProductImport(
     return {
       ok: false,
       // See the customer twin — a purged upload is retention, not an empty file.
-      error: upload.piiPurgedAt ? purgedMessage() : 'This upload has no products to import.',
+      error: upload.piiPurgedAt ? purgedMessage(upload.piiPurgedAt) : 'This upload has no products to import.',
     };
   }
 
@@ -713,7 +713,7 @@ export async function startBatchProductImport(
     return {
       ok: false,
       // See the customer twin — a purged upload is retention, not an empty file.
-      error: upload.piiPurgedAt ? purgedMessage() : 'This upload has no products to import.',
+      error: upload.piiPurgedAt ? purgedMessage(upload.piiPurgedAt) : 'This upload has no products to import.',
     };
   }
 
