@@ -6,6 +6,17 @@ if (process.env.TEST_DATABASE_URL) {
   process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 }
 
+// ── Uploads: keep the suite's temp CSVs out of the shared temp dir ───────────
+//
+// Uploads now stream to disk. Point them at a suite-specific directory so the tests
+// can assert the directory is EMPTY after a request (the whole point: raw merchant
+// CSVs must not be left lying around) without tripping over a real dev-server upload
+// that happens to be sitting in the default location.
+process.env.UPLOAD_DIR = require('path').join(
+  require('os').tmpdir(),
+  'qa-shopify-uploads-integration',
+);
+
 // ── Shopify: cut the network at the knees ────────────────────────────────────
 //
 // This file used to override DATABASE_URL and NOTHING ELSE, which left the real

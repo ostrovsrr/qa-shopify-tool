@@ -44,6 +44,13 @@ whole project exists to prevent.
 **Context:** Invisible single-user-local: you are the one waiting, and you know why. It does
 not crash anything. It just makes the app unresponsive for everyone else for the duration.
 
+**Update 2026-07-14 (B4):** uploads now stream to disk, so the RAW bytes are no longer held in
+the heap. That removed the pure waste. It did NOT make the pipeline constant-memory: parsing
+still builds one JS object per row (a 5-10x blowup over the file), and for a large CSV that is
+what now dominates. So this TODO is both the CPU stall AND the remaining memory ceiling — the
+same synchronous parse is responsible for both, and chunking or moving it off-thread addresses
+both at once.
+
 **Pros:** The difference between "the tool is slow" and "the tool is hung."
 
 **Cons:** Worker threads mean serializing rows across the boundary, which has its own memory

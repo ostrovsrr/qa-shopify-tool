@@ -1,3 +1,5 @@
+import fs from 'fs';
+import { Readable } from 'stream';
 import { parse } from 'csv-parse';
 import { ParsedProductCsv, ProductCsvRow, ProductGroup } from '../types';
 import { isRowFullyEmpty, normalizeRecord } from '../utils/normalize';
@@ -51,46 +53,60 @@ export function extractMetafields(row: Record<string, string>): ParsedMetafield[
   return out;
 }
 
+const PARSE_OPTIONS = {
+  columns: true,
+  skip_empty_lines: false,
+  relax_column_count: true,
+  cast: false,
+  // Strip a leading UTF-8 BOM (Shopify/Excel exports include one). Without
+  // this the first header parses as "﻿Handle", so groupByHandle can't
+  // find the Handle column → 0 product groups from a non-empty file.
+  bom: true,
+} as const;
+
+function toParsed(records: Record<string, string>[]): ParsedProductCsv {
+  const headers = records.length > 0 ? Object.keys(records[0]) : [];
+
+  // Trim trailing fully-empty rows (common when exporting from spreadsheets).
+  let lastNonEmpty = records.length - 1;
+  while (lastNonEmpty >= 0 && isRowFullyEmpty(records[lastNonEmpty])) {
+    lastNonEmpty--;
+  }
+
+  const rows: ProductCsvRow[] = [];
+  for (let i = 0; i <= lastNonEmpty; i++) {
+    const record = records[i];
+    if (isRowFullyEmpty(record)) continue; // skip blank rows mid-file
+    rows.push({
+      rowNumber: i + 2, // header is line 1
+      original: { ...record },
+      normalized: normalizeRecord(record),
+    });
+  }
+
+  return { rows, headers, groups: groupByHandle(rows) };
+}
+
+async function parseProductCsvStream(input: Readable): Promise<ParsedProductCsv> {
+  const records: Record<string, string>[] = [];
+  const parser = input.pipe(parse(PARSE_OPTIONS));
+
+  for await (const record of parser) {
+    records.push(record as Record<string, string>);
+  }
+
+  return toParsed(records);
+}
+
+/** Parse an uploaded product CSV straight off disk. The customer twin is
+ *  parseCsvFile in csvParser.service.ts — see uploadFile.ts for why. */
+export async function parseProductCsvFile(filePath: string): Promise<ParsedProductCsv> {
+  return parseProductCsvStream(fs.createReadStream(filePath));
+}
+
+/** In-memory variant, for tests and any caller that already has the bytes. */
 export async function parseProductCsvBuffer(buffer: Buffer): Promise<ParsedProductCsv> {
-  return new Promise((resolve, reject) => {
-    parse(
-      buffer,
-      {
-        columns: true,
-        skip_empty_lines: false,
-        relax_column_count: true,
-        cast: false,
-        // Strip a leading UTF-8 BOM (Shopify/Excel exports include one). Without
-        // this the first header parses as "﻿Handle", so groupByHandle can't
-        // find the Handle column → 0 product groups from a non-empty file.
-        bom: true,
-      },
-      (err, records: Record<string, string>[]) => {
-        if (err) return reject(err);
-
-        const headers = records.length > 0 ? Object.keys(records[0]) : [];
-
-        // Trim trailing fully-empty rows (common when exporting from spreadsheets).
-        let lastNonEmpty = records.length - 1;
-        while (lastNonEmpty >= 0 && isRowFullyEmpty(records[lastNonEmpty])) {
-          lastNonEmpty--;
-        }
-
-        const rows: ProductCsvRow[] = [];
-        for (let i = 0; i <= lastNonEmpty; i++) {
-          const record = records[i];
-          if (isRowFullyEmpty(record)) continue; // skip blank rows mid-file
-          rows.push({
-            rowNumber: i + 2, // header is line 1
-            original: { ...record },
-            normalized: normalizeRecord(record),
-          });
-        }
-
-        resolve({ rows, headers, groups: groupByHandle(rows) });
-      },
-    );
-  });
+  return parseProductCsvStream(Readable.from(buffer));
 }
 
 // Groups rows by Handle, preserving the order each Handle first appears. A row

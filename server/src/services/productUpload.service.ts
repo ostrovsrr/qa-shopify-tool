@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import prisma from '../db/prisma';
-import { parseProductCsvBuffer } from './productCsvParser';
+import { parseProductCsvFile } from './productCsvParser';
 import { ProductHistoryItem, UpdateUploadMetadata } from '../types';
 
 // Thin upload: parse the product CSV, group by Handle for the product count, and
@@ -16,10 +16,10 @@ export interface UploadSummary {
 }
 
 export async function createProductUpload(
-  buffer: Buffer,
+  filePath: string,
   fileName: string,
 ): Promise<UploadSummary> {
-  const parsed = await parseProductCsvBuffer(buffer);
+  const parsed = await parseProductCsvFile(filePath);
   const uploadId = uuidv4();
 
   // Chunk the row insert so one createMany doesn't serialize the whole CSV

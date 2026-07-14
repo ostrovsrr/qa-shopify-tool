@@ -48,6 +48,7 @@ import {
 } from './controllers/productImport.controller';
 import prisma from './db/prisma';
 import { resumePendingImports } from './services/importResume.service';
+import { sweepOrphanUploads, uploadStorage } from './services/uploadFile';
 
 dotenv.config();
 
@@ -67,7 +68,13 @@ app.use(express.json());
 // ── File upload ─────────────────────────────────────────────────────────────
 
 const upload = multer({
-  storage: multer.memoryStorage(),
+  // Disk, NOT memory. memoryStorage() held the whole CSV (up to the 100 MB limit
+  // below) in the heap, and previewStore then held it for another 30 minutes — so
+  // the real ceiling was every file anyone had previewed recently, not one per
+  // request. On a shared 512 MB container that OOMs, and an OOM does not fail one
+  // upload, it kills the process and every other colleague's in-flight import with
+  // it. See services/uploadFile.ts.
+  storage: uploadStorage,
   limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB
   fileFilter: (_req, file, cb) => {
     const isCsv =
@@ -174,6 +181,18 @@ if (require.main === module) {
     resumePendingImports().catch((err: Error) => {
       console.error('[resume] failed to resume pending imports:', err.message);
     });
+
+    // Uploads that the last process wrote to disk but never got to consume — a
+    // crash between multer writing the file and the handler reading it. Nobody is
+    // coming back for those, and they are raw merchant PII, so sweep them on boot
+    // and then periodically for the ones this process leaks the same way.
+    const sweep = (): void => {
+      void sweepOrphanUploads().catch((err: Error) => {
+        console.error('[upload] sweep failed:', err.message);
+      });
+    };
+    sweep();
+    setInterval(sweep, 30 * 60 * 1000).unref();
   });
 
   // ── Graceful shutdown ─────────────────────────────────────────────────────
