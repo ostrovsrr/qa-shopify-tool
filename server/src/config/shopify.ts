@@ -206,6 +206,23 @@ export function getShopifyConfig(storeId?: string): ShopifyConfigResult {
   return { ok: true, config };
 }
 
+/**
+ * The store id an operation will ACTUALLY hit, resolving the "no storeId = first
+ * store" fallback above.
+ *
+ * The busy-lock keys on this rather than on the raw request field: a run that omits
+ * storeId and a run that names store1 explicitly land on the same store, and must
+ * therefore contend for the same lock. Keying on the raw value would let those two
+ * run side by side on one store — the exact collision the lock exists to stop.
+ *
+ * (B7 will make storeId required on the request and this fallback goes away; until
+ * then, resolve it.)
+ */
+export function resolveStoreId(storeId?: string): string | null {
+  const result = getShopifyConfig(storeId);
+  return result.ok ? result.config.id : null;
+}
+
 export function resetShopifyConfigCache(): void {
   cached = null;
 }

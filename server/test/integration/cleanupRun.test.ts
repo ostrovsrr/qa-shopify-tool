@@ -75,6 +75,7 @@ vi.mock('../../src/services/shopifyBulk', async (importOriginal) => {
 });
 
 const prisma = (await import('../../src/db/prisma')).default;
+const { resetDb } = await import('./resetDb');
 const { startCleanupRun, reconcileCleanupRun } = await import(
   '../../src/services/cleanupRun.service'
 );
@@ -91,7 +92,7 @@ runIf('async cleanup', () => {
     opUrl = null;
     submittedOps.length = 0;
     serialDeletes = 0;
-    await prisma.$executeRawUnsafe('TRUNCATE TABLE "cleanup_runs" RESTART IDENTITY CASCADE');
+    await resetDb();
   });
   afterAll(async () => {
     await prisma.$disconnect();

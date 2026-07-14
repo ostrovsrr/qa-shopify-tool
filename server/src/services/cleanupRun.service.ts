@@ -1,6 +1,14 @@
+import { v4 as uuidv4 } from 'uuid';
 import type { CleanupRun } from '@prisma/client';
 import prisma from '../db/prisma';
+import { getShopifyConfig, resolveStoreId } from '../config/shopify';
 import { getShopifyClient } from './shopifyClient';
+import {
+  acquireStoreLock,
+  releaseStoreLock,
+  renewStoreLock,
+  StoreBusyError,
+} from './storeLock.service';
 import {
   BulkDeleteSpec,
   fetchBulkOperationState,
@@ -76,36 +84,85 @@ export async function startCleanupRun(
   importRunId?: string,
 ): Promise<CleanupRun> {
   const adapter = adapterFor(entity);
-  const { shop, ids } = await adapter.fetchIdsByTag(storeId, tag);
+  const runId = uuidv4();
 
-  const run = await prisma.cleanupRun.create({
-    data: {
-      entity,
-      storeId: storeId ?? null,
-      shopDomain: shop,
-      tag,
-      importRunId: importRunId ?? null,
-      status: 'PENDING',
-      found: ids.length,
-      submittedIds: ids,
-    },
-  });
-
-  // Nothing tagged: done before we started.
-  if (ids.length === 0) {
-    return prisma.cleanupRun.update({
-      where: { id: run.id },
-      data: { status: 'COMPLETED', deleted: 0, failedCount: 0 },
+  // ── Take the store's busy-lock and write the row in ONE transaction, BEFORE we
+  //    so much as list what we are about to delete.
+  //
+  //    This is the route the lock was really built for. An import to this store may
+  //    be in flight right now, and cleanup deletes BY TAG across the WHOLE store —
+  //    it would delete the very records that import is about to reconcile against,
+  //    and the run would then report nonsense. Shopify's one-bulk-op-per-shop limit
+  //    does NOT cover us here: the small-teardown path below deletes serially, not
+  //    as a bulk operation, so Shopify sees nothing to reject. This lock is the only
+  //    thing in the way.
+  //
+  //    Listing the ids first and locking second would leave the list to go stale
+  //    under a concurrent import, so the lock comes first and the id list is taken
+  //    while we hold the store.
+  try {
+    await prisma.$transaction(async (tx) => {
+      await acquireStoreLock(tx, resolveStoreId(storeId) ?? storeId ?? 'default', {
+        ownerType: 'CLEANUP_RUN',
+        ownerId: runId,
+        operation: entity === 'CUSTOMER' ? 'a customer cleanup' : 'a product cleanup',
+      });
+      await tx.cleanupRun.create({
+        data: {
+          id: runId,
+          entity,
+          storeId: storeId ?? null,
+          shopDomain: shopDomainFor(storeId),
+          tag,
+          importRunId: importRunId ?? null,
+          status: 'PENDING',
+          found: 0,
+        },
+      });
     });
+  } catch (err) {
+    if (err instanceof StoreBusyError) {
+      // Record the refusal as a FAILED run rather than throwing: the caller may have
+      // asked for several stores at once, and the ones that ARE free should still be
+      // cleaned. The user sees exactly which store was busy.
+      return prisma.cleanupRun.create({
+        data: {
+          entity,
+          storeId: storeId ?? null,
+          shopDomain: shopDomainFor(storeId),
+          tag,
+          importRunId: importRunId ?? null,
+          status: 'FAILED',
+          error: err.message.slice(0, 500),
+        },
+      });
+    }
+    throw err;
   }
 
-  const client = await getShopifyClient(storeId);
-
   try {
+    const { shop, ids } = await adapter.fetchIdsByTag(storeId, tag);
+    await prisma.cleanupRun.update({
+      where: { id: runId },
+      data: { shopDomain: shop, found: ids.length, submittedIds: ids },
+    });
+
+    // Nothing tagged: done before we started.
+    if (ids.length === 0) {
+      const done = await prisma.cleanupRun.update({
+        where: { id: runId },
+        data: { status: 'COMPLETED', deleted: 0, failedCount: 0 },
+      });
+      await releaseStoreLock(runId);
+      return done;
+    }
+
+    const client = await getShopifyClient(storeId);
+
     if (ids.length <= adapter.bulkThreshold) {
       const { deleted, errors } = await adapter.serialDelete(client, ids);
-      return await prisma.cleanupRun.update({
-        where: { id: run.id },
+      const done = await prisma.cleanupRun.update({
+        where: { id: runId },
         data: {
           status: 'COMPLETED',
           deleted,
@@ -113,20 +170,34 @@ export async function startCleanupRun(
           errors: errors.length > 0 ? (errors as unknown as object[]) : undefined,
         },
       });
+      // The serial path finishes inside this request, so the store is free now.
+      await releaseStoreLock(runId);
+      return done;
     }
 
+    // The bulk path outlives this request; the lock is held until the poll that
+    // reconciles it to terminal (reconcileCleanupRun) hands it back.
     const bulkOpId = await submitBulkDelete(client, ids, adapter.deleteSpec);
     return await prisma.cleanupRun.update({
-      where: { id: run.id },
+      where: { id: runId },
       data: { status: 'RUNNING', bulkOperationId: bulkOpId },
     });
   } catch (err) {
     const message = (err as Error).message;
-    return prisma.cleanupRun.update({
-      where: { id: run.id },
+    const failed = await prisma.cleanupRun.update({
+      where: { id: runId },
       data: { status: 'FAILED', error: message.slice(0, 500) },
     });
+    await releaseStoreLock(runId);
+    return failed;
   }
+}
+
+/** Shop domain from env config, without touching the network — so the row (and its
+ *  lock) can be written before we talk to Shopify at all. */
+function shopDomainFor(storeId: string | undefined): string {
+  const result = getShopifyConfig(storeId);
+  return result.ok ? result.config.shop : (storeId ?? 'unknown');
 }
 
 /** Start a cleanup against several stores at once (a batch import touched many). */
@@ -155,13 +226,15 @@ export async function reconcileCleanupRun(id: string): Promise<CleanupRun | null
   // Bound a stuck operation the same way the import reconcile does.
   const attempts = run.pollAttempts + 1;
   if (attempts > MAX_JOB_POLL_ATTEMPTS) {
-    return prisma.cleanupRun.update({
+    const failed = await prisma.cleanupRun.update({
       where: { id },
       data: {
         status: 'FAILED',
         error: `Timed out: still running after ${MAX_JOB_POLL_ATTEMPTS} status checks.`,
       },
     });
+    await releaseStoreLock(id);
+    return failed;
   }
   await prisma.cleanupRun.update({ where: { id }, data: { pollAttempts: attempts } });
 
@@ -171,25 +244,28 @@ export async function reconcileCleanupRun(id: string): Promise<CleanupRun | null
 
   // Still deleting — leave it RUNNING and let the next poll look again.
   if (!TERMINAL_BULK_STATUSES.includes(state.status)) {
+    // Still being watched, so keep holding the store.
+    await renewStoreLock(id);
     return prisma.cleanupRun.findUnique({ where: { id } });
   }
 
+  const finish = async (data: Parameters<typeof prisma.cleanupRun.update>[0]['data']) => {
+    const done = await prisma.cleanupRun.update({ where: { id }, data });
+    // Terminal — the store is free.
+    await releaseStoreLock(id);
+    return done;
+  };
+
   if (state.status !== 'COMPLETED') {
-    return prisma.cleanupRun.update({
-      where: { id },
-      data: {
-        status: state.status,
-        error: `Bulk delete ${state.status}${state.errorCode ? ` (${state.errorCode})` : ''}.`,
-      },
+    return finish({
+      status: state.status,
+      error: `Bulk delete ${state.status}${state.errorCode ? ` (${state.errorCode})` : ''}.`,
     });
   }
 
   if (!state.url) {
     // COMPLETED with no result file means Shopify deleted nothing to report.
-    return prisma.cleanupRun.update({
-      where: { id },
-      data: { status: 'COMPLETED', deleted: 0, failedCount: 0 },
-    });
+    return finish({ status: 'COMPLETED', deleted: 0, failedCount: 0 });
   }
 
   // The ids were persisted at submit time because the result file maps back to them
@@ -197,14 +273,11 @@ export async function reconcileCleanupRun(id: string): Promise<CleanupRun | null
   const ids = (run.submittedIds ?? []) as string[];
   const { deleted, errors } = await parseBulkDeleteResults(state.url, ids, adapter.deleteSpec);
 
-  return prisma.cleanupRun.update({
-    where: { id },
-    data: {
-      status: 'COMPLETED',
-      deleted,
-      failedCount: errors.length,
-      errors: errors.length > 0 ? (errors as unknown as object[]) : undefined,
-    },
+  return finish({
+    status: 'COMPLETED',
+    deleted,
+    failedCount: errors.length,
+    errors: errors.length > 0 ? (errors as unknown as object[]) : undefined,
   });
 }
 
@@ -261,6 +334,11 @@ export function cleanupResumableStores(): ResumableStore[] {
       adopt: (id, bulkOperationId) => adoptRow(prisma.cleanupRun as never, id, bulkOperationId),
       relaunch: relaunchCleanupRun,
       fail: (id, error) => failRow(prisma.cleanupRun as never, id, error),
+      lockOwner: (row) => ({
+        ownerType: 'CLEANUP_RUN',
+        ownerId: row.id,
+        operation: 'a cleanup',
+      }),
     },
   ];
 }

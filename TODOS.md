@@ -4,35 +4,28 @@ Deferred work, with enough context to pick it up cold.
 
 ---
 
-## 1. Store busy-lock — ✅ PROMOTED TO P1, BUILD IT (2026-07-14)
+## 1. Store busy-lock — ✅ DONE (2026-07-14)
 
-**No longer a TODO.** Q1 came back "isolation not required," so the tool is a shared workspace
-with a shared store pool. **The busy-lock is now the only thing keeping two colleagues off the
-same store.** It is task 9 in the v4 build order. Left here for the reasoning trail.
+Built: `services/storeLock.service.ts` + the `store_locks` table. Keyed on the **store**, not the
+run and not the entity — Shopify's limit is one bulk mutation per SHOP, so a customer import and a
+product import aimed at one store really do collide, and a key of `(storeId, entity)` would have
+waved that straight through. Taken in the same transaction as the pre-persist (so a refusal leaves
+no orphan PENDING row); all-or-nothing across a batch (so a busy store cannot cause a partial
+fan-out); one lock per store within a batch, so parallelism across DIFFERENT stores is untouched.
+Refusal is a 409 naming the store and what is holding it. 14 tests in
+`test/integration/storeLock.test.ts`.
 
-**What:** A lock so only one operation runs against a given Shopify store at a time.
+Release is explicit at every terminal transition AND self-healing: an acquirer that finds a lock
+held by an already-terminal or deleted row simply takes it, so a missed release cannot wedge a
+store. A TTL (30 min, renewed on every poll) is the backstop for a run nobody is polling — those
+can never reach terminal on their own.
 
-**Why (original framing, when stores were per-user):** Per-user store ownership stops Josh
-colliding with Rodion. Nothing stops Rodion colliding with himself. Firing `/cleanup` while his
-own batch is mid-flight either hits Shopify's per-shop bulk-operation limit or deletes the
-records his own run is about to reconcile against.
+**Remaining follow-up (small):** the store picker does not yet SHOW which stores are busy — a
+colleague only finds out by trying and getting the 409. `busyStores()` is already implemented and
+tested; it just needs a route and the two store-picker components. Worth doing before real users
+arrive, since "pick a store, get rejected, pick again" is a bad first impression.
 
-**Context:** `/cleanup-qa` and `/cleanup-qa-products` delete **by tag across an entire
-store** (`productImport.service.ts:529-549`). They are the highest-blast-radius routes in
-the app. Shopify already enforces one bulk op per shop (`shopifyBulk.ts:112`) but returns a
-confusing "already in progress" error rather than queueing.
-
-**Pros:** Small and self-contained. It is the only thing protecting the store-wide
-destructive cleanup routes from a concurrent run against the same store.
-
-**Cons:** Needs a lock table or a Postgres advisory lock, plus a stale-lock story (same
-class of problem as the job `claimedAt` lease).
-
-**Depends on / blocked by:** Nothing. **The tenancy decision landed on shared-workspace, so this
-is now P1 and in the build.** Build it alongside the job `claimedAt` lease in the async fix — same
-problem shape (a claim plus a stale-claim reaper), so they share machinery.
-
-Raised by: /plan-eng-review 2026-07-14 (outside voice). Promoted same day.
+Raised by: /plan-eng-review 2026-07-14 (outside voice). Promoted and built same day.
 
 ---
 

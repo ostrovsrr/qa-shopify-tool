@@ -293,6 +293,44 @@ model ProductOriginalRow {
   @@map("product_original_rows")
 }
 
+// One row per BUSY store: the lock that keeps two operations off the same Shopify
+// store at once.
+//
+// The key is the store, not the run and not the entity, for two reasons:
+//
+//   1. Shopify's own limit is ONE bulk mutation per SHOP — not one per shop per
+//      entity. A customer import and a product import aimed at the same store
+//      genuinely collide, so a key of (storeId, entity) would let the collision
+//      through. The key is bare storeId.
+//   2. The cleanup routes delete BY TAG ACROSS AN ENTIRE STORE. A cleanup racing an
+//      import to the same store deletes the very records that import is about to
+//      reconcile against, and the run then reports garbage. Same store key
+//      serializes them for free.
+//
+// A batch import across N stores takes N locks, one per store, so parallelism
+// across DIFFERENT stores is untouched — the lock only bites on the same store.
+model StoreLock {
+  // One lock per store. The PK IS the mutual exclusion.
+  storeId   String   @id @map("store_id")
+  // Which table ownerId points at: IMPORT_RUN | IMPORT_JOB | PRODUCT_IMPORT_RUN |
+  // PRODUCT_IMPORT_JOB | CLEANUP_RUN. Lets a later acquirer look up the holder and
+  // steal the lock if that row has already reached a terminal state — so a missed
+  // release cannot wedge a store forever.
+  ownerType String   @map("owner_type")
+  ownerId   String   @map("owner_id")
+  // Human phrase for the busy message ("a customer import", "a product cleanup").
+  operation String
+  acquiredAt DateTime @default(now()) @map("acquired_at")
+  // Backstop for the case the owner row can never reach terminal on its own: a run
+  // is only advanced by a status poll, so if the last browser watching it closes,
+  // nothing will ever finalize it and the store would stay locked forever. Renewed
+  // on every poll, so a live operation never loses its lock.
+  expiresAt DateTime @map("expires_at")
+
+  @@index([ownerId])
+  @@map("store_locks")
+}
+
 // One cleanup attempt against ONE store. Cleanup used to run entirely inside the
 // HTTP request, polling Shopify for up to 300s (150 attempts x 2s) — deliberately,
 // per the old comment. That cannot work hosted: platform proxies give up around

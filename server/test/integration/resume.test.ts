@@ -51,6 +51,7 @@ vi.mock('../../src/services/shopifyBulk', async (importOriginal) => {
 });
 
 const prisma = (await import('../../src/db/prisma')).default;
+const { resetDb } = await import('./resetDb');
 const { resumeStore } = await import('../../src/services/importResume.service');
 const { productResumableStores } = await import('../../src/services/productImport.service');
 
@@ -109,9 +110,7 @@ runIf('resume-on-boot', () => {
   beforeEach(async () => {
     currentOp = null;
     submitted.length = 0;
-    await prisma.$executeRawUnsafe(
-      'TRUNCATE TABLE "product_upload_runs" RESTART IDENTITY CASCADE',
-    );
+    await resetDb();
   });
   afterAll(async () => {
     await prisma.$disconnect();

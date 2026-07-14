@@ -1,6 +1,8 @@
 import prisma from '../db/prisma';
+import { resolveStoreId } from '../config/shopify';
 import { getShopifyClient } from './shopifyClient';
 import { CurrentBulkOperation, fetchCurrentBulkOperation } from './shopifyBulk';
+import { acquireStoreLock, StoreLockOwner } from './storeLock.service';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CRASH RECOVERY for interrupted imports. Shared by the customer and product
@@ -88,6 +90,9 @@ export interface ResumableStore {
   relaunch(id: string): Promise<void>;
   /** Give up on this row, with a reason the user can act on. */
   fail(id: string, error: string): Promise<void>;
+  /** Who this row is, as far as the store busy-lock is concerned. Resume must hold
+   *  the store's lock before it touches it — see resumeStore. */
+  lockOwner(row: ResumableRow): StoreLockOwner;
 }
 
 export interface ResumeSummary {
@@ -114,6 +119,21 @@ export async function resumeStore(store: ResumableStore): Promise<ResumeSummary>
     }
 
     try {
+      // Re-take the store's busy-lock before touching it.
+      //
+      // The lock row survives the crash (it is in Postgres, not in memory), and
+      // acquire is re-entrant for the same owner, so the normal case is that we
+      // simply re-take a lock we still held. It matters in the case where we did
+      // NOT: if the process was down long enough for this row's lock to expire and
+      // someone else to claim the store, resuming would drop a second operation
+      // onto a store another colleague is actively using. StoreBusyError is thrown,
+      // the catch below fails the row, and the user is told to re-run it — which is
+      // the honest outcome, and far better than the collision.
+      const lockStoreId = resolveStoreId(row.storeId ?? undefined);
+      if (lockStoreId) {
+        await acquireStoreLock(prisma, lockStoreId, store.lockOwner(row));
+      }
+
       const client = await getShopifyClient(row.storeId ?? undefined);
       const current = await fetchCurrentBulkOperation(client);
       const decision = decideResume(row.createdAt, current);

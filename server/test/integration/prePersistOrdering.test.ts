@@ -49,6 +49,7 @@ vi.mock('../../src/services/shopifyBulk', async (importOriginal) => {
 });
 
 const prisma = (await import('../../src/db/prisma')).default;
+const { resetDb } = await import('./resetDb');
 const { startProductImport } = await import('../../src/services/productImport.service');
 const { startCustomerImport } = await import('../../src/services/shopifyImport.service');
 
@@ -56,10 +57,7 @@ const runIf = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 
 runIf('pre-persist ordering — the row lands before the bulk op is submitted', () => {
   beforeEach(async () => {
-    await prisma.$executeRawUnsafe(
-      'TRUNCATE TABLE "product_upload_runs" RESTART IDENTITY CASCADE',
-    );
-    await prisma.$executeRawUnsafe('TRUNCATE TABLE "validation_runs" RESTART IDENTITY CASCADE');
+    await resetDb();
   });
   afterAll(async () => {
     await prisma.$disconnect();

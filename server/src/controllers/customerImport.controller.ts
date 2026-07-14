@@ -75,7 +75,10 @@ export async function runImportHandler(
       return;
     }
     if (!result.ok) {
-      const isBusy = /already running|in progress/i.test(result.error);
+      // 409, not 422: a busy store is not a bad request, it is a "come back in a
+      // minute". `busy` is our own store lock refusing; the regex is the fallback
+      // for Shopify rejecting a second bulk op on a shop itself.
+      const isBusy = result.busy === true || /already running|in progress/i.test(result.error);
       res.status(isBusy ? 409 : 422).json({ error: result.error });
       return;
     }
@@ -116,7 +119,10 @@ export async function runBatchImportHandler(
       return;
     }
     if (!result.ok) {
-      const isBusy = /already running|in progress/i.test(result.error);
+      // 409, not 422: a busy store is not a bad request, it is a "come back in a
+      // minute". `busy` is our own store lock refusing; the regex is the fallback
+      // for Shopify rejecting a second bulk op on a shop itself.
+      const isBusy = result.busy === true || /already running|in progress/i.test(result.error);
       res.status(isBusy ? 409 : 422).json({ error: result.error });
       return;
     }

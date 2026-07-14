@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
 import prisma from '../../src/db/prisma';
+import { resetDb } from './resetDb';
 import {
   reconcileProductImportRun,
   startBatchProductImport,
@@ -30,11 +31,7 @@ import {
 
 const runIf = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 
-async function truncateAll(): Promise<void> {
-  await prisma.$executeRawUnsafe(
-    'TRUNCATE TABLE "product_upload_runs" RESTART IDENTITY CASCADE',
-  );
-}
+const truncateAll = resetDb;
 
 /** An upload with two products, enough to split across stores. */
 async function seedUpload(): Promise<string> {

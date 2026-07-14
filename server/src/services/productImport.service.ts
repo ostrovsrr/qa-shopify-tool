@@ -18,7 +18,14 @@ import {
   ShopifyAuthError,
   ShopifyConfigError,
 } from './shopifyClient';
-import { getShopifyConfig } from '../config/shopify';
+import { getShopifyConfig, resolveStoreId } from '../config/shopify';
+import {
+  acquireStoreLock,
+  acquireStoreLocks,
+  releaseStoreLock,
+  renewStoreLock,
+  StoreBusyError,
+} from './storeLock.service';
 import {
   adoptRow,
   claimRow,
@@ -394,7 +401,9 @@ export function parseProductSetLine(
 
 export type RunProductImportResult =
   | { notFound: true }
-  | { ok: false; error: string }
+  // `busy` = a store is already in use (the busy-lock refused). Distinct from a
+  // plain error because it is not a failure: it is a 409 the user can retry.
+  | { ok: false; error: string; busy?: boolean }
   | { ok: true; importRunId: string };
 
 interface OriginalRowRecord {
@@ -451,18 +460,38 @@ export async function startProductImport(
   //
   //    Never take a side effect you have not recorded. The row goes down first, as
   //    PENDING; the op id lands on it the moment Shopify hands one back.
-  await prisma.productImportRun.create({
-    data: {
-      id: importRunId,
-      uploadId,
-      storeId: storeId ?? null,
-      shopDomain: health.shop ?? shopDomainFor(storeId ?? ''),
-      bulkOperationId: null,
-      status: 'PENDING',
-      successCount: 0,
-      errorCount: 0,
-    },
-  });
+  //
+  //    The store's busy-lock is taken in the SAME transaction. If someone else is
+  //    already working this store, the transaction rolls back and no row is written
+  //    at all — the caller just gets told the store is busy. Locking after the
+  //    pre-persist would leave an orphan PENDING row that resume-on-boot would
+  //    later try to launch. Note the lock keys on the RESOLVED store id, so an
+  //    omitted storeId (which silently means "the first store") contends with an
+  //    explicit one for the same store.
+  try {
+    await prisma.$transaction(async (tx) => {
+      await acquireStoreLock(tx, resolveStoreId(storeId) ?? storeId ?? 'default', {
+        ownerType: 'PRODUCT_IMPORT_RUN',
+        ownerId: importRunId,
+        operation: 'a product import',
+      });
+      await tx.productImportRun.create({
+        data: {
+          id: importRunId,
+          uploadId,
+          storeId: storeId ?? null,
+          shopDomain: health.shop ?? shopDomainFor(storeId ?? ''),
+          bulkOperationId: null,
+          status: 'PENDING',
+          successCount: 0,
+          errorCount: 0,
+        },
+      });
+    });
+  } catch (err) {
+    if (err instanceof StoreBusyError) return { ok: false, busy: true, error: err.message };
+    throw err;
+  }
 
   try {
     await submitSingleStoreRun(importRunId, client, jsonl);
@@ -472,6 +501,9 @@ export async function startProductImport(
       where: { id: importRunId },
       data: { status: 'FAILED', error: message },
     });
+    // The run is over before it began — hand the store straight back rather than
+    // making the next colleague wait out the lock TTL.
+    await releaseStoreLock(importRunId);
     return { ok: false, error: message };
   }
 
@@ -527,6 +559,10 @@ export async function reconcileProductImportRun(
 
   // Still queued/processing — leave it RUNNING.
   if (!TERMINAL_BULK_STATUSES.includes(state.status)) {
+    // Someone is demonstrably still watching this run, so push the lock's expiry
+    // out. The TTL only exists to free a store nobody is finishing; it must never
+    // pull the store out from under an operation that is plainly still alive.
+    await renewStoreLock(importRunId);
     return getProductImportFeedback(importRunId);
   }
 
@@ -541,6 +577,9 @@ export async function reconcileProductImportRun(
       data: { status: state.status, error },
     });
   }
+
+  // Terminal either way — the store is free.
+  await releaseStoreLock(importRunId);
 
   return getProductImportFeedback(importRunId);
 }
@@ -706,34 +745,62 @@ export async function startBatchProductImport(
   //       hold the rollup open. A partial fan-out can no longer lie; the worst it
   //       can do is leave the run unfinished, which resumePendingJobs() then
   //       picks up. Pinned by test/integration/batchRollup.test.ts.
-  await prisma.productImportRun.create({
-    data: {
-      id: parentId,
-      uploadId,
-      // NULL is correct here and stays correct: a batch parent spans many stores.
-      storeId: null,
-      shopDomain: planned.map((p) => p.shopDomain).join(', ').slice(0, 250),
-      bulkOperationId: null,
-      status: 'RUNNING',
-      successCount: 0,
-      errorCount: 0,
-      batchJobs: {
-        create: planned.map((p) => ({
-          id: p.id,
-          storeId: p.storeId,
-          shopDomain: p.shopDomain,
-          batchIndex: p.index,
-          batchCount: storeIds.length,
+  //
+  //       Every store's busy-lock is taken in the SAME transaction, ALL OR NOTHING.
+  //       Fanning out to the free stores and failing the busy one would be a partial
+  //       fan-out — precisely the half-done, half-reported work the PENDING
+  //       pre-persist exists to make impossible. If any store is busy the whole
+  //       transaction rolls back, nothing is written, no lock is held, and the user
+  //       is told which store to wait for. Each JOB owns its store's lock (not the
+  //       parent, whose storeId is legitimately NULL), so locks are released one by
+  //       one as each store's job finishes.
+  try {
+    await prisma.$transaction(async (tx) => {
+      await acquireStoreLocks(
+        tx,
+        planned.map((p) => resolveStoreId(p.storeId) ?? p.storeId),
+        (storeId) => {
+          const job = planned.find((p) => (resolveStoreId(p.storeId) ?? p.storeId) === storeId)!;
+          return {
+            ownerType: 'PRODUCT_IMPORT_JOB',
+            ownerId: job.id,
+            operation: 'a product import',
+          };
+        },
+      );
+      await tx.productImportRun.create({
+        data: {
+          id: parentId,
+          uploadId,
+          // NULL is correct here and stays correct: a batch parent spans many stores.
+          storeId: null,
+          shopDomain: planned.map((p) => p.shopDomain).join(', ').slice(0, 250),
           bulkOperationId: null,
-          status: 'PENDING',
-          error: null,
-          productCount: p.batch.length,
+          status: 'RUNNING',
           successCount: 0,
           errorCount: 0,
-        })),
-      },
-    },
-  });
+          batchJobs: {
+            create: planned.map((p) => ({
+              id: p.id,
+              storeId: p.storeId,
+              shopDomain: p.shopDomain,
+              batchIndex: p.index,
+              batchCount: storeIds.length,
+              bulkOperationId: null,
+              status: 'PENDING',
+              error: null,
+              productCount: p.batch.length,
+              successCount: 0,
+              errorCount: 0,
+            })),
+          },
+        },
+      });
+    });
+  } catch (err) {
+    if (err instanceof StoreBusyError) return { ok: false, busy: true, error: err.message };
+    throw err;
+  }
 
   // ── 3. FAN OUT. Each job moves PENDING → RUNNING (with its bulk op id) or
   //       PENDING → FAILED. A per-store failure is captured on that job rather
@@ -773,6 +840,8 @@ async function launchBatchJob(
         where: { id: jobId },
         data: { status: 'FAILED', error: health.error ?? 'Store not healthy.' },
       });
+      // This job is terminal — free its store immediately.
+      await releaseStoreLock(jobId);
       return;
     }
 
@@ -799,6 +868,7 @@ async function launchBatchJob(
       where: { id: jobId },
       data: { status: 'FAILED', error: (err as Error).message },
     });
+    await releaseStoreLock(jobId);
   }
 }
 
@@ -824,6 +894,7 @@ async function reconcileBatchRun(
           error: `Timed out: still running after ${MAX_JOB_POLL_ATTEMPTS} status checks.`,
         },
       });
+      await releaseStoreLock(job.id);
       continue;
     }
     await prisma.productImportJob.update({
@@ -835,7 +906,11 @@ async function reconcileBatchRun(
     try {
       const client = await getShopifyClient(job.storeId ?? undefined);
       const state = await fetchBulkOperationState(client, job.bulkOperationId);
-      if (!TERMINAL_BULK_STATUSES.includes(state.status)) continue;
+      if (!TERMINAL_BULK_STATUSES.includes(state.status)) {
+        // Still alive and still being watched — keep its store held.
+        await renewStoreLock(job.id);
+        continue;
+      }
 
       if (state.status === 'COMPLETED') {
         await finalizeCompletedJob(parentId, job, state.url);
@@ -848,6 +923,9 @@ async function reconcileBatchRun(
           },
         });
       }
+      // This job is terminal — free ITS store, while the batch's other stores stay
+      // locked by their own jobs.
+      await releaseStoreLock(job.id);
     } catch (err) {
       // Persistent errors (bad token/config) fail just this job so the batch can
       // still finish; transient errors are left RUNNING to retry on the next poll.
@@ -856,6 +934,7 @@ async function reconcileBatchRun(
           where: { id: job.id, status: 'RUNNING' },
           data: { status: 'FAILED', error: (err as Error).message },
         });
+        await releaseStoreLock(job.id);
       }
     }
   }
@@ -1033,6 +1112,11 @@ export function productResumableStores(): ResumableStore[] {
       adopt: (id, bulkOperationId) => adoptRow(prisma.productImportRun as never, id, bulkOperationId),
       relaunch: relaunchProductRun,
       fail: (id, error) => failRow(prisma.productImportRun as never, id, error),
+      lockOwner: (row) => ({
+        ownerType: 'PRODUCT_IMPORT_RUN',
+        ownerId: row.id,
+        operation: 'a product import',
+      }),
     },
     {
       label: 'product-job',
@@ -1041,6 +1125,11 @@ export function productResumableStores(): ResumableStore[] {
       adopt: (id, bulkOperationId) => adoptRow(prisma.productImportJob as never, id, bulkOperationId),
       relaunch: relaunchProductJob,
       fail: (id, error) => failRow(prisma.productImportJob as never, id, error),
+      lockOwner: (row) => ({
+        ownerType: 'PRODUCT_IMPORT_JOB',
+        ownerId: row.id,
+        operation: 'a product import',
+      }),
     },
   ];
 }
