@@ -14,6 +14,7 @@ import {
   startBatchImport,
   startCustomerImport,
 } from '../services/shopifyImport.service';
+import { recordAction } from '../services/actionLog.service';
 import {
   ShopifyAuthError,
   ShopifyConfigError,
@@ -37,12 +38,18 @@ function handleShopifyError(err: unknown, res: Response): boolean {
 }
 
 const uuidSchema = z.string().uuid('Invalid id format.');
+// storeId is REQUIRED. It used to be optional, and an absent one silently meant
+// "the first configured store" — so "I forgot to pick a store" and "I meant store1"
+// were the same request, and the difference showed up as real customers in a real
+// store. Say which store you mean.
 const runImportSchema = z.object({
-  storeId: z.string().min(1).optional(),
+  storeId: z.string().min(1, 'Select a store to import into.'),
 });
 const runBatchSchema = z.object({
   storeIds: z.array(z.string().min(1)).min(1, 'Select at least one store.'),
 });
+// Still optional, and legitimately so: omitting it means "clean up every store this
+// import touched", which for a batch is several. It is not a default-store fallback.
 const cleanupImportSchema = z.object({
   storeId: z.string().min(1).optional(),
 });
@@ -75,7 +82,10 @@ export async function runImportHandler(
       return;
     }
     if (!result.ok) {
-      const isBusy = /already running|in progress/i.test(result.error);
+      // 409, not 422: a busy store is not a bad request, it is a "come back in a
+      // minute". `busy` is our own store lock refusing; the regex is the fallback
+      // for Shopify rejecting a second bulk op on a shop itself.
+      const isBusy = result.busy === true || /already running|in progress/i.test(result.error);
       res.status(isBusy ? 409 : 422).json({ error: result.error });
       return;
     }
@@ -116,7 +126,10 @@ export async function runBatchImportHandler(
       return;
     }
     if (!result.ok) {
-      const isBusy = /already running|in progress/i.test(result.error);
+      // 409, not 422: a busy store is not a bad request, it is a "come back in a
+      // minute". `busy` is our own store lock refusing; the regex is the fallback
+      // for Shopify rejecting a second bulk op on a shop itself.
+      const isBusy = result.busy === true || /already running|in progress/i.test(result.error);
       res.status(isBusy ? 409 : 422).json({ error: result.error });
       return;
     }
@@ -258,8 +271,20 @@ export async function cleanupImportRunHandler(
     }
 
     // Batch-aware: deletes across every store the import touched, not just one.
-    const result = await cleanupImportRunStores(idParsed.data, bodyParsed.data.storeId);
-    res.json(result);
+    // 202 + cleanup runs to poll — a real teardown is a bulk delete that can take
+    // minutes, and blocking the request on it cannot survive a hosting proxy.
+    const runs = await cleanupImportRunStores(idParsed.data, bodyParsed.data.storeId);
+    // Destructive: deletes the records this import created, in every store it
+    // touched. Log it per store, so the audit names each shop that lost records.
+    for (const run of runs) {
+      await recordAction(req, {
+        action: 'CLEANUP_IMPORT_CUSTOMERS',
+        target: idParsed.data,
+        storeId: run.storeId,
+        detail: { tag: run.tag, cleanupRunId: run.id, found: run.found },
+      });
+    }
+    res.status(202).json(runs);
   } catch (err) {
     if (handleShopifyError(err, res)) return;
     next(err);

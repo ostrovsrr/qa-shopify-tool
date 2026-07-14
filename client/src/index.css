@@ -1077,3 +1077,80 @@ body {
   padding: 2px 4px;
 }
 .inline-notice-close:hover { color: var(--text); }
+
+/* ── Actor badge ──────────────────────────────────────────────────────────────
+   The name shown on runs you upload. A LABEL, NOT A LOGIN — nothing is gated on
+   it (see api/actor.ts), so it must not be styled to look like a sign-in. */
+/* The header lays out THREE children with space-between, which is what centers the
+   Customers|Products switch. The badge lives inside this right-hand group rather
+   than being a fourth child — a fourth child (especially with margin-left:auto)
+   eats the free space and bunches the logo and both navs to the left. */
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.actor-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.actor-badge-set {
+  background: none;
+  border: 1px solid #d5d8de;
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 13px;
+  color: #5c6270;
+  cursor: pointer;
+}
+.actor-badge-set:hover { border-color: #5b6dfa; }
+/* No name set yet. Quiet and dashed: it is optional, and nothing is gated on it. */
+.actor-badge-unset {
+  border-style: dashed;
+  color: #9aa0ae;
+}
+.actor-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #5b6dfa;
+  display: inline-block;
+  margin-right: 6px;
+}
+.actor-input {
+  border: 1px solid #d5d8de;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 13px;
+  width: 120px;
+}
+
+/* Who uploaded a run — display only. The workspace is shared; this is a label. */
+.history-actor {
+  font-size: 12px;
+  color: #7a8194;
+  margin-left: 8px;
+}
+/* The raw rows were purged under the retention policy, so the report cannot be
+   rebuilt. Better to say so than to offer a download that 410s. */
+.history-purged {
+  font-size: 11px;
+  color: #8a6d3b;
+  background: #fcf3d9;
+  border-radius: 4px;
+  padding: 1px 6px;
+  margin-left: 8px;
+  cursor: help;
+}
+
+/* Store picker: the QA count on each chip. The point of the picker is to see which
+   store is dirty BEFORE committing an import to it. */
+.store-chip-stats {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: #8b93a3;
+}
+.store-chip.active .store-chip-stats { color: #5b6dfa; }

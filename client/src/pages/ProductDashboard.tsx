@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { ActorBadge } from '../components/ActorBadge';
 import { NavLink } from 'react-router-dom';
 import { fetchUpload, uploadProductCsv } from '../api/productApi';
 import { ProductHistory } from '../components/ProductHistory';
@@ -77,20 +78,27 @@ export function ProductDashboard() {
               Products
             </NavLink>
           </nav>
-          <nav className="tab-nav">
-            <button
-              className={`tab-btn ${activeTab === 'upload' ? 'active' : ''}`}
-              onClick={() => setActiveTab('upload')}
-            >
-              Import
-            </button>
-            <button
-              className={`tab-btn ${activeTab === 'history' ? 'active' : ''}`}
-              onClick={() => setActiveTab('history')}
-            >
-              History
-            </button>
-          </nav>
+          {/* The header is space-between across THREE children — that is what keeps
+              the Customers|Products switch centered. The badge goes inside this
+              right-hand group rather than becoming a fourth child, which would
+              collapse the spacing. */}
+          <div className="header-right">
+            <nav className="tab-nav">
+              <button
+                className={`tab-btn ${activeTab === 'upload' ? 'active' : ''}`}
+                onClick={() => setActiveTab('upload')}
+              >
+                Import
+              </button>
+              <button
+                className={`tab-btn ${activeTab === 'history' ? 'active' : ''}`}
+                onClick={() => setActiveTab('history')}
+              >
+                History
+              </button>
+            </nav>
+            <ActorBadge />
+          </div>
         </div>
       </header>
 

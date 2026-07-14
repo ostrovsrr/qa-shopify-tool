@@ -1,6 +1,8 @@
 import { Writable } from 'stream';
 import ExcelJS from 'exceljs';
 import prisma from '../db/prisma';
+import { HttpError } from '../errors';
+import { purgedMessage } from '../services/retention.service';
 import {
   KEEP_COLUMN,
   resolveMappingTarget,
@@ -8,6 +10,7 @@ import {
 } from '../services/columnMapping.service';
 import { CustomerValidationIssue, Severity } from '../types';
 import { AutoFixEntry, computeAutoFixes } from './autoFix';
+import { excelSafeRecord, excelSafeText } from './excelCell';
 import { buildTemplateDataset } from './templateDataset';
 
 const SEVERITY_COLOURS: Record<Severity, string> = {
@@ -45,6 +48,11 @@ export async function streamExcelReport(
   });
 
   if (!run) throw new Error(`Validation run "${validationId}" not found.`);
+
+  // The raw rows this report is built FROM were purged for retention (D13). Say so
+  // — a 410 with a sentence beats a workbook full of blanks or a 500 that reads
+  // like a bug the user should report.
+  if (run.piiPurgedAt) throw new HttpError(410, purgedMessage(run.piiPurgedAt));
 
   // Cast to include JSON fields that Prisma's stale generated types don't yet expose
   const runData = run as typeof run & {
@@ -215,7 +223,7 @@ function addIssuesSheet(
 
   const colour = SEVERITY_COLOURS[sheetName === 'Errors' ? 'Error' : sheetName === 'Warnings' ? 'Warning' : 'Info'];
   for (const issue of issues) {
-    const row = sheet.addRow({
+    const row = sheet.addRow(excelSafeRecord({
       rowNumber: issue.rowNumber,
       column: issue.column,
       severity: issue.severity,
@@ -223,7 +231,7 @@ function addIssuesSheet(
       currentValue: issue.currentValue,
       message: issue.message,
       suggestedFix: issue.suggestedFix,
-    });
+    }));
     row.eachCell((cell) => {
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: colour } };
     });
@@ -248,7 +256,7 @@ function addFullUploadedFileSheet(
 
   const allColumns = ['Row Number', ...originalColumns];
   sheet.columns = allColumns.map((col) => ({
-    header: col,
+    header: excelSafeText(col),
     key: col,
     width: col === 'Row Number' ? 12 : 22,
   }));
@@ -262,7 +270,7 @@ function addFullUploadedFileSheet(
     for (const col of originalColumns) {
       rowData[col] = data[col] ?? '';
     }
-    sheet.addRow(rowData).commit();
+    sheet.addRow(excelSafeRecord(rowData)).commit();
   }
 
   sheet.commit();
@@ -394,7 +402,7 @@ function addShopifyTemplateSheet(
       rowData[shopifyCol] = row.record[shopifyCol] ?? '';
     }
 
-    const excelRow = sheet.addRow(rowData);
+    const excelRow = sheet.addRow(excelSafeRecord(rowData));
 
     if (rowFixes) {
       effectiveColumns.forEach((shopifyCol, colIdx) => {

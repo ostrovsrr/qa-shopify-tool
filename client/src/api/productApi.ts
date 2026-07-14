@@ -1,4 +1,6 @@
 import axios from 'axios';
+import { attachActorHeader } from './actor';
+import { awaitCleanupRuns, CleanupRun } from './cleanupPoller';
 import {
   ProductCleanupResult,
   ProductHistoryItem,
@@ -12,6 +14,21 @@ import {
 } from '../types';
 
 const api = axios.create({ baseURL: '/api' });
+
+// Every request says who made it — display + audit only, never authorization.
+attachActorHeader(api);
+
+// Surface the server's { error } message instead of Axios's generic "Request failed
+// with status code N". Without this a busy store (409) reads as "Request failed with
+// status code 409" — the one message that tells the user nothing about what to do —
+// rather than "Store store1 is busy: a product import has been running for ~2 min."
+// Mirrors validationApi (the two flows are twins).
+api.interceptors.response.use(undefined, (err: unknown) => {
+  if (axios.isAxiosError(err) && typeof err.response?.data?.error === 'string') {
+    err.message = err.response.data.error;
+  }
+  return Promise.reject(err);
+});
 
 // ── upload (parse + persist; no mapping/validate) ────────────────────────────
 
@@ -69,11 +86,14 @@ export async function fetchStoreProductStats(storeId: string): Promise<StoreProd
   return data;
 }
 
+// Cleanup is async on the server: the POST returns 202 with a run, and the delete
+// is advanced one step per poll. awaitCleanupRuns watches it to completion and
+// returns the same shape the UI already renders.
 export async function cleanupQaProducts(storeId: string): Promise<ProductCleanupResult> {
-  const { data } = await api.post<ProductCleanupResult>(
+  const { data } = await api.post<CleanupRun>(
     `/shopify/stores/${encodeURIComponent(storeId)}/cleanup-qa-products`,
   );
-  return data;
+  return awaitCleanupRuns([data]);
 }
 
 export async function checkShopifyHealth(storeId?: string): Promise<ShopifyHealth> {
@@ -127,13 +147,14 @@ export async function fetchLatestImportForUpload(
   return status === 200 ? data : null;
 }
 
+// Batch-aware: one cleanup run per store the import touched. Poll them all.
 export async function cleanupImportRun(
   importRunId: string,
   storeId?: string,
 ): Promise<ProductCleanupResult> {
-  const { data } = await api.post<ProductCleanupResult>(
+  const { data } = await api.post<CleanupRun[]>(
     `/product-import/${importRunId}/cleanup`,
     { storeId },
   );
-  return data;
+  return awaitCleanupRuns(data);
 }

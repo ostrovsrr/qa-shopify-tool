@@ -61,7 +61,8 @@ The server has vitest tests (`npm run test`, `npm run test:integration`, `npm ru
 - `services/customerValidation.service.ts` — orchestrates parsing, validation, persistence
 - `services/csvParser.service.ts` — CSV parsing and normalization
 - `services/columnMapping.service.ts` — applies user-supplied column mapping
-- `services/previewStore.ts` — in-memory temp store between preview and validate calls
+- `services/uploadFile.ts` — multer disk storage: uploads stream to a temp file, never into the heap. Whoever consumes the file deletes it (`removeUploadFile`); `sweepOrphanUploads` catches what a crash leaves behind. Raw CSVs are merchant PII — do not add a path that keeps one.
+- `services/previewStore.ts` — bridges the preview and validate calls. Holds the temp file's **path** (not its bytes) and owns that file: deleting the entry unlinks it.
 - `reports/excelReport.ts` — generates multi-sheet Excel (Summary, Errors, Warnings, Info, Original Rows With Issues)
 - `db/prisma.ts` — singleton Prisma client
 - `validators/customer/` — one file per rule (see below)

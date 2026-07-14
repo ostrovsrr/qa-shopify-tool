@@ -2,6 +2,7 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import app from '../../src/index';
 import prisma from '../../src/db/prisma';
+import { resetDb } from './resetDb';
 
 // These tests need a real PostgreSQL. They only run when TEST_DATABASE_URL is
 // set (see setEnv.ts); otherwise they skip so `npm run test:integration`
@@ -25,12 +26,7 @@ const IDENTITY_MAPPING = {
   Phone: 'Phone',
 };
 
-async function truncateAll(): Promise<void> {
-  // Cascade clears validation_issues, original_customer_rows and import_runs.
-  await prisma.$executeRawUnsafe(
-    'TRUNCATE TABLE "validation_runs" RESTART IDENTITY CASCADE',
-  );
-}
+const truncateAll = resetDb;
 
 runIf('customer-validation API (integration)', () => {
   beforeEach(truncateAll);

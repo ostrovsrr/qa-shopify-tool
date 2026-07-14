@@ -195,15 +195,42 @@ export function getShopifyConfig(storeId?: string): ShopifyConfigResult {
   const result = getShopifyStoresConfig();
   if (!result.ok) return result;
 
-  const config = storeId
-    ? result.stores.find((store) => store.id === storeId)
-    : result.stores[0];
+  // NO SILENT DEFAULT. This used to fall back to stores[0] when storeId was absent,
+  // which meant "I forgot to say which store" and "I meant the first store" were
+  // indistinguishable — and the answer arrived as REAL RECORDS IN A REAL STORE.
+  //
+  // With one user that was merely sloppy. With a shared store pool it is a way to
+  // write a merchant's customers into whichever store happens to be listed first,
+  // possibly the one a colleague is mid-QA on. It also made the busy-lock ambiguous:
+  // a request naming store1 and a request naming nothing hit the same shop and had
+  // to be resolved to the same lock key before they could contend properly.
+  //
+  // An unspecified store is now an error, not a guess.
+  if (!storeId) {
+    return { ok: false, error: 'No Shopify store selected. Choose a store and try again.' };
+  }
+
+  const config = result.stores.find((store) => store.id === storeId);
 
   if (!config) {
     return { ok: false, error: `Shopify test store "${storeId}" is not configured.` };
   }
 
   return { ok: true, config };
+}
+
+/**
+ * The store id an operation will hit, or null if it names no configured store.
+ *
+ * Now that the silent stores[0] fallback is gone this is close to an identity
+ * function, and that is the point: there is exactly one store id, the one the
+ * caller named. It survives because the resume path reads storeId off a DB row,
+ * where legacy rows written before the fallback was removed can still hold NULL —
+ * those have no store to lock, and must not be guessed at.
+ */
+export function resolveStoreId(storeId?: string): string | null {
+  const result = getShopifyConfig(storeId);
+  return result.ok ? result.config.id : null;
 }
 
 export function resetShopifyConfigCache(): void {

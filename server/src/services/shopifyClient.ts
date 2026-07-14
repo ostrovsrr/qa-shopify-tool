@@ -222,7 +222,8 @@ export class ShopifyClient {
   }
 }
 
-let cachedClient: ShopifyClient | null = null;
+// One client per store. There is no longer a nameless "default" client — an
+// operation that does not say which store it means is an error, not a guess.
 const cachedClients = new Map<string, ShopifyClient>();
 
 interface TokenCacheEntry {
@@ -297,9 +298,15 @@ async function getAccessToken(config: ShopifyStoreConfig): Promise<string> {
   return fresh.accessToken;
 }
 
-/** Returns a singleton client, or throws ShopifyConfigError if env is unset. */
+/**
+ * The client for ONE named store, or ShopifyConfigError if it is unnamed or unknown.
+ *
+ * `storeId` stays optional in the signature only because the resume path reads it
+ * off a DB row, and legacy rows written before the silent stores[0] fallback was
+ * removed can still hold NULL. Such a row now raises a clear error instead of
+ * quietly importing into whichever store happens to be listed first.
+ */
 export async function getShopifyClient(storeId?: string): Promise<ShopifyClient> {
-  if (!storeId && cachedClient) return cachedClient;
   if (storeId && cachedClients.has(storeId)) return cachedClients.get(storeId)!;
 
   const result = getShopifyConfig(storeId);
@@ -308,11 +315,7 @@ export async function getShopifyClient(storeId?: string): Promise<ShopifyClient>
   }
 
   const client = new ShopifyClient(result.config);
-  if (storeId) {
-    cachedClients.set(storeId, client);
-  } else {
-    cachedClient = client;
-  }
+  cachedClients.set(result.config.id, client);
   return client;
 }
 
@@ -322,15 +325,4 @@ export function clearShopifyTokenCache(storeId?: string): void {
     return;
   }
   tokenCache.clear();
-}
-
-/** Kept for older imports in compiled scripts; prefer getShopifyClient(storeId). */
-export function getDefaultShopifyClient(): ShopifyClient {
-  if (cachedClient) return cachedClient;
-  const result = getShopifyConfig();
-  if (!result.ok) {
-    throw new ShopifyConfigError(result.error);
-  }
-  cachedClient = new ShopifyClient(result.config);
-  return cachedClient;
 }

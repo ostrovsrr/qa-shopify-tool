@@ -29,6 +29,11 @@ export interface ValidationHistoryImport {
 
 export interface ValidationHistoryItem {
   id: string;
+  // Who uploaded it. Display only — never a filter on who may open it.
+  createdBy: string | null;
+  // Set when the raw rows were purged for retention: the report can no longer be
+  // rebuilt, so the UI says so instead of offering a download that would fail.
+  piiPurgedAt: string | null;
   fileName: string;
   fileType: string;
   totalRows: number;
@@ -88,8 +93,16 @@ export interface StoreCustomerStats {
   shop: string;
   totalCustomers: number;
   qaImportCustomers: number;
+  // True when qaImportCustomers is a FLOOR, not an exact figure. Shopify's
+  // customersCount ignores tag: filters, so counting qa customers means paging the
+  // whole tagged set — 443 round trips and 68 seconds on a store with 110k of them.
+  // The server stops at a cap; render this as "2,500+", never as "2,500".
+  qaImportCapped?: boolean;
 }
 
+// The aggregate of one or more async CleanupRuns (one per store), folded together
+// by awaitCleanupRuns. `errors` keys on a plain `id` — the customer and product
+// flows are twins and there was no reason for their shapes to differ.
 export interface CleanupResult {
   storeId?: string;
   shop: string;
@@ -97,7 +110,7 @@ export interface CleanupResult {
   found: number;
   deleted: number;
   failed: number;
-  errors: { customerId: string; message: string }[];
+  errors: { id: string; message: string }[];
 }
 
 export interface BucketRow {
@@ -190,6 +203,9 @@ export interface ProductHistoryImport {
 
 export interface ProductHistoryItem {
   id: string;
+  // See ValidationHistoryItem — the two flows are twins.
+  createdBy: string | null;
+  piiPurgedAt: string | null;
   fileName: string;
   productCount: number;
   ticketNumber: string | null;
@@ -208,6 +224,7 @@ export interface StoreProductStats {
   qaImportProducts: number;
 }
 
+// The product twin of CleanupResult — same shape, same engine behind it.
 export interface ProductCleanupResult {
   storeId?: string;
   shop: string;
@@ -215,7 +232,7 @@ export interface ProductCleanupResult {
   found: number;
   deleted: number;
   failed: number;
-  errors: { productId: string; message: string }[];
+  errors: { id: string; message: string }[];
 }
 
 export interface RejectionGroup {

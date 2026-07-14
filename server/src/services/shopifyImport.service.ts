@@ -1,8 +1,24 @@
 import { v4 as uuidv4 } from 'uuid';
-import type { ImportBatchJob } from '@prisma/client';
+import type { CleanupRun, ImportBatchJob } from '@prisma/client';
 import prisma from '../db/prisma';
 import { buildTemplateDataset } from '../reports/templateDataset';
 import { TemplateRow } from '../reports/mergeDuplicates';
+import { getShopifyConfig } from '../config/shopify';
+import { purgedMessage } from './retention.service';
+import {
+  acquireStoreLock,
+  acquireStoreLocks,
+  releaseStoreLock,
+  renewStoreLock,
+  StoreBusyError,
+} from './storeLock.service';
+import {
+  adoptRow,
+  claimRow,
+  failRow,
+  findResumableRows,
+  ResumableStore,
+} from './importResume.service';
 import { getImportFeedback, ImportFeedback } from './importFeedback.service';
 import {
   BuiltJsonl,
@@ -15,11 +31,8 @@ import {
   stagedUpload,
   TERMINAL_BULK_STATUSES,
 } from './shopifyBulk';
-import {
-  cleanupCustomersByTag,
-  CleanupResult,
-  qaImportTagForRun,
-} from './shopifyCleanup.service';
+import { qaImportTagForRun } from './shopifyCleanup.service';
+import { startCleanupRuns } from './cleanupRun.service';
 import {
   getShopifyClient,
   ShopifyAuthError,
@@ -47,7 +60,9 @@ export interface ImportRowOutcome {
 
 export type RunImportResult =
   | { notFound: true }
-  | { ok: false; error: string }
+  // `busy` = a store is already in use (the busy-lock refused). Distinct from a
+  // plain error because it is not a failure: it is a 409 the user can retry.
+  | { ok: false; error: string; busy?: boolean }
   | { ok: true; importRunId: string };
 
 // ── value helpers ────────────────────────────────────────────────────────────
@@ -238,7 +253,7 @@ function parseCustomerCreateLine(
 // by the GET poll), so no HTTP request is held open while Shopify processes.
 export async function startCustomerImport(
   validationId: string,
-  storeId?: string,
+  storeId: string,
 ): Promise<RunImportResult> {
   const run = await prisma.validationRun.findUnique({
     where: { id: validationId },
@@ -257,27 +272,94 @@ export async function startCustomerImport(
   const { jsonl, lineRefs } = buildJsonl(buildImportRows(run), importRunId);
 
   if (lineRefs.length === 0) {
-    return { ok: false, error: 'This validation run has no rows to import.' };
+    return {
+      ok: false,
+      // A purged run has no rows for a reason, and 'no rows to import' would read
+      // like a bug in the upload rather than the retention policy doing its job.
+      error: run.piiPurgedAt ? purgedMessage(run.piiPurgedAt) : 'This validation run has no rows to import.',
+    };
   }
 
+  // ── PRE-PERSIST before the side effect. Same rule as the batch path.
+  //
+  //    The bulk op creates real customers in a real store. Submitting it before
+  //    the run row exists means a crash in between leaves the op RUNNING on
+  //    Shopify with NO database row at all: the user sees nothing happened, while
+  //    customers land in the store tagged qa-import-<importRunId> — an id that
+  //    only ever existed in memory. Untracked, unreconcilable, and invisible to
+  //    the run-scoped cleanup.
+  //
+  //    Never take a side effect you have not recorded. The row goes down first,
+  //    as PENDING; the op id lands on it the moment Shopify hands one back.
+  //
+  //    The store's busy-lock is taken in the SAME transaction. If someone else is
+  //    already working this store, the transaction rolls back and no row is written
+  //    at all — the caller just gets told the store is busy. Locking after the
+  //    pre-persist would leave an orphan PENDING row that resume-on-boot would
+  //    later try to launch. Note the lock keys on the RESOLVED store id, so an
+  //    omitted storeId (which silently means "the first store") contends with an
+  //    explicit one for the same store.
+  try {
+    await prisma.$transaction(async (tx) => {
+      await acquireStoreLock(tx, storeId, {
+        ownerType: 'IMPORT_RUN',
+        ownerId: importRunId,
+        operation: 'a customer import',
+      });
+      await tx.importRun.create({
+        data: {
+          id: importRunId,
+          validationId,
+          storeId,
+          shopDomain: health.shop ?? shopDomainFor(storeId),
+          bulkOperationId: null,
+          status: 'PENDING',
+          successCount: 0,
+          errorCount: 0,
+        },
+      });
+    });
+  } catch (err) {
+    if (err instanceof StoreBusyError) return { ok: false, busy: true, error: err.message };
+    throw err;
+  }
+
+  try {
+    await submitSingleStoreRun(importRunId, client, jsonl);
+  } catch (err) {
+    const message = (err as Error).message;
+    await prisma.importRun.update({
+      where: { id: importRunId },
+      data: { status: 'FAILED', error: message },
+    });
+    // The run is over before it began — hand the store straight back rather than
+    // making the next colleague wait out the lock TTL.
+    await releaseStoreLock(importRunId);
+    return { ok: false, error: message };
+  }
+
+  return { ok: true, importRunId };
+}
+
+/**
+ * Submit a pre-persisted single-store run's bulk op and record its id.
+ *
+ * Shared by the first launch and by resume-on-boot, so a relaunched run takes the
+ * exact same path as an original one — no second implementation to drift.
+ */
+async function submitSingleStoreRun(
+  importRunId: string,
+  client: Awaited<ReturnType<typeof getShopifyClient>>,
+  jsonl: string,
+): Promise<void> {
   // Queue the op (seconds-scale); do NOT wait for it to finish here.
   const stagedPath = await stagedUpload(client, jsonl, 'bulk_customers.jsonl');
   const bulkOpId = await runBulkMutation(client, CUSTOMER_CREATE_MUTATION, stagedPath);
 
-  await prisma.importRun.create({
-    data: {
-      id: importRunId,
-      validationId,
-      storeId: storeId ?? null,
-      shopDomain: health.shop ?? '',
-      bulkOperationId: bulkOpId,
-      status: 'RUNNING',
-      successCount: 0,
-      errorCount: 0,
-    },
+  await prisma.importRun.update({
+    where: { id: importRunId },
+    data: { status: 'RUNNING', bulkOperationId: bulkOpId },
   });
-
-  return { ok: true, importRunId };
 }
 
 // ── orchestrator: reconcile (advances at most one step) ──────────────────────
@@ -343,6 +425,10 @@ export async function reconcileImportRun(
 
   // Still queued/processing — leave it RUNNING.
   if (!TERMINAL_BULK_STATUSES.includes(state.status)) {
+    // Someone is demonstrably still watching this run, so push the lock's expiry
+    // out. The TTL only exists to free a store nobody is finishing; it must never
+    // pull the store out from under an operation that is plainly still alive.
+    await renewStoreLock(importRunId);
     return getImportFeedback(importRunId);
   }
 
@@ -358,6 +444,9 @@ export async function reconcileImportRun(
       data: { status: state.status, error },
     });
   }
+
+  // Terminal either way — the store is free.
+  await releaseStoreLock(importRunId);
 
   return getImportFeedback(importRunId);
 }
@@ -382,10 +471,19 @@ export async function reconcileLatestImportForValidation(
 // qa-import-<importRunId> tag); a single run uses its own store (or the caller's
 // fallback). Results are aggregated into one CleanupResult the client renders
 // unchanged.
+/**
+ * Reverse one import: delete every customer it created, across every store it
+ * touched. The product twin lives in productImport.service.ts.
+ *
+ * Returns the cleanup runs to poll rather than a finished result — a teardown of a
+ * real migration is a bulk delete that can take minutes, and waiting for it inside
+ * the request is what made this route impossible to host (a proxy gives up around
+ * 100s; the old code polled for up to 300).
+ */
 export async function cleanupImportRunStores(
   importRunId: string,
   fallbackStoreId?: string,
-): Promise<CleanupResult> {
+): Promise<CleanupRun[]> {
   const run = await prisma.importRun.findUnique({
     where: { id: importRunId },
     include: { batchJobs: { select: { storeId: true } } },
@@ -397,21 +495,7 @@ export async function cleanupImportRunStores(
       ? [...new Set(run.batchJobs.map((j) => j.storeId ?? undefined))]
       : [run?.storeId ?? fallbackStoreId];
 
-  const results: CleanupResult[] = [];
-  for (const storeId of storeIds) {
-    results.push(await cleanupCustomersByTag(storeId, tag));
-  }
-
-  if (results.length === 1) return results[0];
-  return {
-    storeId: undefined,
-    shop: results.map((r) => r.shop).join(', '),
-    tag,
-    found: results.reduce((n, r) => n + r.found, 0),
-    deleted: results.reduce((n, r) => n + r.deleted, 0),
-    failed: results.reduce((n, r) => n + r.failed, 0),
-    errors: results.flatMap((r) => r.errors),
-  };
+  return startCleanupRuns('CUSTOMER', storeIds, tag, importRunId);
 }
 
 // Download + parse results and write rowResults, but only if THIS call wins the
@@ -493,7 +577,12 @@ export async function startBatchImport(
   if (!run) return { notFound: true };
   if (storeIds.length === 0) return { ok: false, error: 'Select at least one store.' };
   if (run.originalRows.length === 0) {
-    return { ok: false, error: 'This validation run has no rows to import.' };
+    return {
+      ok: false,
+      // A purged run has no rows for a reason, and 'no rows to import' would read
+      // like a bug in the upload rather than the retention policy doing its job.
+      error: run.piiPurgedAt ? purgedMessage(run.piiPurgedAt) : 'This validation run has no rows to import.',
+    };
   }
 
   const parentId = uuidv4();
@@ -502,89 +591,162 @@ export async function startBatchImport(
   // transformed rows to map results back.
   const batches = splitIntoBatches(buildImportRows(run), storeIds.length);
 
-  // Per-store failure is captured as a FAILED job rather than aborting the whole
-  // batch (which would strand the bulk ops already started on other stores).
-  const jobs = await Promise.all(
-    storeIds.map(async (storeId, index) => {
-      const batch = batches[index] ?? [];
-      if (batch.length === 0) return null; // fewer rows than stores
-      try {
-        const client = await getShopifyClient(storeId);
-        const health = await client.verifyConnection();
-        if (!health.ok) {
-          return {
-            storeId,
-            index,
-            shopDomain: health.shop ?? storeId,
-            batchCount: storeIds.length,
-            bulkOperationId: null as string | null,
-            status: 'FAILED',
-            error: health.error ?? 'Store not healthy.',
-            rowCount: batch.length,
-          };
-        }
-        const { jsonl } = buildJsonl(batch, parentId);
-        const stagedPath = await stagedUpload(client, jsonl, 'bulk_customers.jsonl');
-        const bulkOpId = await runBulkMutation(client, CUSTOMER_CREATE_MUTATION, stagedPath);
-        return {
-          storeId,
-          index,
-          shopDomain: health.shop ?? storeId,
-          batchCount: storeIds.length,
-          bulkOperationId: bulkOpId as string | null,
-          status: 'RUNNING',
-          error: null as string | null,
-          rowCount: batch.length,
-        };
-      } catch (err) {
-        return {
-          storeId,
-          index,
-          shopDomain: storeId,
-          batchCount: storeIds.length,
-          bulkOperationId: null as string | null,
-          status: 'FAILED',
-          error: (err as Error).message,
-          rowCount: batch.length,
-        };
-      }
-    }),
-  );
+  // ── 1. PLAN the jobs. No Shopify calls: every field here comes from the
+  //       validation run or from env config, so this cannot fail halfway through.
+  const planned = storeIds
+    .map((storeId, index) => ({
+      id: uuidv4(),
+      storeId,
+      index,
+      batch: batches[index] ?? [],
+      // The shop domain is in env config, so we do NOT need verifyConnection() to
+      // know it. That is what lets the whole plan be persisted before we talk to
+      // Shopify at all.
+      shopDomain: shopDomainFor(storeId),
+    }))
+    .filter((p) => p.batch.length > 0); // fewer rows than stores
 
-  const realJobs = jobs.filter((j): j is NonNullable<typeof j> => j !== null);
-  if (realJobs.length === 0) {
+  if (planned.length === 0) {
     return { ok: false, error: 'No rows to import.' };
   }
 
-  await prisma.importRun.create({
-    data: {
-      id: parentId,
-      validationId,
-      storeId: null,
-      shopDomain: realJobs.map((j) => j.shopDomain).join(', ').slice(0, 250),
-      bulkOperationId: null,
-      status: 'RUNNING',
-      successCount: 0,
-      errorCount: 0,
-      batchJobs: {
-        create: realJobs.map((j) => ({
-          id: uuidv4(),
-          storeId: j.storeId,
-          shopDomain: j.shopDomain,
-          batchIndex: j.index,
-          batchCount: j.batchCount,
-          bulkOperationId: j.bulkOperationId,
-          status: j.status,
-          error: j.error,
-          rowCount: j.rowCount,
+  // ── 2. PRE-PERSIST the parent and EVERY job as PENDING, in ONE transaction,
+  //       BEFORE any Shopify call.
+  //
+  //       reconcileBatchRun rolls the parent up when every job it FINDS IN THE DB
+  //       is terminal. That check cannot tell "all 5 jobs finished" apart from
+  //       "only 2 jobs were ever written, and both finished". So if jobs are
+  //       written as they complete, a crash mid-fan-out leaves 2 of 5 rows, the
+  //       rollup agrees, and the parent goes COMPLETED — reporting a successful
+  //       import of stores that never received a single customer.
+  //
+  //       Writing all N jobs up front as PENDING makes that impossible: PENDING is
+  //       not in TERMINAL_BULK_STATUSES, so the unstarted jobs hold the rollup
+  //       open. Mirrors productImport.service.ts (the two flows are twins).
+  //       Pinned by test/integration/batchRollup.test.ts.
+  //
+  //       Every store's busy-lock is taken in the SAME transaction, ALL OR NOTHING.
+  //       Fanning out to the four free stores and failing the busy one would be a
+  //       partial fan-out — precisely the half-done, half-reported work the PENDING
+  //       pre-persist exists to make impossible. If any store is busy the whole
+  //       transaction rolls back, nothing is written, no lock is held, and the user
+  //       is told which store to wait for. Each JOB owns its store's lock (not the
+  //       parent, whose storeId is legitimately NULL), so locks are released one by
+  //       one as each store's job finishes.
+  try {
+    await prisma.$transaction(async (tx) => {
+      await acquireStoreLocks(
+        tx,
+        planned.map((p) => p.storeId),
+        (storeId) => ({
+          ownerType: 'IMPORT_JOB',
+          ownerId: planned.find((p) => p.storeId === storeId)!.id,
+          operation: 'a customer import',
+        }),
+      );
+      await tx.importRun.create({
+        data: {
+          id: parentId,
+          validationId,
+          // NULL is correct here and stays correct: a batch parent spans many stores.
+          storeId: null,
+          shopDomain: planned.map((p) => p.shopDomain).join(', ').slice(0, 250),
+          bulkOperationId: null,
+          status: 'RUNNING',
           successCount: 0,
           errorCount: 0,
-        })),
-      },
-    },
-  });
+          batchJobs: {
+            create: planned.map((p) => ({
+              id: p.id,
+              storeId: p.storeId,
+              shopDomain: p.shopDomain,
+              batchIndex: p.index,
+              batchCount: storeIds.length,
+              bulkOperationId: null,
+              status: 'PENDING',
+              error: null,
+              rowCount: p.batch.length,
+              successCount: 0,
+              errorCount: 0,
+            })),
+          },
+        },
+      });
+    });
+  } catch (err) {
+    if (err instanceof StoreBusyError) return { ok: false, busy: true, error: err.message };
+    throw err;
+  }
+
+  // ── 3. FAN OUT. Each job moves PENDING → RUNNING (with its bulk op id) or
+  //       PENDING → FAILED. A per-store failure is captured on that job rather
+  //       than aborting the batch, which would strand the bulk ops already
+  //       started on the other stores.
+  await Promise.all(planned.map((p) => launchBatchJob(p.id, p.storeId, p.batch, parentId)));
 
   return { ok: true, importRunId: parentId };
+}
+
+/** Resolve a store's shop domain from env config, without touching the network.
+ *  Falls back to the store id so a misconfigured store still yields a row. */
+function shopDomainFor(storeId: string): string {
+  const result = getShopifyConfig(storeId);
+  return result.ok ? result.config.shop : storeId;
+}
+
+/**
+ * Start one pre-persisted batch job: verify the store, stage the JSONL, submit the
+ * bulk mutation, and record the bulk operation id.
+ *
+ * The job row already exists (PENDING) before this runs, so every exit path here
+ * is an UPDATE. If the process dies part-way, the row stays PENDING — non-terminal,
+ * so it holds the parent's rollup open — and resume-on-boot picks it up.
+ *
+ * Mirrors launchBatchJob in productImport.service.ts.
+ */
+async function launchBatchJob(
+  jobId: string,
+  storeId: string,
+  batch: TemplateRow[],
+  parentId: string,
+): Promise<void> {
+  try {
+    const client = await getShopifyClient(storeId);
+    const health = await client.verifyConnection();
+    if (!health.ok) {
+      await prisma.importBatchJob.update({
+        where: { id: jobId },
+        data: { status: 'FAILED', error: health.error ?? 'Store not healthy.' },
+      });
+      // This job is terminal — free its store immediately.
+      await releaseStoreLock(jobId);
+      return;
+    }
+
+    const { jsonl } = buildJsonl(batch, parentId);
+    const stagedPath = await stagedUpload(client, jsonl, 'bulk_customers.jsonl');
+    const bulkOpId = await runBulkMutation(client, CUSTOMER_CREATE_MUTATION, stagedPath);
+
+    // The gap between runBulkMutation returning and this write landing is the one
+    // window where a crash leaves a bulk op running on Shopify that we have no id
+    // for. Resume-on-boot closes it by ADOPTING the shop's currentBulkOperation
+    // rather than submitting a second one (Shopify allows only one per shop, so a
+    // naive re-submit would just fail).
+    await prisma.importBatchJob.update({
+      where: { id: jobId },
+      data: {
+        status: 'RUNNING',
+        bulkOperationId: bulkOpId,
+        shopDomain: health.shop ?? shopDomainFor(storeId),
+      },
+    });
+  } catch (err) {
+    await prisma.importBatchJob.update({
+      where: { id: jobId },
+      data: { status: 'FAILED', error: (err as Error).message },
+    });
+    await releaseStoreLock(jobId);
+  }
 }
 
 // Advances a batch parent: polls each non-terminal job once, merges completed
@@ -609,6 +771,7 @@ async function reconcileBatchRun(
           error: `Timed out: still running after ${MAX_JOB_POLL_ATTEMPTS} status checks.`,
         },
       });
+      await releaseStoreLock(job.id);
       continue;
     }
     await prisma.importBatchJob.update({
@@ -620,7 +783,11 @@ async function reconcileBatchRun(
     try {
       const client = await getShopifyClient(job.storeId ?? undefined);
       const state = await fetchBulkOperationState(client, job.bulkOperationId);
-      if (!TERMINAL_BULK_STATUSES.includes(state.status)) continue;
+      if (!TERMINAL_BULK_STATUSES.includes(state.status)) {
+        // Still alive and still being watched — keep its store held.
+        await renewStoreLock(job.id);
+        continue;
+      }
 
       if (state.status === 'COMPLETED') {
         await finalizeCompletedJob(parentId, job, state.url);
@@ -633,6 +800,9 @@ async function reconcileBatchRun(
           },
         });
       }
+      // This job is terminal — free ITS store, while the batch's other stores stay
+      // locked by their own jobs.
+      await releaseStoreLock(job.id);
     } catch (err) {
       // Persistent errors (bad token/config) fail just this job so the batch can
       // still finish; transient errors are left RUNNING to retry on the next poll.
@@ -641,6 +811,7 @@ async function reconcileBatchRun(
           where: { id: job.id, status: 'RUNNING' },
           data: { status: 'FAILED', error: (err as Error).message },
         });
+        await releaseStoreLock(job.id);
       }
     }
   }
@@ -737,4 +908,103 @@ async function finalizeCompletedJob(
       })),
     });
   });
+}
+
+// ── crash recovery (resume-on-boot) ──────────────────────────────────────────
+//
+// The customer twins of productImport's resume stores. A PENDING row means "we
+// wrote the row but have no bulk op id for it" — the process died between the two.
+// importResume decides, per row, whether the op was actually submitted (adopt it)
+// or never reached Shopify (relaunch it).
+
+/**
+ * Relaunch a batch job whose op never reached Shopify.
+ *
+ * The slice is NOT stored — it is recomputed from (batchIndex, batchCount) via
+ * splitIntoBatches over the same transformed rows, which is deterministic. That
+ * determinism (pinned by test/shopifyBulk.test.ts, and already relied on by the
+ * reconcile) is what makes resume possible without persisting every job's rows.
+ */
+async function relaunchCustomerJob(jobId: string): Promise<void> {
+  const job = await prisma.importBatchJob.findUnique({
+    where: { id: jobId },
+    include: {
+      importRun: {
+        include: { validationRun: { include: { originalRows: { orderBy: { rowNumber: 'asc' } } } } },
+      },
+    },
+  });
+  if (!job) return;
+  if (!job.storeId) {
+    await prisma.importBatchJob.updateMany({
+      where: { id: jobId, status: 'PENDING' },
+      data: { status: 'FAILED', error: 'Cannot resume: job has no store.' },
+    });
+    return;
+  }
+
+  const rows = buildImportRows(job.importRun.validationRun);
+  const batch = splitIntoBatches(rows, job.batchCount)[job.batchIndex] ?? [];
+  if (batch.length === 0) {
+    await prisma.importBatchJob.updateMany({
+      where: { id: jobId, status: 'PENDING' },
+      data: { status: 'FAILED', error: 'Cannot resume: no rows in this batch slice.' },
+    });
+    return;
+  }
+
+  // Same path as the original launch — no second implementation to drift.
+  await launchBatchJob(jobId, job.storeId, batch, job.importRunId);
+}
+
+/** Relaunch a single-store run whose op never reached Shopify. */
+async function relaunchCustomerRun(runId: string): Promise<void> {
+  const run = await prisma.importRun.findUnique({
+    where: { id: runId },
+    include: { validationRun: { include: { originalRows: { orderBy: { rowNumber: 'asc' } } } } },
+  });
+  if (!run) return;
+
+  const client = await getShopifyClient(run.storeId ?? undefined);
+  const { jsonl, lineRefs } = buildJsonl(buildImportRows(run.validationRun), runId);
+  if (lineRefs.length === 0) {
+    await prisma.importRun.updateMany({
+      where: { id: runId, status: 'PENDING' },
+      data: { status: 'FAILED', error: 'Cannot resume: this validation run has no rows to import.' },
+    });
+    return;
+  }
+
+  await submitSingleStoreRun(runId, client, jsonl);
+}
+
+export function customerResumableStores(): ResumableStore[] {
+  return [
+    {
+      label: 'customer-run',
+      findResumable: (staleBefore) => findResumableRows(prisma.importRun as never, staleBefore),
+      claim: (id, staleBefore) => claimRow(prisma.importRun as never, id, staleBefore),
+      adopt: (id, bulkOperationId) => adoptRow(prisma.importRun as never, id, bulkOperationId),
+      relaunch: relaunchCustomerRun,
+      fail: (id, error) => failRow(prisma.importRun as never, id, error),
+      lockOwner: (row) => ({
+        ownerType: 'IMPORT_RUN',
+        ownerId: row.id,
+        operation: 'a customer import',
+      }),
+    },
+    {
+      label: 'customer-job',
+      findResumable: (staleBefore) => findResumableRows(prisma.importBatchJob as never, staleBefore),
+      claim: (id, staleBefore) => claimRow(prisma.importBatchJob as never, id, staleBefore),
+      adopt: (id, bulkOperationId) => adoptRow(prisma.importBatchJob as never, id, bulkOperationId),
+      relaunch: relaunchCustomerJob,
+      fail: (id, error) => failRow(prisma.importBatchJob as never, id, error),
+      lockOwner: (row) => ({
+        ownerType: 'IMPORT_JOB',
+        ownerId: row.id,
+        operation: 'a customer import',
+      }),
+    },
+  ];
 }

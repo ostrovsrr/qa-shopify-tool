@@ -185,6 +185,26 @@ export function ProductHistory({ onOpen, refreshTrigger }: Props) {
               <div className="history-item-info">
                 <span className="history-filename">{item.fileName}</span>
                 <span className="history-date">{new Date(item.createdAt).toLocaleString()}</span>
+
+                {item.createdBy && item.createdBy !== 'unknown' && (
+
+                  <span className="history-actor">by {item.createdBy}</span>
+
+                )}
+
+                {/* The raw rows were purged for retention, so the report can no longer be
+
+                    rebuilt. Say so here rather than offering a download that would fail. */}
+
+                {item.piiPurgedAt && (
+
+                  <span className="history-purged" title={`Uploaded rows were deleted on ${new Date(item.piiPurgedAt).toLocaleDateString()} under the data-retention policy. Re-upload the CSV to run it again.`}>
+
+                    rows purged
+
+                  </span>
+
+                )}
                 {(item.ticketNumber || item.ticketName || item.comments) && (
                   <div className="history-metadata-summary">
                     {item.ticketNumber && (

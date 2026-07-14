@@ -85,7 +85,6 @@ export function ImportPanel({ result }: Props) {
       : inParallelReview
         ? selectedStoreIds
         : [];
-  const displayKey = displayedStoreIds.join(',');
   // Avoid stale closures / interval churn when refreshing stats on terminal poll.
   const displayedRef = useRef<string[]>(displayedStoreIds);
   displayedRef.current = displayedStoreIds;
@@ -110,11 +109,23 @@ export function ImportPanel({ result }: Props) {
     };
   }, []);
 
-  // ── health + stats for the displayed stores ──────────────────────────────────
+  // ── health + stats for EVERY store, as soon as we know the stores ────────────
+  //
+  // This used to fetch only for the SELECTED store, which meant the store picker
+  // told you nothing: to find out whether a store was clean you had to select it,
+  // wait, and then select the next one. You were choosing blind.
+  //
+  // It was that way for a reason — counting qa customers took 68 SECONDS per store
+  // (Shopify's customersCount ignores tag:, so the server had to page 110k customers
+  // 250 at a time). Doing that for five stores was unthinkable.
+  //
+  // The count is capped server-side now, so it is ~2s per store and they run in
+  // parallel. Fetching all of them up front is what makes the picker useful.
   useEffect(() => {
-    if (displayedStoreIds.length === 0) return;
+    if (stores.length === 0) return;
     let active = true;
-    for (const id of displayedStoreIds) {
+    for (const store of stores) {
+      const id = store.id;
       checkShopifyHealth(id)
         .then((h) => active && setStoreHealth((m) => ({ ...m, [id]: h })))
         .catch(
@@ -133,7 +144,7 @@ export function ImportPanel({ result }: Props) {
       active = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [displayKey]);
+  }, [stores]);
 
   // ── restore the latest import when (re)opening a validation run ───────────────
   useEffect(() => {
@@ -256,11 +267,6 @@ export function ImportPanel({ result }: Props) {
     }
   };
 
-  const handleRefresh = async () => {
-    if (!feedback) return;
-    setFeedback(await fetchImportFeedback(feedback.importRunId));
-  };
-
   const handleDownloadReport = () => {
     if (!feedback) return;
     window.open(getImportReportDownloadUrl(feedback.importRunId), '_blank');
@@ -294,13 +300,16 @@ export function ImportPanel({ result }: Props) {
   };
 
   const cleanStore = async (storeId: string) => {
+    // The count may still be loading, and that is fine — the cleanup re-reads the
+    // store to find what to delete. Say "all" rather than block on a number.
     const st = storeStats[storeId];
-    if (!st) return;
+    const howMany = st
+      ? `${st.qaImportCustomers.toLocaleString()}${st.qaImportCapped ? '+' : ''} customer(s)`
+      : 'every customer';
     if (
       !window.confirm(
-        `Delete all ${st.qaImportCustomers} customer(s) tagged qa-import from ${storeLabel(
-          storeId,
-        )}?`,
+        `Delete ${howMany} tagged qa-import from ${storeLabel(storeId)}?\n\n` +
+          'This deletes by tag across the whole store and cannot be undone.',
       )
     ) {
       return;
@@ -421,18 +430,30 @@ export function ImportPanel({ result }: Props) {
               {batch === 0 ? ' — skipped' : ''}
             </span>
           )}
+          {/* Counting the QA customers means paging Shopify (see the server —
+              customersCount ignores tag:), so it takes a moment. SAY that, instead
+              of showing a bare "—" that looks like the store is empty or broken. */}
           <span>
-            Total customers: <strong>{st ? st.totalCustomers : '—'}</strong>
+            Total customers:{' '}
+            <strong>{st ? st.totalCustomers.toLocaleString() : 'counting…'}</strong>
           </span>
           <span>
-            QA imports: <strong>{st ? st.qaImportCustomers : '—'}</strong>
+            QA imports:{' '}
+            <strong>
+              {st
+                ? `${st.qaImportCustomers.toLocaleString()}${st.qaImportCapped ? '+' : ''}`
+                : 'counting…'}
+            </strong>
           </span>
         </div>
 
+        {/* Not disabled while the count is still loading. The cleanup re-reads the
+            store itself, so it never needed the count to be on screen first — and
+            gating it meant the button sat dead for a minute on a big store. */}
         <button
           className="btn btn-outline btn-sm"
           onClick={() => cleanStore(storeId)}
-          disabled={cleaning || !st || st.qaImportCustomers === 0}
+          disabled={cleaning || (st != null && st.qaImportCustomers === 0)}
         >
           {cleaning ? 'Cleaning…' : 'Clean QA'}
         </button>
@@ -515,6 +536,17 @@ export function ImportPanel({ result }: Props) {
                   >
                     <span>{store.label}</span>
                     <small>{store.shop}</small>
+                    {/* The whole point of the picker: see which store is dirty
+                        BEFORE you commit an import to it. */}
+                    <small className="store-chip-stats">
+                      {storeStats[store.id]
+                        ? `${storeStats[store.id].totalCustomers.toLocaleString()} customers · ` +
+                          `${storeStats[store.id].qaImportCustomers.toLocaleString()}` +
+                          `${storeStats[store.id].qaImportCapped ? '+' : ''} QA`
+                        : storeHealth[store.id]?.ok === false
+                          ? 'unreachable'
+                          : 'counting…'}
+                    </small>
                   </button>
                 ))}
               </div>
@@ -594,11 +626,9 @@ export function ImportPanel({ result }: Props) {
               <span className="spinner" /> Import {feedback.importRunId.slice(0, 8)} ·
               running in Shopify… polling for results
             </span>
-            <div className="toolbar-actions">
-              <button className="btn btn-outline btn-sm" onClick={handleRefresh}>
-                Refresh
-              </button>
-            </div>
+            {/* No Refresh button. A 2s interval is already re-fetching this exact
+                feedback (see the polling effect), so the button did nothing the app
+                was not doing anyway — it just implied the user had to act. */}
           </div>
         </div>
       )}

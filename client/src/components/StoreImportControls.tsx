@@ -244,11 +244,6 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
     }
   };
 
-  const handleRefresh = async () => {
-    if (!feedback) return;
-    setFeedback(await fetchImportFeedback(feedback.importRunId));
-  };
-
   const handleDownloadReport = () => {
     if (!feedback) return;
     window.open(getImportReportDownloadUrl(feedback.importRunId), '_blank');
@@ -260,11 +255,14 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
   };
 
   const cleanStore = async (storeId: string) => {
+    // The count may still be loading, and that is fine — the cleanup re-reads the
+    // store to find what to delete. Say "every" rather than block on a number.
     const st = storeStats[storeId];
-    if (!st) return;
+    const howMany = st ? `${st.qaImportProducts.toLocaleString()} product(s)` : 'every product';
     if (
       !window.confirm(
-        `Delete all ${st.qaImportProducts} product(s) tagged qa-import from ${storeLabel(storeId)}?`,
+        `Delete ${howMany} tagged qa-import from ${storeLabel(storeId)}?\n\n` +
+          'This deletes by tag across the whole store and cannot be undone.',
       )
     ) {
       return;
@@ -389,17 +387,19 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
             </span>
           )}
           <span>
-            Total products: <strong>{st ? st.totalProducts : '—'}</strong>
+            Total products:{' '}
+            <strong>{st ? st.totalProducts.toLocaleString() : 'counting…'}</strong>
           </span>
           <span>
-            QA imports: <strong>{st ? st.qaImportProducts : '—'}</strong>
+            QA imports:{' '}
+            <strong>{st ? st.qaImportProducts.toLocaleString() : 'counting…'}</strong>
           </span>
         </div>
 
         <button
           className="btn btn-outline btn-sm"
           onClick={() => cleanStore(storeId)}
-          disabled={cleaning || !st || st.qaImportProducts === 0}
+          disabled={cleaning || (st != null && st.qaImportProducts === 0)}
         >
           {cleaning ? 'Cleaning…' : 'Clean QA'}
         </button>
@@ -554,11 +554,9 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
               <span className="spinner" /> Import {feedback.importRunId.slice(0, 8)} · running in
               Shopify… polling for results
             </span>
-            <div className="toolbar-actions">
-              <button className="btn btn-outline btn-sm" onClick={handleRefresh}>
-                Refresh
-              </button>
-            </div>
+            {/* No Refresh button. A 2s interval is already re-fetching this exact
+                feedback (see the polling effect), so the button did nothing the app
+                was not doing anyway — it just implied the user had to act. */}
           </div>
         </div>
       )}

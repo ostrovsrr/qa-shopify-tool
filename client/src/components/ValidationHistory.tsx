@@ -191,6 +191,22 @@ export function ValidationHistory({ onOpen, refreshTrigger }: Props) {
                 <span className="history-date">
                   {new Date(item.createdAt).toLocaleString()}
                 </span>
+                {item.createdBy && item.createdBy !== 'unknown' && (
+                  <span className="history-actor">by {item.createdBy}</span>
+                )}
+                {/* The raw rows were purged for retention, so the report can no
+                    longer be rebuilt. Say so rather than offering a download that
+                    would fail. */}
+                {item.piiPurgedAt && (
+                  <span
+                    className="history-purged"
+                    title={`Uploaded rows were deleted on ${new Date(
+                      item.piiPurgedAt,
+                    ).toLocaleDateString()} under the data-retention policy. Re-upload the CSV to run it again.`}
+                  >
+                    rows purged
+                  </span>
+                )}
                 {/* Metadata summary row */}
                 {(item.ticketNumber || item.ticketName || item.comments) && (
                   <div className="history-metadata-summary">

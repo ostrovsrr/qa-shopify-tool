@@ -1,0 +1,28 @@
+# Never ship these into the image.
+
+# Secrets. A .env baked into an image is a leaked credential that follows the image
+# everywhere it is pushed.
+**/.env
+**/.env.*
+
+node_modules
+**/node_modules
+**/dist
+**/build
+
+.git
+.gitignore
+
+# Sample CSVs and any real merchant data. The image must not carry PII.
+sample/
+**/*.csv
+
+# Local scratch
+**/*.log
+**/coverage
+**/.vscode
+**/.idea
+
+# Docs and dev-only files add nothing to a runtime image.
+docs/
+*.md

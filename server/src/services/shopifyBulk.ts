@@ -131,6 +131,35 @@ export interface BulkOperationState {
   partialDataUrl: string | null;
 }
 
+/** A bulk op plus when Shopify created it. The timestamp is what lets resume decide
+ *  whether the shop's current operation is the one a crashed job submitted. */
+export interface CurrentBulkOperation extends BulkOperationState {
+  createdAt: string;
+}
+
+/**
+ * The shop's most recent MUTATION bulk operation, or null if it has never run one.
+ *
+ * This is the key to safe crash recovery. Shopify allows exactly ONE bulk operation
+ * per shop, so if a job died between submitting its op and persisting the returned
+ * id, that op is still the shop's current one. Resume ADOPTS it (see
+ * importResume.service.ts) instead of submitting a second — which would just fail
+ * against the per-shop limit (see runBulkMutation's "already in progress" path) or,
+ * worse, duplicate a merchant's import.
+ */
+export async function fetchCurrentBulkOperation(
+  client: ShopifyClient,
+): Promise<CurrentBulkOperation | null> {
+  const data = await client.query<{ currentBulkOperation: CurrentBulkOperation | null }>(
+    `query currentBulk {
+      currentBulkOperation(type: MUTATION) {
+        id status errorCode objectCount url partialDataUrl createdAt
+      }
+    }`,
+  );
+  return data.currentBulkOperation ?? null;
+}
+
 // Single-shot poll: the async model advances one step per reconcile call instead
 // of blocking an HTTP request in a multi-minute loop.
 export async function fetchBulkOperationState(
@@ -195,6 +224,15 @@ export async function fetchAndParseBulkResults<R, O>(
   // than Math.min(...lineNumbers) — spreading a large result set (100k+ lines)
   // passes every element as an argument and overflows the engine's argument
   // limit ("Maximum call stack size exceeded").
+  //
+  // ⚠ THIS ASSUMES THE RESULT FILE STARTS AT THE FIRST LINE.
+  // It holds for a COMPLETED operation's `url`, which always does. It does NOT
+  // hold for `partialDataUrl` on a FAILED/CANCELED op, whose first line may be
+  // any line number. Feeding partial data through here collapses `base` to that
+  // first line, shifting EVERY ref: results get attributed to the wrong source
+  // rows, silently, with no error. Before wiring up partial-result salvage, pass
+  // the true base in explicitly instead of inferring it. Pinned by
+  // test/shopifyBulk.test.ts ("MISALIGNS refs ... partial data").
   let base = Infinity;
   for (const p of parsed) {
     const n = Number(p.__lineNumber);
@@ -207,6 +245,164 @@ export async function fetchAndParseBulkResults<R, O>(
     const data = (line.data ?? line) as Record<string, unknown>;
     return parseLine({ ref, data, raw: line });
   });
+}
+
+// ── blocking poll-to-terminal (cleanup only) ─────────────────────────────────
+
+// Bulk-op poll cadence + cap for the BLOCKING path. ~150 * 2s ≈ 5 min.
+//
+// ⚠ This blocks the HTTP request for up to 300s. That is deliberate today and
+// fine on localhost, but a hosted platform proxy times out around 100s, so the
+// cleanup routes CANNOT work hosted in this shape. The import services already
+// solved this: they persist the bulk-op id and advance one step per reconcile
+// call (see `MAX_JOB_POLL_ATTEMPTS` and the `pollAttempts` column). Cleanup
+// should be converted to that same model — these constants disappear when it is.
+export const BULK_POLL_INTERVAL_MS = 2000;
+export const MAX_BULK_POLL_ATTEMPTS = 150;
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Block until a bulk operation reaches a terminal status, then return its result
+ * file URL. Throws if it times out, ends non-COMPLETED, or completes with no file.
+ *
+ * `label` only shapes the error text (callers say "Bulk delete").
+ */
+export async function awaitBulkOperationResultUrl(
+  client: ShopifyClient,
+  bulkOpId: string,
+  label = 'Bulk delete',
+): Promise<string> {
+  let state = await fetchBulkOperationState(client, bulkOpId);
+  for (
+    let attempt = 0;
+    !TERMINAL_BULK_STATUSES.includes(state.status) && attempt < MAX_BULK_POLL_ATTEMPTS;
+    attempt++
+  ) {
+    await sleep(BULK_POLL_INTERVAL_MS);
+    state = await fetchBulkOperationState(client, bulkOpId);
+  }
+
+  if (!TERMINAL_BULK_STATUSES.includes(state.status)) {
+    throw new Error(
+      `${label} did not finish within ${(MAX_BULK_POLL_ATTEMPTS * BULK_POLL_INTERVAL_MS) / 1000}s; ` +
+        'it may still be running on Shopify — re-run cleanup shortly.',
+    );
+  }
+  if (state.status !== 'COMPLETED') {
+    throw new Error(`${label} ${state.status}${state.errorCode ? ` (${state.errorCode})` : ''}.`);
+  }
+  if (!state.url) {
+    throw new Error(`${label} completed but Shopify returned no result file.`);
+  }
+  return state.url;
+}
+
+// ── bulk delete-by-id ────────────────────────────────────────────────────────
+
+/** One id that failed to delete, with Shopify's reason. Callers rename `id` to
+ *  their own key (customerId / productId). */
+export interface BulkDeleteFailure {
+  id: string;
+  message: string;
+}
+
+export interface BulkDeleteOutcome {
+  deleted: number;
+  errors: BulkDeleteFailure[];
+}
+
+/** The entity-specific bits of a delete-by-id bulk op. */
+export interface BulkDeleteSpec {
+  /** e.g. the customerDelete / productDelete mutation string. */
+  mutation: string;
+  /** JSONL filename for the staged upload (cosmetic; aids debugging in Shopify). */
+  filename: string;
+  /** Mutation payload key on each result line, e.g. 'customerDelete'. */
+  payloadKey: string;
+  /** Deleted-id field inside that payload, e.g. 'deletedCustomerId'. */
+  deletedIdKey: string;
+}
+
+/**
+ * Stage the ids and kick off the delete. Returns the bulk operation id WITHOUT
+ * waiting for it to finish — the caller persists that id and advances the
+ * operation one step per poll (see cleanupRun.service.ts).
+ *
+ * This is the non-blocking half. Blocking in-request for up to 300s is what makes
+ * the cleanup routes unusable behind a hosting proxy that gives up around 100s.
+ */
+export async function submitBulkDelete(
+  client: ShopifyClient,
+  ids: string[],
+  spec: BulkDeleteSpec,
+): Promise<string> {
+  const jsonl = ids.map((id) => JSON.stringify({ input: { id } })).join('\n');
+  const stagedPath = await stagedUpload(client, jsonl, spec.filename);
+  return runBulkMutation(client, spec.mutation, stagedPath);
+}
+
+/** Fold a finished delete operation's result file into a deleted count + errors. */
+export async function parseBulkDeleteResults(
+  url: string,
+  ids: string[],
+  spec: BulkDeleteSpec,
+): Promise<BulkDeleteOutcome> {
+  type LineOutcome = { ok: boolean; id: string; message?: string };
+
+  const outcomes = await fetchAndParseBulkResults<string, LineOutcome>(
+    url,
+    ids,
+    ({ ref, data, raw }) => {
+      const payload = data[spec.payloadKey] as
+        | (Record<string, unknown> & { userErrors: { message: string }[] })
+        | undefined;
+
+      if (!payload) {
+        // Top-level error line (e.g. malformed input) — no mutation payload.
+        const message =
+          typeof raw.message === 'string' ? raw.message : 'Unknown bulk delete error.';
+        return { ok: false, id: ref ?? 'unknown', message };
+      }
+
+      const deletedId = payload[spec.deletedIdKey] as string | null | undefined;
+      if (payload.userErrors.length === 0 && deletedId) {
+        return { ok: true, id: ref ?? deletedId };
+      }
+
+      const message =
+        payload.userErrors.map((e) => e.message).join('; ') || 'Delete rejected by Shopify.';
+      return { ok: false, id: ref ?? 'unknown', message };
+    },
+  );
+
+  const errors: BulkDeleteFailure[] = [];
+  let deleted = 0;
+  for (const o of outcomes) {
+    if (o.ok) {
+      deleted++;
+    } else {
+      errors.push({ id: o.id, message: o.message ?? 'Unknown delete failure.' });
+    }
+  }
+  return { deleted, errors };
+}
+
+/**
+ * Submit a delete and BLOCK until it finishes.
+ *
+ * ⚠ Blocks the request for up to 300s (see awaitBulkOperationResultUrl). Kept only
+ * for callers that are already synchronous and small. The hosted cleanup path uses
+ * submitBulkDelete + parseBulkDeleteResults and polls instead.
+ */
+export async function bulkDeleteByIds(
+  client: ShopifyClient,
+  ids: string[],
+  spec: BulkDeleteSpec,
+): Promise<BulkDeleteOutcome> {
+  const bulkOpId = await submitBulkDelete(client, ids, spec);
+  const url = await awaitBulkOperationResultUrl(client, bulkOpId);
+  return parseBulkDeleteResults(url, ids, spec);
 }
 
 // ── parallel batch split ─────────────────────────────────────────────────────

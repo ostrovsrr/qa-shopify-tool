@@ -7,6 +7,8 @@ import {
   getUploadRun,
   updateUploadMetadata,
 } from '../services/productUpload.service';
+import { removeUploadFile } from '../services/uploadFile';
+import { actorFrom, recordAction } from '../services/actionLog.service';
 
 const uuidSchema = z.string().uuid('Invalid upload ID format.');
 
@@ -29,10 +31,18 @@ export async function uploadHandler(
       });
       return;
     }
-    const summary = await createProductUpload(req.file.buffer, req.file.originalname);
+    const summary = await createProductUpload(
+      req.file.path,
+      req.file.originalname,
+      actorFrom(req),
+    );
     res.status(201).json(summary);
   } catch (err) {
     next(err);
+  } finally {
+    // The rows are persisted to Postgres, so nobody comes back for the raw file.
+    // It goes now, on the success path and the failure path alike.
+    removeUploadFile(req.file?.path);
   }
 }
 
@@ -117,6 +127,8 @@ export async function deleteUploadHandler(
       res.status(404).json({ error: 'Upload not found.' });
       return;
     }
+    // Destructive, and in a shared workspace anyone can do it to anyone's upload.
+    await recordAction(req, { action: 'DELETE_PRODUCT_UPLOAD', target: parsed.data });
     res.json({ message: 'Upload deleted successfully.' });
   } catch (err) {
     next(err);

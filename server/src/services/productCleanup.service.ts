@@ -1,11 +1,5 @@
 import { getShopifyClient } from './shopifyClient';
-import {
-  fetchAndParseBulkResults,
-  fetchBulkOperationState,
-  runBulkMutation,
-  stagedUpload,
-  TERMINAL_BULK_STATUSES,
-} from './shopifyBulk';
+import { bulkDeleteByIds } from './shopifyBulk';
 
 // The base teardown tag applied to every QA-imported product (alongside the
 // per-run qa-import-<importRunId> tag). Cleanup deletes by tag so an import is
@@ -22,12 +16,6 @@ const PRODUCT_DELETE_MUTATION =
 // op (which pays a fixed staged-upload + poll-latency cost of a few seconds).
 // Above it, one bulk operation wins decisively.
 const BULK_DELETE_THRESHOLD = 50;
-
-// Bulk-op poll cadence + cap. ~150 * 2s ≈ 5 min, well beyond a typical teardown;
-// keeps the request synchronous (same blocking shape as the serial loop).
-const POLL_INTERVAL_MS = 2000;
-const MAX_POLL_ATTEMPTS = 150;
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 interface ProductNode {
   id: string;
@@ -149,6 +137,33 @@ export async function cleanupProductsByTag(
   };
 }
 
+/**
+ * The product half of the entity-agnostic cleanup engine (cleanupRun.service.ts).
+ * The twin of customerCleanupAdapter — everything cleanup does is identical across
+ * the two flows except these four things.
+ */
+export const productCleanupAdapter = {
+  entity: 'PRODUCT' as const,
+  bulkThreshold: BULK_DELETE_THRESHOLD,
+  fetchIdsByTag: fetchProductIdsByTag,
+  serialDelete: async (
+    client: Awaited<ReturnType<typeof getShopifyClient>>,
+    ids: string[],
+  ): Promise<{ deleted: number; errors: { id: string; message: string }[] }> => {
+    const out = await serialDeleteProducts(client, ids);
+    return {
+      deleted: out.deleted,
+      errors: out.errors.map((e) => ({ id: e.productId, message: e.message })),
+    };
+  },
+  deleteSpec: {
+    mutation: PRODUCT_DELETE_MUTATION,
+    filename: 'bulk_product_delete.jsonl',
+    payloadKey: 'productDelete',
+    deletedIdKey: 'deletedProductId',
+  },
+};
+
 interface DeleteOutcome {
   deleted: number;
   errors: CleanupResult['errors'];
@@ -189,73 +204,22 @@ async function serialDeleteProducts(
   return { deleted, errors };
 }
 
-// Bulk delete via a single bulkOperationRunMutation over a staged JSONL. Polls to
-// completion (same blocking shape as the serial loop, far fewer calls) and parses
-// per-line results back into the CleanupResult error list.
+// Bulk delete via a single bulkOperationRunMutation over a staged JSONL. The
+// staging / polling / result-folding is the entity-agnostic engine (shopifyBulk);
+// only the mutation and its payload key names are product-specific.
 async function bulkDeleteProducts(
   client: Awaited<ReturnType<typeof getShopifyClient>>,
   ids: string[],
 ): Promise<DeleteOutcome> {
-  const jsonl = ids.map((id) => JSON.stringify({ input: { id } })).join('\n');
-  const stagedPath = await stagedUpload(client, jsonl, 'bulk_product_delete.jsonl');
-  const bulkOpId = await runBulkMutation(client, PRODUCT_DELETE_MUTATION, stagedPath);
-
-  let state = await fetchBulkOperationState(client, bulkOpId);
-  for (
-    let attempt = 0;
-    !TERMINAL_BULK_STATUSES.includes(state.status) && attempt < MAX_POLL_ATTEMPTS;
-    attempt++
-  ) {
-    await sleep(POLL_INTERVAL_MS);
-    state = await fetchBulkOperationState(client, bulkOpId);
-  }
-
-  if (!TERMINAL_BULK_STATUSES.includes(state.status)) {
-    throw new Error(
-      `Bulk delete did not finish within ${(MAX_POLL_ATTEMPTS * POLL_INTERVAL_MS) / 1000}s; ` +
-        'it may still be running on Shopify — re-run cleanup shortly.',
-    );
-  }
-  if (state.status !== 'COMPLETED') {
-    throw new Error(
-      `Bulk delete ${state.status}${state.errorCode ? ` (${state.errorCode})` : ''}.`,
-    );
-  }
-  if (!state.url) {
-    throw new Error('Bulk delete completed but Shopify returned no result file.');
-  }
-
-  const errors: CleanupResult['errors'] = [];
-  let deleted = 0;
-
-  const outcomes = await fetchAndParseBulkResults<
-    string,
-    { ok: boolean; productId: string; message?: string }
-  >(state.url, ids, ({ ref, data, raw }) => {
-    const payload = data.productDelete as
-      | { deletedProductId: string | null; userErrors: { message: string }[] }
-      | undefined;
-
-    if (!payload) {
-      // Top-level error line (e.g. malformed input) — no mutation payload.
-      const message = typeof raw.message === 'string' ? raw.message : 'Unknown bulk delete error.';
-      return { ok: false, productId: ref ?? 'unknown', message };
-    }
-    if (payload.userErrors.length === 0 && payload.deletedProductId) {
-      return { ok: true, productId: ref ?? payload.deletedProductId };
-    }
-    const message =
-      payload.userErrors.map((e) => e.message).join('; ') || 'Delete rejected by Shopify.';
-    return { ok: false, productId: ref ?? 'unknown', message };
+  const { deleted, errors } = await bulkDeleteByIds(client, ids, {
+    mutation: PRODUCT_DELETE_MUTATION,
+    filename: 'bulk_product_delete.jsonl',
+    payloadKey: 'productDelete',
+    deletedIdKey: 'deletedProductId',
   });
 
-  for (const o of outcomes) {
-    if (o.ok) {
-      deleted++;
-    } else {
-      errors.push({ productId: o.productId, message: o.message ?? 'Unknown delete failure.' });
-    }
-  }
-
-  return { deleted, errors };
+  return {
+    deleted,
+    errors: errors.map((e) => ({ productId: e.id, message: e.message })),
+  };
 }
