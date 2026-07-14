@@ -195,6 +195,15 @@ export async function fetchAndParseBulkResults<R, O>(
   // than Math.min(...lineNumbers) — spreading a large result set (100k+ lines)
   // passes every element as an argument and overflows the engine's argument
   // limit ("Maximum call stack size exceeded").
+  //
+  // ⚠ THIS ASSUMES THE RESULT FILE STARTS AT THE FIRST LINE.
+  // It holds for a COMPLETED operation's `url`, which always does. It does NOT
+  // hold for `partialDataUrl` on a FAILED/CANCELED op, whose first line may be
+  // any line number. Feeding partial data through here collapses `base` to that
+  // first line, shifting EVERY ref: results get attributed to the wrong source
+  // rows, silently, with no error. Before wiring up partial-result salvage, pass
+  // the true base in explicitly instead of inferring it. Pinned by
+  // test/shopifyBulk.test.ts ("MISALIGNS refs ... partial data").
   let base = Infinity;
   for (const p of parsed) {
     const n = Number(p.__lineNumber);
