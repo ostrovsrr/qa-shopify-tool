@@ -218,6 +218,140 @@ export async function fetchAndParseBulkResults<R, O>(
   });
 }
 
+// ── blocking poll-to-terminal (cleanup only) ─────────────────────────────────
+
+// Bulk-op poll cadence + cap for the BLOCKING path. ~150 * 2s ≈ 5 min.
+//
+// ⚠ This blocks the HTTP request for up to 300s. That is deliberate today and
+// fine on localhost, but a hosted platform proxy times out around 100s, so the
+// cleanup routes CANNOT work hosted in this shape. The import services already
+// solved this: they persist the bulk-op id and advance one step per reconcile
+// call (see `MAX_JOB_POLL_ATTEMPTS` and the `pollAttempts` column). Cleanup
+// should be converted to that same model — these constants disappear when it is.
+export const BULK_POLL_INTERVAL_MS = 2000;
+export const MAX_BULK_POLL_ATTEMPTS = 150;
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Block until a bulk operation reaches a terminal status, then return its result
+ * file URL. Throws if it times out, ends non-COMPLETED, or completes with no file.
+ *
+ * `label` only shapes the error text (callers say "Bulk delete").
+ */
+export async function awaitBulkOperationResultUrl(
+  client: ShopifyClient,
+  bulkOpId: string,
+  label = 'Bulk delete',
+): Promise<string> {
+  let state = await fetchBulkOperationState(client, bulkOpId);
+  for (
+    let attempt = 0;
+    !TERMINAL_BULK_STATUSES.includes(state.status) && attempt < MAX_BULK_POLL_ATTEMPTS;
+    attempt++
+  ) {
+    await sleep(BULK_POLL_INTERVAL_MS);
+    state = await fetchBulkOperationState(client, bulkOpId);
+  }
+
+  if (!TERMINAL_BULK_STATUSES.includes(state.status)) {
+    throw new Error(
+      `${label} did not finish within ${(MAX_BULK_POLL_ATTEMPTS * BULK_POLL_INTERVAL_MS) / 1000}s; ` +
+        'it may still be running on Shopify — re-run cleanup shortly.',
+    );
+  }
+  if (state.status !== 'COMPLETED') {
+    throw new Error(`${label} ${state.status}${state.errorCode ? ` (${state.errorCode})` : ''}.`);
+  }
+  if (!state.url) {
+    throw new Error(`${label} completed but Shopify returned no result file.`);
+  }
+  return state.url;
+}
+
+// ── bulk delete-by-id ────────────────────────────────────────────────────────
+
+/** One id that failed to delete, with Shopify's reason. Callers rename `id` to
+ *  their own key (customerId / productId). */
+export interface BulkDeleteFailure {
+  id: string;
+  message: string;
+}
+
+export interface BulkDeleteOutcome {
+  deleted: number;
+  errors: BulkDeleteFailure[];
+}
+
+/** The entity-specific bits of a delete-by-id bulk op. */
+export interface BulkDeleteSpec {
+  /** e.g. the customerDelete / productDelete mutation string. */
+  mutation: string;
+  /** JSONL filename for the staged upload (cosmetic; aids debugging in Shopify). */
+  filename: string;
+  /** Mutation payload key on each result line, e.g. 'customerDelete'. */
+  payloadKey: string;
+  /** Deleted-id field inside that payload, e.g. 'deletedCustomerId'. */
+  deletedIdKey: string;
+}
+
+/**
+ * Delete ids via a single bulkOperationRunMutation over a staged JSONL, block
+ * until it finishes, and fold the per-line results into a deleted count + errors.
+ *
+ * Shared by the customer and product cleanup services, which were previously
+ * line-for-line identical here apart from the entity nouns.
+ */
+export async function bulkDeleteByIds(
+  client: ShopifyClient,
+  ids: string[],
+  spec: BulkDeleteSpec,
+): Promise<BulkDeleteOutcome> {
+  const jsonl = ids.map((id) => JSON.stringify({ input: { id } })).join('\n');
+  const stagedPath = await stagedUpload(client, jsonl, spec.filename);
+  const bulkOpId = await runBulkMutation(client, spec.mutation, stagedPath);
+  const url = await awaitBulkOperationResultUrl(client, bulkOpId);
+
+  type LineOutcome = { ok: boolean; id: string; message?: string };
+
+  const outcomes = await fetchAndParseBulkResults<string, LineOutcome>(
+    url,
+    ids,
+    ({ ref, data, raw }) => {
+      const payload = data[spec.payloadKey] as
+        | (Record<string, unknown> & { userErrors: { message: string }[] })
+        | undefined;
+
+      if (!payload) {
+        // Top-level error line (e.g. malformed input) — no mutation payload.
+        const message =
+          typeof raw.message === 'string' ? raw.message : 'Unknown bulk delete error.';
+        return { ok: false, id: ref ?? 'unknown', message };
+      }
+
+      const deletedId = payload[spec.deletedIdKey] as string | null | undefined;
+      if (payload.userErrors.length === 0 && deletedId) {
+        return { ok: true, id: ref ?? deletedId };
+      }
+
+      const message =
+        payload.userErrors.map((e) => e.message).join('; ') || 'Delete rejected by Shopify.';
+      return { ok: false, id: ref ?? 'unknown', message };
+    },
+  );
+
+  const errors: BulkDeleteFailure[] = [];
+  let deleted = 0;
+  for (const o of outcomes) {
+    if (o.ok) {
+      deleted++;
+    } else {
+      errors.push({ id: o.id, message: o.message ?? 'Unknown delete failure.' });
+    }
+  }
+  return { deleted, errors };
+}
+
 // ── parallel batch split ─────────────────────────────────────────────────────
 
 // Contiguous, balanced split (earlier batches get the +1 when it doesn't divide

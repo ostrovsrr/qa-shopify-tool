@@ -1,11 +1,5 @@
 import { getShopifyClient } from './shopifyClient';
-import {
-  stagedUpload,
-  runBulkMutation,
-  fetchBulkOperationState,
-  fetchAndParseBulkResults,
-  TERMINAL_BULK_STATUSES,
-} from './shopifyBulk';
+import { bulkDeleteByIds } from './shopifyBulk';
 
 const QA_IMPORT_TAG = 'qa-import';
 
@@ -18,12 +12,6 @@ const CUSTOMER_DELETE_MUTATION =
 // op (which pays a fixed staged-upload + poll-latency cost of a few seconds).
 // Above it, one bulk operation wins decisively.
 const BULK_DELETE_THRESHOLD = 50;
-
-// Bulk-op poll cadence + cap. ~150 * 2s ≈ 5 min, well beyond a typical teardown;
-// keeps the request synchronous (same blocking shape as the old serial loop).
-const POLL_INTERVAL_MS = 2000;
-const MAX_POLL_ATTEMPTS = 150;
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 interface CustomerNode {
   id: string;
@@ -189,76 +177,24 @@ async function serialDeleteCustomers(
   return { deleted, errors };
 }
 
-// Bulk delete via a single bulkOperationRunMutation over a staged JSONL. Polls to
-// completion synchronously (same blocking shape as the serial loop, far fewer calls)
-// and parses per-line results back into the CleanupResult error list.
+// Bulk delete via a single bulkOperationRunMutation over a staged JSONL. The
+// staging / polling / result-folding is the entity-agnostic engine (shopifyBulk);
+// only the mutation and its payload key names are customer-specific.
 async function bulkDeleteCustomers(
   client: Awaited<ReturnType<typeof getShopifyClient>>,
   ids: string[],
 ): Promise<DeleteOutcome> {
-  const jsonl = ids.map((id) => JSON.stringify({ input: { id } })).join('\n');
-  const stagedPath = await stagedUpload(client, jsonl, 'bulk_customer_delete.jsonl');
-  const bulkOpId = await runBulkMutation(client, CUSTOMER_DELETE_MUTATION, stagedPath);
+  const { deleted, errors } = await bulkDeleteByIds(client, ids, {
+    mutation: CUSTOMER_DELETE_MUTATION,
+    filename: 'bulk_customer_delete.jsonl',
+    payloadKey: 'customerDelete',
+    deletedIdKey: 'deletedCustomerId',
+  });
 
-  let state = await fetchBulkOperationState(client, bulkOpId);
-  for (
-    let attempt = 0;
-    !TERMINAL_BULK_STATUSES.includes(state.status) && attempt < MAX_POLL_ATTEMPTS;
-    attempt++
-  ) {
-    await sleep(POLL_INTERVAL_MS);
-    state = await fetchBulkOperationState(client, bulkOpId);
-  }
-
-  if (!TERMINAL_BULK_STATUSES.includes(state.status)) {
-    throw new Error(
-      `Bulk delete did not finish within ${(MAX_POLL_ATTEMPTS * POLL_INTERVAL_MS) / 1000}s; ` +
-        'it may still be running on Shopify — re-run cleanup shortly.',
-    );
-  }
-  if (state.status !== 'COMPLETED') {
-    throw new Error(
-      `Bulk delete ${state.status}${state.errorCode ? ` (${state.errorCode})` : ''}.`,
-    );
-  }
-  if (!state.url) {
-    throw new Error('Bulk delete completed but Shopify returned no result file.');
-  }
-
-  const errors: CleanupResult['errors'] = [];
-  let deleted = 0;
-
-  const outcomes = await fetchAndParseBulkResults<string, { ok: boolean; customerId: string; message?: string }>(
-    state.url,
-    ids,
-    ({ ref, data, raw }) => {
-      const payload = data.customerDelete as
-        | { deletedCustomerId: string | null; userErrors: { message: string }[] }
-        | undefined;
-
-      if (!payload) {
-        // Top-level error line (e.g. malformed input) — no mutation payload.
-        const message = typeof raw.message === 'string' ? raw.message : 'Unknown bulk delete error.';
-        return { ok: false, customerId: ref ?? 'unknown', message };
-      }
-      if (payload.userErrors.length === 0 && payload.deletedCustomerId) {
-        return { ok: true, customerId: ref ?? payload.deletedCustomerId };
-      }
-      const message =
-        payload.userErrors.map((e) => e.message).join('; ') || 'Delete rejected by Shopify.';
-      return { ok: false, customerId: ref ?? 'unknown', message };
-    },
-  );
-
-  for (const o of outcomes) {
-    if (o.ok) {
-      deleted++;
-    } else {
-      errors.push({ customerId: o.customerId, message: o.message ?? 'Unknown delete failure.' });
-    }
-  }
-
-  return { deleted, errors };
+  return {
+    deleted,
+    errors: errors.map((e) => ({ customerId: e.id, message: e.message })),
+  };
 }
 
 export function qaImportTagForRun(importRunId: string): string {

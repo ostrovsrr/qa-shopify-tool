@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  BULK_POLL_INTERVAL_MS,
+  MAX_BULK_POLL_ATTEMPTS,
   MAX_JOB_POLL_ATTEMPTS,
   TERMINAL_BULK_STATUSES,
+  awaitBulkOperationResultUrl,
+  bulkDeleteByIds,
   fetchAndParseBulkResults,
   fetchBulkOperationState,
   runBulkMutation,
@@ -354,6 +358,201 @@ describe('stagedUpload', () => {
       },
     }));
     await expect(stagedUpload(client, '{}')).rejects.toThrow(/missing "key" parameter/);
+  });
+});
+
+describe('awaitBulkOperationResultUrl', () => {
+  /** A client whose poll returns each queued state in turn (last one repeats). */
+  function pollingClient(states: { status: string; errorCode?: string | null; url?: string | null }[]) {
+    let i = 0;
+    return fakeClient(async () => {
+      const s = states[Math.min(i++, states.length - 1)];
+      return {
+        node: {
+          id: 'gid://1',
+          status: s.status,
+          errorCode: s.errorCode ?? null,
+          objectCount: '1',
+          url: s.url ?? null,
+          partialDataUrl: null,
+        },
+      };
+    });
+  }
+
+  it('returns the result url once the op is COMPLETED', async () => {
+    const client = pollingClient([{ status: 'COMPLETED', url: 'https://results/1' }]);
+    await expect(awaitBulkOperationResultUrl(client, 'gid://1')).resolves.toBe('https://results/1');
+  });
+
+  it('keeps polling while the op is non-terminal, then returns', async () => {
+    vi.useFakeTimers();
+    const client = pollingClient([
+      { status: 'RUNNING' },
+      { status: 'RUNNING' },
+      { status: 'COMPLETED', url: 'https://results/2' },
+    ]);
+    const promise = awaitBulkOperationResultUrl(client, 'gid://1');
+    await vi.advanceTimersByTimeAsync(BULK_POLL_INTERVAL_MS * 3);
+    await expect(promise).resolves.toBe('https://results/2');
+    vi.useRealTimers();
+  });
+
+  // The 300s in-request block. This is exactly why the cleanup routes cannot
+  // work hosted: a platform proxy gives up around 100s.
+  it('throws after MAX_BULK_POLL_ATTEMPTS if the op never goes terminal', async () => {
+    vi.useFakeTimers();
+    const client = pollingClient([{ status: 'RUNNING' }]);
+    const promise = awaitBulkOperationResultUrl(client, 'gid://1');
+    const caught = promise.catch((e: Error) => e);
+    await vi.advanceTimersByTimeAsync(BULK_POLL_INTERVAL_MS * (MAX_BULK_POLL_ATTEMPTS + 2));
+    const err = await caught;
+    expect((err as Error).message).toMatch(/did not finish within 300s/);
+    expect((err as Error).message).toMatch(/re-run cleanup shortly/);
+    vi.useRealTimers();
+  });
+
+  it('throws with the status and errorCode when the op ends non-COMPLETED', async () => {
+    const client = pollingClient([{ status: 'FAILED', errorCode: 'INTERNAL_SERVER_ERROR' }]);
+    await expect(awaitBulkOperationResultUrl(client, 'gid://1')).rejects.toThrow(
+      'Bulk delete FAILED (INTERNAL_SERVER_ERROR).',
+    );
+  });
+
+  it('omits the parenthetical when there is no errorCode', async () => {
+    const client = pollingClient([{ status: 'CANCELED' }]);
+    await expect(awaitBulkOperationResultUrl(client, 'gid://1')).rejects.toThrow(
+      'Bulk delete CANCELED.',
+    );
+  });
+
+  it('throws when the op COMPLETED but Shopify returned no result file', async () => {
+    const client = pollingClient([{ status: 'COMPLETED', url: null }]);
+    await expect(awaitBulkOperationResultUrl(client, 'gid://1')).rejects.toThrow(
+      'Bulk delete completed but Shopify returned no result file.',
+    );
+  });
+
+  it('uses the caller-supplied label in error text', async () => {
+    const client = pollingClient([{ status: 'FAILED' }]);
+    await expect(awaitBulkOperationResultUrl(client, 'gid://1', 'Bulk import')).rejects.toThrow(
+      'Bulk import FAILED.',
+    );
+  });
+});
+
+describe('bulkDeleteByIds', () => {
+  const spec = {
+    mutation: 'mutation productDelete {}',
+    filename: 'bulk_product_delete.jsonl',
+    payloadKey: 'productDelete',
+    deletedIdKey: 'deletedProductId',
+  };
+
+  /** Wire up: stagedUploadsCreate → bulkOperationRunMutation → poll(COMPLETED) → results. */
+  function deleteClient() {
+    return fakeClient(async (q: string) => {
+      if (q.includes('stagedUploadsCreate')) {
+        return {
+          stagedUploadsCreate: {
+            stagedTargets: [
+              { url: 'https://s/u', resourceUrl: 'r', parameters: [{ name: 'key', value: 'k' }] },
+            ],
+            userErrors: [],
+          },
+        };
+      }
+      if (q.includes('bulkOperationRunMutation')) {
+        return {
+          bulkOperationRunMutation: {
+            bulkOperation: { id: 'gid://op', status: 'CREATED' },
+            userErrors: [],
+          },
+        };
+      }
+      return {
+        node: {
+          id: 'gid://op',
+          status: 'COMPLETED',
+          errorCode: null,
+          objectCount: '2',
+          url: 'https://results',
+          partialDataUrl: null,
+        },
+      };
+    });
+  }
+
+  function stubResults(body: string) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) =>
+        String(url).startsWith('https://results')
+          ? ({ status: 200, text: async () => body } as unknown as Response)
+          : ({ status: 204, text: async () => '' } as unknown as Response),
+      ),
+    );
+  }
+
+  it('counts successful deletes and maps failures back to their source id', async () => {
+    stubResults(
+      [
+        JSON.stringify({
+          __lineNumber: 1,
+          data: { productDelete: { deletedProductId: 'gid://p1', userErrors: [] } },
+        }),
+        JSON.stringify({
+          __lineNumber: 2,
+          data: {
+            productDelete: {
+              deletedProductId: null,
+              userErrors: [{ message: 'Product is referenced by an order' }],
+            },
+          },
+        }),
+      ].join('\n'),
+    );
+
+    const out = await bulkDeleteByIds(deleteClient(), ['gid://p1', 'gid://p2'], spec);
+
+    expect(out.deleted).toBe(1);
+    expect(out.errors).toEqual([
+      { id: 'gid://p2', message: 'Product is referenced by an order' },
+    ]);
+  });
+
+  it('treats a line with no mutation payload as a top-level error', async () => {
+    stubResults(JSON.stringify({ __lineNumber: 1, message: 'Invalid global id' }));
+    const out = await bulkDeleteByIds(deleteClient(), ['gid://bad'], spec);
+    expect(out.deleted).toBe(0);
+    expect(out.errors).toEqual([{ id: 'gid://bad', message: 'Invalid global id' }]);
+  });
+
+  it('falls back to a generic message when Shopify rejects with no userErrors', async () => {
+    stubResults(
+      JSON.stringify({
+        __lineNumber: 1,
+        data: { productDelete: { deletedProductId: null, userErrors: [] } },
+      }),
+    );
+    const out = await bulkDeleteByIds(deleteClient(), ['gid://p1'], spec);
+    expect(out.errors).toEqual([{ id: 'gid://p1', message: 'Delete rejected by Shopify.' }]);
+  });
+
+  it('is entity-agnostic: the same engine folds customerDelete payloads', async () => {
+    stubResults(
+      JSON.stringify({
+        __lineNumber: 1,
+        data: { customerDelete: { deletedCustomerId: 'gid://c1', userErrors: [] } },
+      }),
+    );
+    const out = await bulkDeleteByIds(deleteClient(), ['gid://c1'], {
+      mutation: 'mutation customerDelete {}',
+      filename: 'bulk_customer_delete.jsonl',
+      payloadKey: 'customerDelete',
+      deletedIdKey: 'deletedCustomerId',
+    });
+    expect(out).toEqual({ deleted: 1, errors: [] });
   });
 });
 
