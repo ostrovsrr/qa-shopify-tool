@@ -9,41 +9,61 @@ import { getActor, setActor } from '../api/actor';
 // (see api/actor.ts). Presenting it as a sign-in would be a lie about what it does.
 export function ActorBadge(): JSX.Element {
   const [name, setName] = useState(getActor());
-  const [editing, setEditing] = useState(!getActor());
+  // Starts CLOSED even when no name is set. Opening an input inside the nav bar on
+  // first load reads as a login prompt, which is exactly the wrong idea — nothing is
+  // gated on this — and it crowds the header for a value that is entirely optional.
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
 
   const save = (): void => {
-    setActor(name);
+    setActor(draft);
     setName(getActor());
-    if (getActor()) setEditing(false);
+    setEditing(false);
+  };
+
+  const open = (): void => {
+    setDraft(name);
+    setEditing(true);
   };
 
   if (editing) {
     return (
-      <div className="actor-badge">
+      <span className="actor-badge">
         <input
           className="actor-input"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && save()}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') save();
+            if (e.key === 'Escape') setEditing(false);
+          }}
+          onBlur={save}
           placeholder="your name"
           aria-label="Your name, shown on runs you upload"
           autoFocus
         />
-        <button className="btn btn-small" onClick={save} disabled={!name.trim()}>
-          Save
-        </button>
-      </div>
+      </span>
     );
   }
 
   return (
     <button
-      className="actor-badge actor-badge-set"
-      onClick={() => setEditing(true)}
-      title="The name shown on runs you upload. Click to change."
+      className={`actor-badge actor-badge-set ${name ? '' : 'actor-badge-unset'}`}
+      onClick={open}
+      title={
+        name
+          ? `Runs you upload are labelled "${name}". Click to change.`
+          : 'Optional: add your name so colleagues can see who uploaded a run.'
+      }
     >
-      <span className="actor-dot" />
-      {name}
+      {name ? (
+        <>
+          <span className="actor-dot" />
+          {name}
+        </>
+      ) : (
+        'set name'
+      )}
     </button>
   );
 }
