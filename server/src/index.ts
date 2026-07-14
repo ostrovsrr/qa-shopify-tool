@@ -51,6 +51,7 @@ import { resumePendingImports } from './services/importResume.service';
 import { sweepOrphanUploads, uploadStorage } from './services/uploadFile';
 import { errorHandler, requestId } from './middleware/errorHandler';
 import { getActionLog } from './services/actionLog.service';
+import { purgeExpiredPii } from './services/retention.service';
 
 dotenv.config();
 
@@ -197,6 +198,18 @@ if (require.main === module) {
     };
     sweep();
     setInterval(sweep, 30 * 60 * 1000).unref();
+
+    // Retention (D13): the raw uploaded rows are merchant PII and nothing has ever
+    // deleted them. Purge the rows of runs past the window — but never a run whose
+    // import is still in flight, because those rows are what the reconcile rebuilds
+    // the import dataset from. See services/retention.service.ts.
+    const purge = (): void => {
+      void purgeExpiredPii().catch((err: Error) => {
+        console.error('[retention] purge failed:', err.message);
+      });
+    };
+    purge();
+    setInterval(purge, 24 * 60 * 60 * 1000).unref();
   });
 
   // ── Graceful shutdown ─────────────────────────────────────────────────────

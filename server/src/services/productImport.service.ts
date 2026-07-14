@@ -19,6 +19,7 @@ import {
   ShopifyConfigError,
 } from './shopifyClient';
 import { getShopifyConfig } from '../config/shopify';
+import { purgedMessage } from './retention.service';
 import {
   acquireStoreLock,
   acquireStoreLocks,
@@ -446,7 +447,11 @@ export async function startProductImport(
   const locationId = await fetchLocationId(client);
   const { jsonl, lineRefs } = buildProductLines(groups, importRunId, locationId);
   if (lineRefs.length === 0) {
-    return { ok: false, error: 'This upload has no products to import.' };
+    return {
+      ok: false,
+      // See the customer twin — a purged upload is retention, not an empty file.
+      error: upload.piiPurgedAt ? purgedMessage() : 'This upload has no products to import.',
+    };
   }
 
   // ── PRE-PERSIST before the side effect. Same rule as the batch path.
@@ -705,7 +710,11 @@ export async function startBatchProductImport(
 
   const groups = groupsFromOriginalRows(upload.originalRows);
   if (groups.length === 0) {
-    return { ok: false, error: 'This upload has no products to import.' };
+    return {
+      ok: false,
+      // See the customer twin — a purged upload is retention, not an empty file.
+      error: upload.piiPurgedAt ? purgedMessage() : 'This upload has no products to import.',
+    };
   }
 
   const parentId = uuidv4();

@@ -1,6 +1,8 @@
 import { Writable } from 'stream';
 import ExcelJS from 'exceljs';
 import prisma from '../db/prisma';
+import { HttpError } from '../errors';
+import { purgedMessage } from '../services/retention.service';
 import {
   KEEP_COLUMN,
   resolveMappingTarget,
@@ -46,6 +48,11 @@ export async function streamExcelReport(
   });
 
   if (!run) throw new Error(`Validation run "${validationId}" not found.`);
+
+  // The raw rows this report is built FROM were purged for retention (D13). Say so
+  // — a 410 with a sentence beats a workbook full of blanks or a 500 that reads
+  // like a bug the user should report.
+  if (run.piiPurgedAt) throw new HttpError(410, purgedMessage());
 
   // Cast to include JSON fields that Prisma's stale generated types don't yet expose
   const runData = run as typeof run & {

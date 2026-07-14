@@ -52,6 +52,25 @@ function shortId(id: string | undefined): string {
   return (id ?? 'unknown').slice(0, 8);
 }
 
+// ── Log scrub (D13) ─────────────────────────────────────────────────────────
+//
+// The logs are the one place merchant PII leaks by accident rather than by design.
+// Nothing deliberately logs a CSV row — but an error message routinely quotes the
+// value that caused it ("invalid email: jane.doe@acme.com"), and the logs live
+// longer than the data does, outlive the retention purge, and get shipped to
+// whatever the platform's log aggregator is.
+//
+// So the two identifiers we actually handle in bulk are redacted on the way out.
+// This is a backstop, not a licence: do not log user data on purpose.
+const EMAIL_RE = /[\w.+-]+@[\w-]+\.[\w.-]+/g;
+// Deliberately conservative: 9+ digits with optional separators. Loose enough for
+// international numbers, tight enough not to eat row counts or timestamps.
+const PHONE_RE = /\+?\d[\d\s().-]{8,}\d/g;
+
+export function scrub(text: string): string {
+  return text.replace(EMAIL_RE, '[email]').replace(PHONE_RE, '[phone]');
+}
+
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 export function errorHandler(
   err: Error,
@@ -63,8 +82,11 @@ export function errorHandler(
 
   // The full detail goes HERE, where only we can see it. Stack included: it is the
   // whole reason the correlation id is worth having.
-  console.error(`[error] ${shortId(id)} ${req.method} ${req.path} — ${err.message}`);
-  if (err.stack) console.error(err.stack);
+  //
+  // Scrubbed, though: an error message routinely quotes the value that caused it
+  // ("invalid email: jane@acme.com"), and logs outlive the retention purge.
+  console.error(`[error] ${shortId(id)} ${req.method} ${req.path} — ${scrub(err.message)}`);
+  if (err.stack) console.error(scrub(err.stack));
 
   // ── Failures whose message was written for the user ────────────────────────
 

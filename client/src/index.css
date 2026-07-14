@@ -1112,3 +1112,21 @@ body {
   font-size: 13px;
   width: 120px;
 }
+
+/* Who uploaded a run — display only. The workspace is shared; this is a label. */
+.history-actor {
+  font-size: 12px;
+  color: #7a8194;
+  margin-left: 8px;
+}
+/* The raw rows were purged under the retention policy, so the report cannot be
+   rebuilt. Better to say so than to offer a download that 410s. */
+.history-purged {
+  font-size: 11px;
+  color: #8a6d3b;
+  background: #fcf3d9;
+  border-radius: 4px;
+  padding: 1px 6px;
+  margin-left: 8px;
+  cursor: help;
+}

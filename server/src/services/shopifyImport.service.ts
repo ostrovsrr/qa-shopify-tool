@@ -4,6 +4,7 @@ import prisma from '../db/prisma';
 import { buildTemplateDataset } from '../reports/templateDataset';
 import { TemplateRow } from '../reports/mergeDuplicates';
 import { getShopifyConfig } from '../config/shopify';
+import { purgedMessage } from './retention.service';
 import {
   acquireStoreLock,
   acquireStoreLocks,
@@ -271,7 +272,12 @@ export async function startCustomerImport(
   const { jsonl, lineRefs } = buildJsonl(buildImportRows(run), importRunId);
 
   if (lineRefs.length === 0) {
-    return { ok: false, error: 'This validation run has no rows to import.' };
+    return {
+      ok: false,
+      // A purged run has no rows for a reason, and 'no rows to import' would read
+      // like a bug in the upload rather than the retention policy doing its job.
+      error: run.piiPurgedAt ? purgedMessage() : 'This validation run has no rows to import.',
+    };
   }
 
   // ── PRE-PERSIST before the side effect. Same rule as the batch path.
@@ -571,7 +577,12 @@ export async function startBatchImport(
   if (!run) return { notFound: true };
   if (storeIds.length === 0) return { ok: false, error: 'Select at least one store.' };
   if (run.originalRows.length === 0) {
-    return { ok: false, error: 'This validation run has no rows to import.' };
+    return {
+      ok: false,
+      // A purged run has no rows for a reason, and 'no rows to import' would read
+      // like a bug in the upload rather than the retention policy doing its job.
+      error: run.piiPurgedAt ? purgedMessage() : 'This validation run has no rows to import.',
+    };
   }
 
   const parentId = uuidv4();

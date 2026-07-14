@@ -1,6 +1,8 @@
 import { Writable } from 'stream';
 import ExcelJS from 'exceljs';
 import prisma from '../db/prisma';
+import { HttpError } from '../errors';
+import { purgedMessage } from '../services/retention.service';
 import { excelSafeRecord, excelSafeText } from './excelCell';
 
 // Product import report (no validator columns; results keyed by Handle):
@@ -73,6 +75,9 @@ export async function streamProductImportReport(
     include: { rowResults: true, batchJobs: true, uploadRun: true },
   });
   if (!run) throw new Error(`Import run "${importRunId}" not found.`);
+
+  // See excelReport — the source rows were purged for retention (D13).
+  if (run.uploadRun.piiPurgedAt) throw new HttpError(410, purgedMessage());
 
   const originalColumns = Array.isArray(run.uploadRun.originalColumns)
     ? (run.uploadRun.originalColumns as string[])

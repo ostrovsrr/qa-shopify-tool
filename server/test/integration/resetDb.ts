@@ -20,6 +20,7 @@ const ROOTS = [
   'validation_runs',
   'cleanup_runs',
   'store_locks',
+  'action_log',
 ];
 
 export async function resetDb(): Promise<void> {
