@@ -8,6 +8,7 @@ import {
   SHOPIFY_COLUMNS,
 } from '../services/columnMapping.service';
 import { CustomerValidationIssue, Severity } from '../types';
+import { excelSafeRecord, excelSafeText, excelSafeValues } from './excelCell';
 
 // Written with ExcelJS's *streaming* workbook writer: every row is committed
 // (flushed to the output stream and freed) as it's built. This report has seven
@@ -202,7 +203,7 @@ function addSummarySheet(
   const sheet = workbook.addWorksheet('Summary');
   sheet.columns = [{ width: 34 }, { width: 58 }];
 
-  const title = sheet.addRow(['Shopify CSV QA Tool - Shopify Verification Report']);
+  const title = sheet.addRow(excelSafeValues(['Shopify CSV QA Tool - Shopify Verification Report']));
   title.getCell(1).font = { bold: true, size: 14, color: { argb: HEADER_COLOURS.Summary } };
   sheet.addRow([]);
 
@@ -212,7 +213,7 @@ function addSummarySheet(
   const confirmedClean = importRun.rowResults.filter((r) => r.accepted && !r.wasFlaggedByValidator).length;
 
   const kv = (label: string, value: string | number) => {
-    const r = sheet.addRow([label, value]);
+    const r = sheet.addRow(excelSafeValues([label, value]));
     r.getCell(1).font = { bold: true };
   };
 
@@ -237,7 +238,7 @@ function addSummarySheet(
   kv('Confirmed Clean Rows', confirmedClean);
 
   sheet.addRow([]);
-  const header = sheet.addRow(['Bucket', 'Meaning']);
+  const header = sheet.addRow(excelSafeValues(['Bucket', 'Meaning']));
   styleHeader(header, HEADER_COLOURS.Summary);
   const legend: [string, string][] = [
     ['Errors', 'Rows Shopify rejected. These are the highest priority fixes.'],
@@ -246,7 +247,7 @@ function addSummarySheet(
     ['Rows With Shopify Result', 'Full uploaded file plus Shopify status and pre-check issue summary.'],
     ['Shopify Template', 'Mapped Shopify import template plus Shopify result columns.'],
   ];
-  for (const entry of legend) sheet.addRow(entry);
+  for (const entry of legend) sheet.addRow(excelSafeValues(entry));
 
   sheet.commit();
 }
@@ -276,7 +277,7 @@ function addResultSheet(
   ];
 
   sheet.columns = columns.map((col) => ({
-    header: col,
+    header: excelSafeText(col),
     key: col,
     width: col === 'Shopify Message' || col.startsWith('Pre-check') ? 42 : 22,
   }));
@@ -300,7 +301,7 @@ function addResultSheet(
       'Pre-check Suggested Fixes': issueSummary.suggestedFixes,
     };
     for (const col of originalColumns) rowData[col] = original[col] ?? '';
-    const row = sheet.addRow(rowData);
+    const row = sheet.addRow(excelSafeRecord(rowData));
     row.eachCell((cell) => {
       cell.fill = {
         type: 'pattern',
@@ -340,11 +341,11 @@ function addInfoSheet(
   ] as const;
 
   for (const [bucket, rows] of buckets) {
-    sheet.addRow({
+    sheet.addRow(excelSafeRecord({
       bucket,
       count: rows.length,
       rows: rows.map((r) => r.rowNumber).join(', '),
-    });
+    }));
   }
 
   sheet.commit();
@@ -378,13 +379,13 @@ function addRuleGapsSheet(workbook: ExcelJS.stream.xlsx.WorkbookWriter, rowResul
   }
 
   for (const group of [...groups.values()].sort((a, b) => b.rows.length - a.rows.length)) {
-    sheet.addRow({
+    sheet.addRow(excelSafeRecord({
       field: group.field,
       code: group.code,
       count: group.rows.length,
       rows: group.rows.join(', '),
       message: group.messages[0] ?? '',
-    });
+    }));
   }
 
   sheet.commit();
@@ -414,7 +415,7 @@ function addRowsWithShopifyResultSheet(
   ];
 
   sheet.columns = columns.map((col) => ({
-    header: col,
+    header: excelSafeText(col),
     key: col,
     width: col === 'Shopify Message' || col.startsWith('Pre-check') ? 42 : 22,
   }));
@@ -438,7 +439,7 @@ function addRowsWithShopifyResultSheet(
       'Pre-check Issue Types': issueSummary.issueTypes,
     };
     for (const col of originalColumns) rowData[col] = data[col] ?? '';
-    const row = sheet.addRow(rowData);
+    const row = sheet.addRow(excelSafeRecord(rowData));
     if (result) {
       row.getCell(2).fill = {
         type: 'pattern',
@@ -467,7 +468,7 @@ function addFullUploadedFileSheet(
 
   const allColumns = ['Row Number', ...originalColumns];
   sheet.columns = allColumns.map((col) => ({
-    header: col,
+    header: excelSafeText(col),
     key: col,
     width: col === 'Row Number' ? 12 : 22,
   }));
@@ -478,7 +479,7 @@ function addFullUploadedFileSheet(
     const data = origRow.data as Record<string, string>;
     const rowData: Record<string, string | number> = { 'Row Number': origRow.rowNumber };
     for (const col of originalColumns) rowData[col] = data[col] ?? '';
-    sheet.addRow(rowData).commit();
+    sheet.addRow(excelSafeRecord(rowData)).commit();
   }
 
   sheet.commit();
@@ -519,7 +520,7 @@ function addShopifyTemplateSheet(
     ...shopifyColumns,
   ];
   sheet.columns = columns.map((col) => ({
-    header: col,
+    header: excelSafeText(col),
     key: col,
     width: col === 'Shopify Message' ? 42 : 24,
   }));
@@ -544,7 +545,7 @@ function addShopifyTemplateSheet(
     for (const shopifyCol of shopifyColumns) {
       rowData[shopifyCol] = mapped[shopifyCol] ?? '';
     }
-    sheet.addRow(rowData).commit();
+    sheet.addRow(excelSafeRecord(rowData)).commit();
   }
 
   sheet.commit();
