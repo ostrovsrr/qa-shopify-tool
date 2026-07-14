@@ -1,6 +1,7 @@
 import { Writable } from 'stream';
 import ExcelJS from 'exceljs';
 import prisma from '../db/prisma';
+import { excelSafeRecord, excelSafeText } from './excelCell';
 
 // Product import report (no validator columns; results keyed by Handle):
 //   • Summary — run metadata + accepted/rejected (+ per-store for a batch)
@@ -231,7 +232,7 @@ function addProductsSheet(
 
   for (const handle of handles) {
     const result = resultByHandle.get(handle);
-    const row = sheet.addRow({
+    const row = sheet.addRow(excelSafeRecord({
       Handle: handle,
       Title: titleByHandle.get(handle) ?? '',
       Result: result ? (result.accepted ? 'Accepted' : 'Rejected') : 'Not imported',
@@ -240,7 +241,7 @@ function addProductsSheet(
       'Shopify Code': result?.shopifyCode ?? '',
       'Shopify Message': result?.message ?? '',
       Store: result ? shopLabel(result.storeId) : '',
-    });
+    }));
     if (result) {
       row.getCell(3).fill = {
         type: 'pattern',
@@ -292,13 +293,13 @@ function addRejectionsSheet(
   }
 
   for (const g of [...groups.values()].sort((a, b) => b.count - a.count)) {
-    sheet.addRow({
+    sheet.addRow(excelSafeRecord({
       field: g.field,
       code: g.code,
       count: g.count,
       handles: g.handles.join(', '),
       message: g.messages[0] ?? '',
-    }).commit();
+    })).commit();
   }
 
   sheet.commit();
@@ -319,7 +320,7 @@ async function addFullUploadedFileSheet(
 
   const allColumns = ['Row Number', ...originalColumns];
   sheet.columns = allColumns.map((col) => ({
-    header: col,
+    header: excelSafeText(col),
     key: col,
     width: col === 'Row Number' ? 12 : 22,
   }));
@@ -333,7 +334,7 @@ async function addFullUploadedFileSheet(
       const data = (origRow.data ?? {}) as Record<string, string>;
       const rowData: Record<string, string | number> = { 'Row Number': origRow.rowNumber };
       for (const col of originalColumns) rowData[col] = data[col] ?? '';
-      sheet.addRow(rowData).commit();
+      sheet.addRow(excelSafeRecord(rowData)).commit();
       wrote = true;
     }
   }

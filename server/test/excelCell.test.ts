@@ -42,3 +42,38 @@ describe('Excel cell safety', () => {
     expect(safe.accepted).toBe(true);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE TWINS.
+//
+// The original fix landed on shopifyVerificationReport only. The other two report
+// writers take the SAME raw strings — a CSV cell's contents (issue.currentValue),
+// a product Title, and every column of the "Full Uploaded File" sheets — straight
+// from a merchant's file into a worksheet cell. A single oversized value there
+// corrupts the workbook exactly the same way, and Excel does not lose one cell, it
+// makes the user "repair" the whole report.
+//
+// Customers and products are twins: a fix that applies to one applies to both.
+// This asserts every report writer routes user text through the guard, so a new
+// sheet added to one of them without it is caught here rather than by a colleague
+// whose report will not open.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('every report writer guards user text', () => {
+  const REPORTS = [
+    'src/reports/excelReport.ts',
+    'src/reports/productImportReport.ts',
+    'src/reports/shopifyVerificationReport.ts',
+  ];
+
+  it.each(REPORTS)('%s writes user rows through excelSafe*', async (file) => {
+    const fs = await import('fs');
+    const source = fs.readFileSync(file, 'utf8');
+
+    // Rows built from a record of user data must be wrapped.
+    const rowDataWrites = source.match(/addRow\(rowData\)/g) ?? [];
+    expect(rowDataWrites, `${file} passes rowData to addRow unguarded`).toHaveLength(0);
+
+    expect(source).toContain('excelSafe');
+  });
+});

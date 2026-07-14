@@ -8,6 +8,7 @@ import {
 } from '../services/columnMapping.service';
 import { CustomerValidationIssue, Severity } from '../types';
 import { AutoFixEntry, computeAutoFixes } from './autoFix';
+import { excelSafeRecord, excelSafeText } from './excelCell';
 import { buildTemplateDataset } from './templateDataset';
 
 const SEVERITY_COLOURS: Record<Severity, string> = {
@@ -215,7 +216,7 @@ function addIssuesSheet(
 
   const colour = SEVERITY_COLOURS[sheetName === 'Errors' ? 'Error' : sheetName === 'Warnings' ? 'Warning' : 'Info'];
   for (const issue of issues) {
-    const row = sheet.addRow({
+    const row = sheet.addRow(excelSafeRecord({
       rowNumber: issue.rowNumber,
       column: issue.column,
       severity: issue.severity,
@@ -223,7 +224,7 @@ function addIssuesSheet(
       currentValue: issue.currentValue,
       message: issue.message,
       suggestedFix: issue.suggestedFix,
-    });
+    }));
     row.eachCell((cell) => {
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: colour } };
     });
@@ -248,7 +249,7 @@ function addFullUploadedFileSheet(
 
   const allColumns = ['Row Number', ...originalColumns];
   sheet.columns = allColumns.map((col) => ({
-    header: col,
+    header: excelSafeText(col),
     key: col,
     width: col === 'Row Number' ? 12 : 22,
   }));
@@ -262,7 +263,7 @@ function addFullUploadedFileSheet(
     for (const col of originalColumns) {
       rowData[col] = data[col] ?? '';
     }
-    sheet.addRow(rowData).commit();
+    sheet.addRow(excelSafeRecord(rowData)).commit();
   }
 
   sheet.commit();
@@ -394,7 +395,7 @@ function addShopifyTemplateSheet(
       rowData[shopifyCol] = row.record[shopifyCol] ?? '';
     }
 
-    const excelRow = sheet.addRow(rowData);
+    const excelRow = sheet.addRow(excelSafeRecord(rowData));
 
     if (rowFixes) {
       effectiveColumns.forEach((shopifyCol, colIdx) => {
