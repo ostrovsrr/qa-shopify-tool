@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import app from '../../src/index';
 import prisma from '../../src/db/prisma';
@@ -102,26 +102,30 @@ runIf('attribution and the destructive-action log', () => {
   it('a failure to write the audit log does not fail the action', async () => {
     // The log is for forensics. Refusing a delete because the audit insert hiccuped
     // would be a worse outcome than a missing line.
+    //
+    // This used to DROP the action_log table and recreate it, which is a spectacular
+    // way to make the whole suite flaky: any test that ran while the table was gone
+    // — or after a failure that skipped the recreate — died for reasons that had
+    // nothing to do with it. It did exactly that once. Break the WRITE, not the
+    // schema.
     const created = await upload('rodion');
-    await prisma.$executeRawUnsafe('DROP TABLE "action_log"');
+    const spy = vi
+      .spyOn(prisma.actionLog, 'create')
+      .mockRejectedValue(new Error('audit table is on fire'));
 
     try {
       await request(app)
         .delete(`/api/product-upload/${created.body.uploadId}`)
         .expect(200);
+
+      // The delete really happened, even though the audit write did not.
+      const gone = await prisma.productUploadRun.findUnique({
+        where: { id: created.body.uploadId },
+      });
+      expect(gone).toBeNull();
+      expect(spy).toHaveBeenCalled();
     } finally {
-      // Put it back for the next test.
-      await prisma.$executeRawUnsafe(`
-        CREATE TABLE "action_log" (
-          "id" TEXT NOT NULL,
-          "actor" TEXT NOT NULL,
-          "action" TEXT NOT NULL,
-          "target" TEXT NOT NULL,
-          "storeId" TEXT,
-          "detail" JSONB,
-          "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          CONSTRAINT "action_log_pkey" PRIMARY KEY ("id")
-        )`);
+      spy.mockRestore();
     }
   });
 

@@ -93,6 +93,11 @@ export interface StoreCustomerStats {
   shop: string;
   totalCustomers: number;
   qaImportCustomers: number;
+  // True when qaImportCustomers is a FLOOR, not an exact figure. Shopify's
+  // customersCount ignores tag: filters, so counting qa customers means paging the
+  // whole tagged set — 443 round trips and 68 seconds on a store with 110k of them.
+  // The server stops at a cap; render this as "2,500+", never as "2,500".
+  qaImportCapped?: boolean;
 }
 
 // The aggregate of one or more async CleanupRuns (one per store), folded together

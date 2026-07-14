@@ -39,6 +39,9 @@ export interface StoreCustomerStats {
   shop: string;
   totalCustomers: number;
   qaImportCustomers: number;
+  /** True when qaImportCustomers is a floor, not an exact figure (the count was
+   *  stopped at QA_COUNT_CAP). Render it as "2,500+", never as "2,500". */
+  qaImportCapped?: boolean;
 }
 
 export interface CleanupResult {
@@ -84,29 +87,86 @@ async function fetchCustomerIdsByTag(
   return { shop: client.shop, ids };
 }
 
+/**
+ * How many tagged customers there are, giving up after `cap`.
+ *
+ * ── WHY THIS IS CAPPED ───────────────────────────────────────────────────────
+ *
+ * There is no cheap way to count customers by tag. `customersCount` accepts a
+ * `query` but SILENTLY IGNORES a `tag:` term — verified against a real store, where
+ * `tag:'qa-import'` AND `-tag:'qa-import'` both returned the full 110,620. (The
+ * product API is not like this: productsCount(query:) honours the tag, which is why
+ * the product twin needs none of this.)
+ *
+ * So the only way to count is to page the tag-aware `customers` connection, 250 at a
+ * time. On a store with 110,619 qa customers that is 443 SEQUENTIAL round trips and
+ * it took SIXTY-EIGHT SECONDS — during which the store panel showed "Total customers:
+ * —" and the "Clean QA" button did nothing.
+ *
+ * Nobody needs the exact figure. The number answers two questions: is this store
+ * dirty, and roughly how badly. "2,500+" answers both, in about a second. The cleanup
+ * itself still fetches EVERY id (fetchCustomerIdsByTag, uncapped) and deletes all of
+ * them, so the cap changes what we DISPLAY, never what we DELETE.
+ */
+async function countCustomersByTag(
+  storeId: string | undefined,
+  tag: string,
+  cap: number,
+): Promise<{ shop: string; count: number; capped: boolean }> {
+  const client = await getShopifyClient(storeId);
+  let count = 0;
+  let cursor: string | null = null;
+
+  do {
+    const data: CustomerPage = await client.query<CustomerPage>(
+      `query taggedCustomers($query: String!, $after: String) {
+        customers(first: 250, after: $after, query: $query) {
+          nodes { id }
+          pageInfo { hasNextPage endCursor }
+        }
+      }`,
+      { query: tagQuery(tag), after: cursor },
+    );
+
+    count += data.customers.nodes.length;
+    if (count >= cap) return { shop: client.shop, count: cap, capped: true };
+
+    cursor = data.customers.pageInfo.hasNextPage
+      ? data.customers.pageInfo.endCursor
+      : null;
+  } while (cursor);
+
+  return { shop: client.shop, count, capped: false };
+}
+
+/** 10 pages. Enough to say "this store is full of junk", cheap enough to say it fast. */
+export const QA_COUNT_CAP = 2_500;
+
 export async function getStoreCustomerStats(
   storeId?: string,
 ): Promise<StoreCustomerStats> {
   const client = await getShopifyClient(storeId);
-  // The qa count MUST be derived the same way cleanup finds rows (the tag-aware
-  // `customers` connection): customersCount's `query` only supports created_at/id/
-  // updated_at and silently IGNORES a `tag:` term, so it would return the total and
-  // make the count disagree with what "Clean QA" actually deletes. Total has no tag
-  // filter, so the single customersCount is correct (and fast) for it.
-  const [totalData, qaData] = await Promise.all([
+
+  // Total is a single cheap query (no tag filter, so customersCount is correct here).
+  // The qa count is paged and CAPPED — see countCustomersByTag for why it cannot be a
+  // count query and why we stop early.
+  const [totalData, qa] = await Promise.all([
     client.query<{ customersCount: { count: number } }>(
       `query customerCount {
         customersCount(limit: null) { count }
       }`,
     ),
-    fetchCustomerIdsByTag(storeId, QA_IMPORT_TAG),
+    countCustomersByTag(storeId, QA_IMPORT_TAG, QA_COUNT_CAP),
   ]);
 
   return {
     storeId,
     shop: client.shop,
     totalCustomers: totalData.customersCount.count,
-    qaImportCustomers: qaData.ids.length,
+    qaImportCustomers: qa.count,
+    // "there are at least this many" — the UI renders 2,500+ rather than a number
+    // that would be a lie.
+    qaImportCapped: qa.capped,
   };
 }
 

@@ -1144,3 +1144,13 @@ body {
   margin-left: 8px;
   cursor: help;
 }
+
+/* Store picker: the QA count on each chip. The point of the picker is to see which
+   store is dirty BEFORE committing an import to it. */
+.store-chip-stats {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: #8b93a3;
+}
+.store-chip.active .store-chip-stats { color: #5b6dfa; }
