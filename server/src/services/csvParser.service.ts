@@ -1,6 +1,7 @@
 import fs from 'fs';
 import { Readable } from 'stream';
 import { parse } from 'csv-parse';
+import { CsvParseError } from '../errors';
 import { CustomerCsvRow } from '../types';
 import { isRowFullyEmpty, normalizeRecord } from '../utils/normalize';
 
@@ -47,8 +48,17 @@ async function parseCsvStream(input: Readable): Promise<ParsedCsv> {
   const records: Record<string, string>[] = [];
   const parser = input.pipe(parse(PARSE_OPTIONS));
 
-  for await (const record of parser) {
-    records.push(record as Record<string, string>);
+  try {
+    for await (const record of parser) {
+      records.push(record as Record<string, string>);
+    }
+  } catch (err) {
+    // A malformed CSV is the USER's problem and they can fix it — but only if we
+    // tell them what it is. csv-parse says things like "Quote Not Closed: ... at
+    // line 2", which is about their file and nothing about our server, so it is
+    // safe (and genuinely useful) to pass on. Without this it would fall through to
+    // the generic 500 and they would be told nothing at all.
+    throw new CsvParseError((err as Error).message);
   }
 
   return toRows(records);

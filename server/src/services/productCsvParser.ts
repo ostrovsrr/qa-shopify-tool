@@ -1,6 +1,7 @@
 import fs from 'fs';
 import { Readable } from 'stream';
 import { parse } from 'csv-parse';
+import { CsvParseError } from '../errors';
 import { ParsedProductCsv, ProductCsvRow, ProductGroup } from '../types';
 import { isRowFullyEmpty, normalizeRecord } from '../utils/normalize';
 
@@ -91,8 +92,14 @@ async function parseProductCsvStream(input: Readable): Promise<ParsedProductCsv>
   const records: Record<string, string>[] = [];
   const parser = input.pipe(parse(PARSE_OPTIONS));
 
-  for await (const record of parser) {
-    records.push(record as Record<string, string>);
+  try {
+    for await (const record of parser) {
+      records.push(record as Record<string, string>);
+    }
+  } catch (err) {
+    // See csvParser.service.ts — a malformed CSV is the user's to fix, so tell them
+    // what is wrong with it rather than hiding it behind a generic 500.
+    throw new CsvParseError((err as Error).message);
   }
 
   return toParsed(records);

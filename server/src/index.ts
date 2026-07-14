@@ -1,6 +1,6 @@
 import cors from 'cors';
 import dotenv from 'dotenv';
-import express, { NextFunction, Request, Response } from 'express';
+import express from 'express';
 import multer from 'multer';
 import {
   deleteValidationHandler,
@@ -49,6 +49,7 @@ import {
 import prisma from './db/prisma';
 import { resumePendingImports } from './services/importResume.service';
 import { sweepOrphanUploads, uploadStorage } from './services/uploadFile';
+import { errorHandler, requestId } from './middleware/errorHandler';
 
 dotenv.config();
 
@@ -64,6 +65,9 @@ app.use(
   }),
 );
 app.use(express.json());
+
+// Tag every request, so a "it broke" from a colleague can be found in the log.
+app.use(requestId);
 
 // ── File upload ─────────────────────────────────────────────────────────────
 
@@ -143,20 +147,11 @@ app.post('/api/product-import/:id/cleanup', cleanupProductImportRunHandler);
 app.get('/api/product-import/:id', getProductImportHandler);
 
 // ── Error handler ───────────────────────────────────────────────────────────
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
-  console.error('[Error]', err.message);
-  if (err instanceof multer.MulterError) {
-    if (err.code === 'LIMIT_FILE_SIZE') {
-      res.status(413).json({ error: 'File is too large. The maximum upload size is 100 MB.' });
-      return;
-    }
-    res.status(400).json({ error: err.message });
-    return;
-  }
-  res.status(500).json({ error: err.message ?? 'Internal server error.' });
-});
+//
+// Generic 500 + a correlation id. The old handler returned err.message straight to
+// the browser, which in this app can carry the DATABASE_URL (password included), a
+// Shopify token, file paths, or SQL. See middleware/errorHandler.ts.
+app.use(errorHandler);
 
 // ── Start ───────────────────────────────────────────────────────────────────
 
