@@ -1,7 +1,11 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
 import prisma from '../../src/db/prisma';
-import { reconcileImportRun, startBatchImport } from '../../src/services/shopifyImport.service';
+import {
+  reconcileImportRun,
+  startBatchImport,
+  startCustomerImport,
+} from '../../src/services/shopifyImport.service';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // THE CUSTOMER HALF of the batch-rollup regression suite.
@@ -196,5 +200,18 @@ runIf('startBatchImport — every job is on disk before Shopify is touched', () 
     // The batch parent's storeId stays NULL: it spans many stores.
     const parent = await prisma.importRun.findUniqueOrThrow({ where: { id: importRunId } });
     expect(parent.storeId).toBeNull();
+  });
+
+  // The single-store path has the same rule. It used to submit the bulk op and
+  // THEN create the run row; a crash in between left customers landing in a real
+  // store with no DB row, tagged with an importRunId that existed only in memory.
+  // (The ordering itself is proven in prePersistOrdering.test.ts.)
+  it('single-store: an unreachable store leaves no orphan run behind', async () => {
+    const validationId = await seedValidation();
+
+    await expect(startCustomerImport(validationId, 'store1')).rejects.toThrow(/configured/i);
+
+    const runs = await prisma.importRun.findMany({ where: { validationId } });
+    expect(runs).toHaveLength(0);
   });
 });

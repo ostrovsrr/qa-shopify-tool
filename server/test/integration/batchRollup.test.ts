@@ -1,7 +1,11 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
 import prisma from '../../src/db/prisma';
-import { reconcileProductImportRun, startBatchProductImport } from '../../src/services/productImport.service';
+import {
+  reconcileProductImportRun,
+  startBatchProductImport,
+  startProductImport,
+} from '../../src/services/productImport.service';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // THE REGRESSION SUITE FOR THE BUG THAT MAKES THE TOOL LIE.
@@ -210,5 +214,24 @@ runIf('startBatchProductImport — every job is on disk before Shopify is touche
       where: { id: importRunId },
     });
     expect(parent.storeId).toBeNull();
+  });
+
+  // ── THE SINGLE-STORE PATH HAS THE SAME RULE ────────────────────────────────
+  // It used to submit the bulk op to Shopify and THEN create the run row. A crash
+  // in between left products landing in a real store with no DB row at all: the
+  // run invisible, the products tagged with an importRunId that existed only in
+  // memory, so the run-scoped cleanup could never find them.
+  //
+  // Never take a side effect you have not recorded.
+  it('single-store: refuses to submit before the run row exists', async () => {
+    const uploadId = await seedUpload();
+
+    // Shopify is unreachable here (setEnv strips SHOPIFY_*), so the launch fails
+    // at getShopifyClient — BEFORE any bulk op could be submitted. Nothing is
+    // created in any store, and no orphan run is left behind.
+    await expect(startProductImport(uploadId, 'store1')).rejects.toThrow(/configured/i);
+
+    const runs = await prisma.productImportRun.findMany({ where: { uploadId } });
+    expect(runs).toHaveLength(0);
   });
 });

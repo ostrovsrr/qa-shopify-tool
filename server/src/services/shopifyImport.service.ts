@@ -261,22 +261,47 @@ export async function startCustomerImport(
     return { ok: false, error: 'This validation run has no rows to import.' };
   }
 
-  // Queue the op (seconds-scale); do NOT wait for it to finish here.
-  const stagedPath = await stagedUpload(client, jsonl, 'bulk_customers.jsonl');
-  const bulkOpId = await runBulkMutation(client, CUSTOMER_CREATE_MUTATION, stagedPath);
-
+  // ── PRE-PERSIST before the side effect. Same rule as the batch path.
+  //
+  //    The bulk op creates real customers in a real store. Submitting it before
+  //    the run row exists means a crash in between leaves the op RUNNING on
+  //    Shopify with NO database row at all: the user sees nothing happened, while
+  //    customers land in the store tagged qa-import-<importRunId> — an id that
+  //    only ever existed in memory. Untracked, unreconcilable, and invisible to
+  //    the run-scoped cleanup.
+  //
+  //    Never take a side effect you have not recorded. The row goes down first,
+  //    as PENDING; the op id lands on it the moment Shopify hands one back.
   await prisma.importRun.create({
     data: {
       id: importRunId,
       validationId,
       storeId: storeId ?? null,
-      shopDomain: health.shop ?? '',
-      bulkOperationId: bulkOpId,
-      status: 'RUNNING',
+      shopDomain: health.shop ?? shopDomainFor(storeId ?? ''),
+      bulkOperationId: null,
+      status: 'PENDING',
       successCount: 0,
       errorCount: 0,
     },
   });
+
+  try {
+    // Queue the op (seconds-scale); do NOT wait for it to finish here.
+    const stagedPath = await stagedUpload(client, jsonl, 'bulk_customers.jsonl');
+    const bulkOpId = await runBulkMutation(client, CUSTOMER_CREATE_MUTATION, stagedPath);
+
+    await prisma.importRun.update({
+      where: { id: importRunId },
+      data: { status: 'RUNNING', bulkOperationId: bulkOpId },
+    });
+  } catch (err) {
+    const message = (err as Error).message;
+    await prisma.importRun.update({
+      where: { id: importRunId },
+      data: { status: 'FAILED', error: message },
+    });
+    return { ok: false, error: message };
+  }
 
   return { ok: true, importRunId };
 }
