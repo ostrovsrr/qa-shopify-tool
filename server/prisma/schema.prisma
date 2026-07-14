@@ -49,12 +49,23 @@ model ImportRun {
   // Null for a batch parent (the bulk ops live on its ImportBatchJob children);
   // set for a normal single-store run.
   bulkOperationId String?
-  // RUNNING (start persisted, bulk op queued) → COMPLETED | FAILED | CANCELED | EXPIRED
+  // PENDING (row written, bulk op NOT yet submitted) → RUNNING (op queued) →
+  // COMPLETED | FAILED | CANCELED | EXPIRED.
+  //
+  // PENDING exists so we never take a side effect we have not recorded: the row
+  // lands BEFORE the bulk op is submitted. A crash in between therefore leaves a
+  // PENDING row (recoverable) instead of an untracked bulk op creating real
+  // records in a real store with no trace of the run.
   status          String            @default("RUNNING")
   // Failure reason for the terminal error states; null while RUNNING/COMPLETED.
   error           String?
   successCount    Int               @default(0)
   errorCount      Int               @default(0)
+  // Set when resume-on-boot takes ownership of a PENDING row, so two overlapping
+  // boots (a rolling deploy) cannot work the same row twice. A claim older than
+  // the stale threshold is reclaimable — otherwise a process killed mid-claim
+  // would strand the row forever, trading a wrong answer for a permanent hang.
+  claimedAt       DateTime?
   createdAt       DateTime          @default(now())
 
   validationRun ValidationRun     @relation(fields: [validationId], references: [id], onDelete: Cascade)
@@ -77,6 +88,11 @@ model ImportBatchJob {
   batchCount      Int
   // Null when the job failed to even start (e.g. store unhealthy at launch).
   bulkOperationId String?
+  // PENDING (row written, bulk op NOT yet submitted) → RUNNING → terminal.
+  // ALL jobs in a batch are written as PENDING in the parent's transaction before
+  // the fan-out starts. PENDING is not terminal, so an unstarted job holds the
+  // parent's rollup open — that is what stops a crash mid-fan-out from reporting
+  // a successful import of stores that never received anything.
   status          String   @default("RUNNING")
   error           String?
   rowCount        Int      @default(0)
@@ -85,6 +101,8 @@ model ImportBatchJob {
   // Times the reconcile poll has checked this job while non-terminal; a stuck job
   // (perma-RUNNING or repeatedly erroring) is failed once it exceeds the max.
   pollAttempts    Int      @default(0)
+  // See ImportRun.claimedAt.
+  claimedAt       DateTime?
   createdAt       DateTime @default(now())
 
   importRun ImportRun @relation(fields: [importRunId], references: [id], onDelete: Cascade)
@@ -183,12 +201,16 @@ model ProductImportRun {
   // Null for a batch parent (the bulk ops live on its ProductImportJob children);
   // set for a normal single-store run.
   bulkOperationId String?
-  // RUNNING (start persisted, bulk op queued) → COMPLETED | FAILED | CANCELED | EXPIRED
+  // PENDING (row written, bulk op NOT yet submitted) → RUNNING (op queued) →
+  // COMPLETED | FAILED | CANCELED | EXPIRED. See ImportRun.status — the customer
+  // and product flows are twins and share this state machine.
   status       String  @default("RUNNING")
   // Failure reason for the terminal error states; null while RUNNING/COMPLETED.
   error        String?
   successCount Int     @default(0)
   errorCount   Int     @default(0)
+  // See ImportRun.claimedAt.
+  claimedAt    DateTime?
   createdAt    DateTime @default(now())
 
   uploadRun  ProductUploadRun      @relation(fields: [uploadId], references: [id], onDelete: Cascade)
@@ -212,6 +234,9 @@ model ProductImportJob {
   batchCount      Int
   // Null when the job failed to even start (e.g. store unhealthy at launch).
   bulkOperationId String?
+  // PENDING → RUNNING → terminal. See ImportBatchJob.status: all jobs are written
+  // as PENDING in the parent's transaction before the fan-out, so an unstarted job
+  // holds the parent's rollup open and a partial fan-out cannot claim success.
   status          String  @default("RUNNING")
   error           String?
   // Counted in products, not CSV rows.
@@ -221,6 +246,8 @@ model ProductImportJob {
   // Times the reconcile poll has checked this job while non-terminal; a stuck job
   // (perma-RUNNING or repeatedly erroring) is failed once it exceeds the max.
   pollAttempts    Int     @default(0)
+  // See ImportRun.claimedAt.
+  claimedAt       DateTime?
   createdAt       DateTime @default(now())
 
   importRun ProductImportRun @relation(fields: [importRunId], references: [id], onDelete: Cascade)

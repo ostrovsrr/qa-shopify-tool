@@ -45,6 +45,8 @@ import {
   runBatchImportHandler as runProductBatchImportHandler,
   runImportHandler as runProductImportHandler,
 } from './controllers/productImport.controller';
+import prisma from './db/prisma';
+import { resumePendingImports } from './services/importResume.service';
 
 dotenv.config();
 
@@ -150,9 +152,53 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
 // imported — e.g. by Supertest in integration tests — skip listen so no port
 // is occupied and the process can exit cleanly.
 if (require.main === module) {
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     console.log(`Server listening on http://localhost:${PORT}`);
+
+    // Finish what the last process started. An import that was interrupted
+    // mid-flight (a redeploy, a crash, an OOM) left PENDING rows behind: the row
+    // is on disk but we have no bulk-operation id for it. resumePendingImports
+    // resolves each one — adopting the operation if it actually reached Shopify,
+    // relaunching it if it never did.
+    //
+    // Without this, the pre-persist fix would merely trade a wrong answer for a
+    // permanent hang: the run stops lying, but it also never finishes.
+    //
+    // Deliberately not awaited — a slow or unreachable store must not stop the
+    // server from serving. Failures are logged and the rows stay claimable.
+    resumePendingImports().catch((err: Error) => {
+      console.error('[resume] failed to resume pending imports:', err.message);
+    });
   });
+
+  // ── Graceful shutdown ─────────────────────────────────────────────────────
+  //
+  // The platform sends SIGTERM and then kills the process a few seconds later.
+  // Without a handler, an in-flight import is severed mid-write. We stop taking
+  // new connections and let the current work drain; anything still unfinished is
+  // already durable as a PENDING row and gets picked up by resume on the next
+  // boot. That is the whole point of writing the row before the side effect.
+  const shutdown = (signal: string): void => {
+    console.log(`[shutdown] ${signal} received — draining in-flight requests`);
+    server.close(() => {
+      void prisma
+        .$disconnect()
+        .catch(() => undefined)
+        .finally(() => {
+          console.log('[shutdown] clean');
+          process.exit(0);
+        });
+    });
+
+    // Do not hang forever if a connection refuses to drain.
+    setTimeout(() => {
+      console.error('[shutdown] drain timed out — exiting anyway');
+      process.exit(1);
+    }, 10_000).unref();
+  };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
 export default app;

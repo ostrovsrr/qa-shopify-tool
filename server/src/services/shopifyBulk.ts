@@ -131,6 +131,35 @@ export interface BulkOperationState {
   partialDataUrl: string | null;
 }
 
+/** A bulk op plus when Shopify created it. The timestamp is what lets resume decide
+ *  whether the shop's current operation is the one a crashed job submitted. */
+export interface CurrentBulkOperation extends BulkOperationState {
+  createdAt: string;
+}
+
+/**
+ * The shop's most recent MUTATION bulk operation, or null if it has never run one.
+ *
+ * This is the key to safe crash recovery. Shopify allows exactly ONE bulk operation
+ * per shop, so if a job died between submitting its op and persisting the returned
+ * id, that op is still the shop's current one. Resume ADOPTS it (see
+ * importResume.service.ts) instead of submitting a second — which would just fail
+ * against the per-shop limit (see runBulkMutation's "already in progress" path) or,
+ * worse, duplicate a merchant's import.
+ */
+export async function fetchCurrentBulkOperation(
+  client: ShopifyClient,
+): Promise<CurrentBulkOperation | null> {
+  const data = await client.query<{ currentBulkOperation: CurrentBulkOperation | null }>(
+    `query currentBulk {
+      currentBulkOperation(type: MUTATION) {
+        id status errorCode objectCount url partialDataUrl createdAt
+      }
+    }`,
+  );
+  return data.currentBulkOperation ?? null;
+}
+
 // Single-shot poll: the async model advances one step per reconcile call instead
 // of blocking an HTTP request in a multi-minute loop.
 export async function fetchBulkOperationState(

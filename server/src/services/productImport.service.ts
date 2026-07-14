@@ -19,6 +19,13 @@ import {
   ShopifyConfigError,
 } from './shopifyClient';
 import { getShopifyConfig } from '../config/shopify';
+import {
+  adoptRow,
+  claimRow,
+  failRow,
+  findResumableRows,
+  ResumableStore,
+} from './importResume.service';
 import { getProductImportFeedback, ProductImportFeedback } from './productFeedback.service';
 import { cleanupProductsByTag, CleanupResult } from './productCleanup.service';
 import { normalizeRecord } from '../utils/normalize';
@@ -458,14 +465,7 @@ export async function startProductImport(
   });
 
   try {
-    // Queue the op (seconds-scale); do NOT wait for it to finish here.
-    const stagedPath = await stagedUpload(client, jsonl, 'bulk_products.jsonl');
-    const bulkOpId = await runBulkMutation(client, PRODUCT_SET_MUTATION, stagedPath);
-
-    await prisma.productImportRun.update({
-      where: { id: importRunId },
-      data: { status: 'RUNNING', bulkOperationId: bulkOpId },
-    });
+    await submitSingleStoreRun(importRunId, client, jsonl);
   } catch (err) {
     const message = (err as Error).message;
     await prisma.productImportRun.update({
@@ -476,6 +476,27 @@ export async function startProductImport(
   }
 
   return { ok: true, importRunId };
+}
+
+/**
+ * Submit a pre-persisted single-store run's bulk op and record its id.
+ *
+ * Shared by the first launch and by resume-on-boot, so a relaunched run takes the
+ * exact same path as an original one — no second implementation to drift.
+ */
+async function submitSingleStoreRun(
+  importRunId: string,
+  client: Awaited<ReturnType<typeof getShopifyClient>>,
+  jsonl: string,
+): Promise<void> {
+  // Queue the op (seconds-scale); do NOT wait for it to finish here.
+  const stagedPath = await stagedUpload(client, jsonl, 'bulk_products.jsonl');
+  const bulkOpId = await runBulkMutation(client, PRODUCT_SET_MUTATION, stagedPath);
+
+  await prisma.productImportRun.update({
+    where: { id: importRunId },
+    data: { status: 'RUNNING', bulkOperationId: bulkOpId },
+  });
 }
 
 // ── reconcile (advances at most one step) ────────────────────────────────────
@@ -940,4 +961,92 @@ async function finalizeCompletedJob(
     // Large runs need far more than the 5s interactive-transaction default.
     { timeout: 120_000, maxWait: 10_000 },
   );
+}
+
+// ── crash recovery (resume-on-boot) ──────────────────────────────────────────
+//
+// A PENDING row means "we wrote the row but have no bulk op id for it" — the
+// process died between the two. importResume decides, per row, whether the op was
+// actually submitted (adopt it) or never reached Shopify (relaunch it). These two
+// stores hand it the product-flow plumbing; shopifyImport exports the customer
+// twins.
+
+/**
+ * Relaunch a batch job whose op never reached Shopify.
+ *
+ * The slice is NOT stored — it is recomputed from (batchIndex, batchCount) via
+ * splitIntoBatches, which is deterministic over the same asc-ordered products.
+ * That determinism (pinned by test/shopifyBulk.test.ts) is exactly what makes
+ * resume possible without persisting every job's product list.
+ */
+async function relaunchProductJob(jobId: string): Promise<void> {
+  const job = await prisma.productImportJob.findUnique({
+    where: { id: jobId },
+    include: { importRun: { include: { uploadRun: { include: { originalRows: { orderBy: { rowNumber: 'asc' } } } } } } },
+  });
+  if (!job) return;
+  if (!job.storeId) {
+    await prisma.productImportJob.updateMany({
+      where: { id: jobId, status: 'PENDING' },
+      data: { status: 'FAILED', error: 'Cannot resume: job has no store.' },
+    });
+    return;
+  }
+
+  const groups = groupsFromOriginalRows(job.importRun.uploadRun.originalRows);
+  const batch = splitIntoBatches(groups, job.batchCount)[job.batchIndex] ?? [];
+  if (batch.length === 0) {
+    await prisma.productImportJob.updateMany({
+      where: { id: jobId, status: 'PENDING' },
+      data: { status: 'FAILED', error: 'Cannot resume: no products in this batch slice.' },
+    });
+    return;
+  }
+
+  // Same path as the original launch — no second implementation to drift.
+  await launchBatchJob(jobId, job.storeId, batch, job.importRunId);
+}
+
+/** Relaunch a single-store run whose op never reached Shopify. */
+async function relaunchProductRun(runId: string): Promise<void> {
+  const run = await prisma.productImportRun.findUnique({
+    where: { id: runId },
+    include: { uploadRun: { include: { originalRows: { orderBy: { rowNumber: 'asc' } } } } },
+  });
+  if (!run) return;
+
+  const client = await getShopifyClient(run.storeId ?? undefined);
+  const groups = groupsFromOriginalRows(run.uploadRun.originalRows);
+  const locationId = await fetchLocationId(client);
+  const { jsonl, lineRefs } = buildProductLines(groups, runId, locationId);
+  if (lineRefs.length === 0) {
+    await prisma.productImportRun.updateMany({
+      where: { id: runId, status: 'PENDING' },
+      data: { status: 'FAILED', error: 'Cannot resume: this upload has no products to import.' },
+    });
+    return;
+  }
+
+  await submitSingleStoreRun(runId, client, jsonl);
+}
+
+export function productResumableStores(): ResumableStore[] {
+  return [
+    {
+      label: 'product-run',
+      findResumable: (staleBefore) => findResumableRows(prisma.productImportRun as never, staleBefore),
+      claim: (id, staleBefore) => claimRow(prisma.productImportRun as never, id, staleBefore),
+      adopt: (id, bulkOperationId) => adoptRow(prisma.productImportRun as never, id, bulkOperationId),
+      relaunch: relaunchProductRun,
+      fail: (id, error) => failRow(prisma.productImportRun as never, id, error),
+    },
+    {
+      label: 'product-job',
+      findResumable: (staleBefore) => findResumableRows(prisma.productImportJob as never, staleBefore),
+      claim: (id, staleBefore) => claimRow(prisma.productImportJob as never, id, staleBefore),
+      adopt: (id, bulkOperationId) => adoptRow(prisma.productImportJob as never, id, bulkOperationId),
+      relaunch: relaunchProductJob,
+      fail: (id, error) => failRow(prisma.productImportJob as never, id, error),
+    },
+  ];
 }
