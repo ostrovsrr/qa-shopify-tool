@@ -2,15 +2,13 @@ import { Writable } from 'stream';
 import ExcelJS from 'exceljs';
 import prisma from '../db/prisma';
 import {
-  applyMappingToRecord,
   KEEP_COLUMN,
   resolveMappingTarget,
   SHOPIFY_COLUMNS,
 } from '../services/columnMapping.service';
 import { CustomerValidationIssue, Severity } from '../types';
-import { canonicalPhone } from '../utils/normalize';
 import { AutoFixEntry, computeAutoFixes } from './autoFix';
-import { mergeMatchingDuplicateRows, TemplateRow } from './mergeDuplicates';
+import { buildTemplateDataset } from './templateDataset';
 
 const SEVERITY_COLOURS: Record<Severity, string> = {
   Error: 'FFFEE2E2',
@@ -272,8 +270,6 @@ function addFullUploadedFileSheet(
 
 const AUTO_FIX_GREEN = 'FFD1FAE5';
 
-const HELIOS_TAG = 'HeliosMigrated';
-
 function addShopifyTemplateSheet(
   workbook: ExcelJS.stream.xlsx.WorkbookWriter,
   columnMapping: Record<string, string>,
@@ -302,92 +298,17 @@ function addShopifyTemplateSheet(
   const effectiveColumns: string[] =
     heliosMigratedTag && !tagsAlreadyMapped ? [...shopifyColumns, 'Tags'] : [...shopifyColumns];
 
-  // Build fix lookup: rowNumber → shopify column → fixed value
-  const fixMap = new Map<number, Map<string, string>>();
-  for (const fix of autoFixes) {
-    if (!fixMap.has(fix.rowNumber)) fixMap.set(fix.rowNumber, new Map());
-    fixMap.get(fix.rowNumber)!.set(fix.field, fix.fixedValue);
-  }
-
-  // Build one Shopify-column-keyed record per row up front (mapped values with
-  // auto-fixes applied), so the optional merge pass and duplicate detection
-  // both see final values. Only mapped source columns contribute; unmapped
-  // columns are ignored.
-  let templateRows: TemplateRow[] = originalRows.map((origRow) => {
-    const data = origRow.data as Record<string, string>;
-    const mappedSources: Record<string, string> = {};
-    for (const src of Object.keys(columnMapping)) mappedSources[src] = data[src] ?? '';
-    const record = applyMappingToRecord(mappedSources, columnMapping);
-    const fixes = fixMap.get(origRow.rowNumber);
-    if (fixes) for (const [field, value] of fixes) record[field] = value;
-    return { rowNumber: origRow.rowNumber, record, mergedFrom: [] };
+  // The transformation itself (mapping + auto-fixes + optional merge +
+  // move-to-Notes + Helios tag) is shared with the test-store import so what
+  // gets imported is exactly what this sheet shows.
+  const { rows: templateRows, emailDupes, phoneDupes, anyMerges, fixMap } = buildTemplateDataset({
+    originalRows,
+    columnMapping,
+    autoFixes,
+    heliosMigratedTag,
+    moveDuplicatesToNotes,
+    mergeMatchingDuplicates,
   });
-
-  // Merge same-person duplicates (same email/phone AND matching non-empty
-  // name) before duplicate handling, so fully-merged groups stop being
-  // duplicates and move-to-Notes only deals with what remains.
-  if (mergeMatchingDuplicates) {
-    templateRows = mergeMatchingDuplicateRows(templateRows);
-  }
-  const anyMerges = templateRows.some((row) => row.mergedFrom.length > 0);
-
-  // Completeness score per surviving row (recomputed after merging, since a
-  // merged keeper absorbs fields). Used to pick which row of a duplicate group
-  // keeps its email/phone when moving duplicates to Note.
-  const completeness = new Map<number, number>();
-  for (const row of templateRows) {
-    completeness.set(
-      row.rowNumber,
-      Object.values(row.record).filter((v) => (v ?? '').trim() !== '').length,
-    );
-  }
-
-  // Assign duplicate-group numbers per surviving row, grouped by a Shopify
-  // field's value. Matches the DuplicateEmail/DuplicatePhone validator
-  // normalization so the report stays consistent. `groups` maps rowNumber →
-  // group # (only for duplicates); `repeats` holds every group row except the
-  // keeper (the most-filled record, ties broken by earliest row) — those are
-  // the rows whose duplicated value is moved to Note when the option is on.
-  const buildDuplicateGroups = (
-    field: string,
-    normalize: (value: string) => string,
-  ): { groups: Map<number, number>; repeats: Set<number> } => {
-    const groups = new Map<number, number>();
-    const repeats = new Set<number>();
-
-    const order: string[] = [];
-    const byValue = new Map<string, number[]>();
-    for (const row of templateRows) {
-      const normalized = normalize(row.record[field] ?? '');
-      if (!normalized) continue;
-      if (!byValue.has(normalized)) {
-        byValue.set(normalized, []);
-        order.push(normalized);
-      }
-      byValue.get(normalized)!.push(row.rowNumber);
-    }
-
-    let groupNumber = 0;
-    for (const value of order) {
-      const rowNumbers = byValue.get(value)!;
-      if (rowNumbers.length < 2) continue;
-      groupNumber++;
-      let keeper = rowNumbers[0];
-      for (const rowNumber of rowNumbers) {
-        if ((completeness.get(rowNumber) ?? 0) > (completeness.get(keeper) ?? 0)) {
-          keeper = rowNumber;
-        }
-      }
-      for (const rowNumber of rowNumbers) {
-        groups.set(rowNumber, groupNumber);
-        if (rowNumber !== keeper) repeats.add(rowNumber);
-      }
-    }
-    return { groups, repeats };
-  };
-
-  const emailDupes = buildDuplicateGroups('Email', (v) => v.trim().toLowerCase());
-  const phoneDupes = buildDuplicateGroups('Phone', canonicalPhone);
   const emailGroups = emailDupes.groups;
   const phoneGroups = phoneDupes.groups;
 
@@ -467,47 +388,10 @@ function addShopifyTemplateSheet(
       rowData[errorKey(type)] = rowErrorTypes?.has(type) ? 'X' : '';
     }
 
+    // Records are final (move-to-Notes / Helios tag already applied by
+    // buildTemplateDataset) — just emit them.
     for (const shopifyCol of effectiveColumns) {
       rowData[shopifyCol] = row.record[shopifyCol] ?? '';
-    }
-
-    // Strip the duplicated identifier from every group row except the keeper
-    // (most-filled record) and stash it in Note, so Shopify accepts the
-    // customer instead of rejecting it as "taken". Only the duplicated field
-    // is stripped — a row that's only an email duplicate keeps its phone, and
-    // vice versa.
-    if (moveDuplicatesToNotes) {
-      const moved: string[] = [];
-      const dupTags: string[] = [];
-      if (emailDupes.repeats.has(row.rowNumber)) {
-        const email = String(rowData['Email'] ?? '');
-        if (email) {
-          moved.push(`Duplicate email: ${email}`);
-          dupTags.push('DuplicateEmailNotes');
-          rowData['Email'] = '';
-        }
-      }
-      if (phoneDupes.repeats.has(row.rowNumber)) {
-        const phone = String(rowData['Phone'] ?? '');
-        if (phone) {
-          moved.push(`Duplicate phone: ${phone}`);
-          dupTags.push('DuplicatePhoneNotes');
-          rowData['Phone'] = '';
-        }
-      }
-      if (moved.length > 0) {
-        const existingNote = String(rowData['Note'] ?? '').trim();
-        rowData['Note'] = [existingNote, ...moved].filter(Boolean).join(' | ');
-        // Tag the stripped rows (never the keeper) so they're filterable in
-        // Shopify admin after import
-        const existingTags = String(rowData['Tags'] ?? '').trim();
-        rowData['Tags'] = [existingTags, ...dupTags].filter(Boolean).join(',');
-      }
-    }
-
-    if (heliosMigratedTag) {
-      const existing = rowData['Tags'] as string ?? '';
-      rowData['Tags'] = existing ? `${existing},${HELIOS_TAG}` : HELIOS_TAG;
     }
 
     const excelRow = sheet.addRow(rowData);

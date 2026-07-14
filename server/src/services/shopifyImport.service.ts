@@ -1,7 +1,8 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { ImportBatchJob } from '@prisma/client';
 import prisma from '../db/prisma';
-import { applyMappingToRecord } from './columnMapping.service';
+import { buildTemplateDataset } from '../reports/templateDataset';
+import { TemplateRow } from '../reports/mergeDuplicates';
 import { getImportFeedback, ImportFeedback } from './importFeedback.service';
 import {
   BuiltJsonl,
@@ -51,12 +52,29 @@ export type RunImportResult =
 
 // ── value helpers ────────────────────────────────────────────────────────────
 
-function mapRecord(
-  original: Record<string, string>,
-  mapping: Record<string, string> | null | undefined,
-): Record<string, string> {
-  if (!mapping || Object.keys(mapping).length === 0) return { ...original };
-  return applyMappingToRecord(original, mapping);
+// The validation run fields the import dataset is derived from. Deterministic:
+// start, reconcile, batch split, and batch reconcile all rebuild the exact same
+// rows (and therefore the same JSONL line ↔ CSV row mapping) from these.
+interface ImportSourceRun {
+  originalRows: OriginalRowRecord[];
+  columnMapping: unknown;
+  moveDuplicatesToNotes?: boolean;
+  mergeMatchingDuplicates?: boolean;
+}
+
+/** Build the final rows the import sends to Shopify — the same transformation
+ *  the Excel "Shopify Template" sheet applies (column mapping + optional
+ *  same-person merge + optional move-duplicates-to-Notes), so the store import
+ *  tests exactly the file the user would hand to Shopify. The HeliosMigrated
+ *  tag is intentionally NOT applied here: it's a migration marker, not part of
+ *  the QA comparison, and test-store customers already get their own qa tags. */
+function buildImportRows(run: ImportSourceRun): TemplateRow[] {
+  return buildTemplateDataset({
+    originalRows: run.originalRows,
+    columnMapping: run.columnMapping as Record<string, string> | null,
+    moveDuplicatesToNotes: run.moveDuplicatesToNotes ?? false,
+    mergeMatchingDuplicates: run.mergeMatchingDuplicates ?? false,
+  }).rows;
 }
 
 function val(row: Record<string, string>, col: string): string {
@@ -126,18 +144,14 @@ interface OriginalRowRecord {
 }
 
 /** Build the JSONL bulk payload (one `{"input": CustomerInput}` line per row)
- *  plus the per-line refs (CSV row numbers) the engine maps results back to. */
-function buildJsonl(
-  rows: OriginalRowRecord[],
-  mapping: Record<string, string> | null | undefined,
-  importRunId: string,
-): BuiltJsonl<number> {
+ *  plus the per-line refs (CSV row numbers) the engine maps results back to.
+ *  Rows are the final import rows from buildImportRows — records are already
+ *  Shopify-column-keyed with merge/move-to-Notes applied. */
+function buildJsonl(rows: TemplateRow[], importRunId: string): BuiltJsonl<number> {
   const lines: string[] = [];
   const lineRefs: number[] = [];
   for (const row of rows) {
-    const original = (row.data ?? {}) as Record<string, string>;
-    const mapped = mapRecord(original, mapping);
-    const input = buildCustomerInput(mapped, importRunId);
+    const input = buildCustomerInput(row.record, importRunId);
     lines.push(JSON.stringify({ input }));
     lineRefs.push(row.rowNumber);
   }
@@ -240,11 +254,7 @@ export async function startCustomerImport(
   }
 
   const importRunId = uuidv4();
-  const { jsonl, lineRefs } = buildJsonl(
-    run.originalRows,
-    run.columnMapping as Record<string, string> | null,
-    importRunId,
-  );
+  const { jsonl, lineRefs } = buildJsonl(buildImportRows(run), importRunId);
 
   if (lineRefs.length === 0) {
     return { ok: false, error: 'This validation run has no rows to import.' };
@@ -272,10 +282,36 @@ export async function startCustomerImport(
 
 // ── orchestrator: reconcile (advances at most one step) ──────────────────────
 
-// lineToRow is recomputed deterministically from the run's original rows (same
-// asc ordering buildJsonl used), so it need not be persisted across requests.
-function lineToRowFromRows(rows: OriginalRowRecord[]): number[] {
-  return rows.map((r) => r.rowNumber);
+// lineToRow is recomputed deterministically from the run's original rows via
+// the same buildImportRows transformation buildJsonl used (merging can drop
+// rows, so raw row numbers would be misaligned), so it need not be persisted
+// across requests.
+function lineToRowFromRun(run: ImportSourceRun): number[] {
+  return buildImportRows(run).map((r) => r.rowNumber);
+}
+
+/** Row numbers the validator flagged, for the four-bucket comparison. When
+ *  move-duplicates-to-Notes was on, the duplicated emails/phones were stripped
+ *  before the import, so DuplicateEmail/DuplicatePhone flags are resolved and
+ *  must not count — otherwise every handled duplicate shows up as a "false
+ *  positive" (flagged but accepted). Merge-only runs keep the flags: unmerged
+ *  duplicates still hit Shopify raw, same as before. */
+function flaggedRowsForRun(run: {
+  moveDuplicatesToNotes?: boolean;
+  issues: { rowNumber: number; issueType: string }[];
+}): Set<number> {
+  const duplicatesResolved = run.moveDuplicatesToNotes ?? false;
+  const rows = new Set<number>();
+  for (const issue of run.issues) {
+    if (
+      duplicatesResolved &&
+      (issue.issueType === 'DuplicateEmail' || issue.issueType === 'DuplicatePhone')
+    ) {
+      continue;
+    }
+    rows.add(issue.rowNumber);
+  }
+  return rows;
 }
 
 // Called by the GET poll. If the run is already terminal it just returns current
@@ -391,19 +427,19 @@ async function finalizeCompletedRun(
       validationRun: {
         include: {
           originalRows: { orderBy: { rowNumber: 'asc' } },
-          issues: { select: { rowNumber: true } },
+          issues: { select: { rowNumber: true, issueType: true } },
         },
       },
     },
   });
   if (!run || run.status !== 'RUNNING') return;
 
-  const lineRefs = lineToRowFromRows(run.validationRun.originalRows);
+  const lineRefs = lineToRowFromRun(run.validationRun);
   const outcomes = resultUrl
     ? await fetchAndParseBulkResults(resultUrl, lineRefs, parseCustomerCreateLine)
     : [];
 
-  const flaggedRows = new Set(run.validationRun.issues.map((i) => i.rowNumber));
+  const flaggedRows = flaggedRowsForRun(run.validationRun);
   const successCount = outcomes.filter((o) => o.accepted).length;
   const errorCount = outcomes.length - successCount;
 
@@ -461,8 +497,10 @@ export async function startBatchImport(
   }
 
   const parentId = uuidv4();
-  const mapping = run.columnMapping as Record<string, string> | null;
-  const batches = splitIntoBatches(run.originalRows, storeIds.length);
+  // Transform BEFORE splitting: merging is cross-row, so it must see the whole
+  // dataset — and the reconcile recomputes the same split over the same
+  // transformed rows to map results back.
+  const batches = splitIntoBatches(buildImportRows(run), storeIds.length);
 
   // Per-store failure is captured as a FAILED job rather than aborting the whole
   // batch (which would strand the bulk ops already started on other stores).
@@ -485,7 +523,7 @@ export async function startBatchImport(
             rowCount: batch.length,
           };
         }
-        const { jsonl } = buildJsonl(batch, mapping, parentId);
+        const { jsonl } = buildJsonl(batch, parentId);
         const stagedPath = await stagedUpload(client, jsonl, 'bulk_customers.jsonl');
         const bulkOpId = await runBulkMutation(client, CUSTOMER_CREATE_MUTATION, stagedPath);
         return {
@@ -659,22 +697,22 @@ async function finalizeCompletedJob(
       validationRun: {
         include: {
           originalRows: { orderBy: { rowNumber: 'asc' } },
-          issues: { select: { rowNumber: true } },
+          issues: { select: { rowNumber: true, issueType: true } },
         },
       },
     },
   });
   if (!parent) return;
 
-  // Same split as startBatchImport → this job's exact rows → lineToRow.
+  // Same transform + split as startBatchImport → this job's exact rows → lineToRow.
   const slice =
-    splitIntoBatches(parent.validationRun.originalRows, job.batchCount)[job.batchIndex] ?? [];
+    splitIntoBatches(buildImportRows(parent.validationRun), job.batchCount)[job.batchIndex] ?? [];
   const lineRefs = slice.map((r) => r.rowNumber);
   const outcomes = resultUrl
     ? await fetchAndParseBulkResults(resultUrl, lineRefs, parseCustomerCreateLine)
     : [];
 
-  const flaggedRows = new Set(parent.validationRun.issues.map((i) => i.rowNumber));
+  const flaggedRows = flaggedRowsForRun(parent.validationRun);
   const successCount = outcomes.filter((o) => o.accepted).length;
   const errorCount = outcomes.length - successCount;
 

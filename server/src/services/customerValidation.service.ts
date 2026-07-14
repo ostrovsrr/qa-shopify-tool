@@ -12,7 +12,7 @@ import { customerValidationRules } from '../validators/customer';
 import prisma from '../db/prisma';
 import { applyMappingToRecord } from './columnMapping.service';
 import { parseCsvBuffer } from './csvParser.service';
-import { getPreview } from './previewStore';
+import { deletePreview, getPreview } from './previewStore';
 
 function applyColumnMapping(
   rows: CustomerCsvRow[],
@@ -60,44 +60,63 @@ export async function validateCustomerCsv(
 
   const validationId = uuidv4();
 
-  await prisma.validationRun.create({
-    data: {
-      id: validationId,
-      fileName,
-      fileType: 'CUSTOMER',
-      totalRows: rawRows.length,
-      errors,
-      warnings,
-      info,
-      affectedRows: affectedRows as unknown as object[],
-      originalColumns: headers,
-      columnMapping: Object.keys(columnMapping).length > 0
-        ? (columnMapping as unknown as object)
-        : undefined,
-      heliosMigratedTag,
-      moveDuplicatesToNotes,
-      mergeMatchingDuplicates,
-      issues: {
-        create: allIssues.map((issue) => ({
-          id: uuidv4(),
-          rowNumber: issue.rowNumber,
-          columnName: issue.column,
-          severity: issue.severity,
-          issueType: issue.issueType,
-          currentValue: issue.currentValue || null,
-          message: issue.message,
-          suggestedFix: issue.suggestedFix || null,
-        })),
-      },
-      originalRows: {
-        create: rawRows.map((row) => ({
-          id: uuidv4(),
-          rowNumber: row.rowNumber,
-          data: row.original as unknown as object,
-        })),
-      },
+  // Persist the run scalar-first, then chunk the issue/row inserts: a single
+  // nested create serializes every issue and original row into one giant query
+  // (hundreds of MB of parameters on large files) and can blow the memory or
+  // the statement limits. Same pattern as the import-result persistence.
+  const CHUNK = 5000;
+  await prisma.$transaction(
+    async (tx) => {
+      await tx.validationRun.create({
+        data: {
+          id: validationId,
+          fileName,
+          fileType: 'CUSTOMER',
+          totalRows: rawRows.length,
+          errors,
+          warnings,
+          info,
+          affectedRows: affectedRows as unknown as object[],
+          originalColumns: headers,
+          columnMapping: Object.keys(columnMapping).length > 0
+            ? (columnMapping as unknown as object)
+            : undefined,
+          heliosMigratedTag,
+          moveDuplicatesToNotes,
+          mergeMatchingDuplicates,
+        },
+      });
+
+      for (let i = 0; i < allIssues.length; i += CHUNK) {
+        await tx.validationIssue.createMany({
+          data: allIssues.slice(i, i + CHUNK).map((issue) => ({
+            id: uuidv4(),
+            validationRunId: validationId,
+            rowNumber: issue.rowNumber,
+            columnName: issue.column,
+            severity: issue.severity,
+            issueType: issue.issueType,
+            currentValue: issue.currentValue || null,
+            message: issue.message,
+            suggestedFix: issue.suggestedFix || null,
+          })),
+        });
+      }
+
+      for (let i = 0; i < rawRows.length; i += CHUNK) {
+        await tx.originalCustomerRow.createMany({
+          data: rawRows.slice(i, i + CHUNK).map((row) => ({
+            id: uuidv4(),
+            validationRunId: validationId,
+            rowNumber: row.rowNumber,
+            data: row.original as unknown as object,
+          })),
+        });
+      }
     },
-  });
+    // Large runs need far more than the 5s interactive-transaction default.
+    { timeout: 120_000, maxWait: 10_000 },
+  );
 
   return {
     validationId,
@@ -119,7 +138,7 @@ export async function validateFromPreview(
 ): Promise<CustomerValidationResult | null> {
   const entry = getPreview(uploadId);
   if (!entry) return null;
-  return validateCustomerCsv(
+  const result = await validateCustomerCsv(
     entry.buffer,
     entry.fileName,
     columnMapping,
@@ -127,6 +146,11 @@ export async function validateFromPreview(
     moveDuplicatesToNotes,
     mergeMatchingDuplicates,
   );
+  // The validate step consumed the preview — free its buffer (up to 100 MB)
+  // now rather than holding it until the TTL. The UI never re-validates the
+  // same preview: going back starts a new upload.
+  deletePreview(uploadId);
+  return result;
 }
 
 export async function getValidationResult(

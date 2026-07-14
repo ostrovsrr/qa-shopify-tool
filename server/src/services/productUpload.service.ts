@@ -22,25 +22,34 @@ export async function createProductUpload(
   const parsed = await parseProductCsvBuffer(buffer);
   const uploadId = uuidv4();
 
-  await prisma.productUploadRun.create({
-    data: {
-      id: uploadId,
-      fileName,
-      productCount: parsed.groups.length,
-      originalColumns: parsed.headers,
-    },
-  });
+  // Chunk the row insert so one createMany doesn't serialize the whole CSV
+  // into a single query on large files (same pattern as the customer side).
+  const CHUNK = 5000;
+  await prisma.$transaction(
+    async (tx) => {
+      await tx.productUploadRun.create({
+        data: {
+          id: uploadId,
+          fileName,
+          productCount: parsed.groups.length,
+          originalColumns: parsed.headers,
+        },
+      });
 
-  if (parsed.rows.length > 0) {
-    await prisma.productOriginalRow.createMany({
-      data: parsed.rows.map((r) => ({
-        id: uuidv4(),
-        uploadRunId: uploadId,
-        rowNumber: r.rowNumber,
-        data: r.original,
-      })),
-    });
-  }
+      for (let i = 0; i < parsed.rows.length; i += CHUNK) {
+        await tx.productOriginalRow.createMany({
+          data: parsed.rows.slice(i, i + CHUNK).map((r) => ({
+            id: uuidv4(),
+            uploadRunId: uploadId,
+            rowNumber: r.rowNumber,
+            data: r.original,
+          })),
+        });
+      }
+    },
+    // Large uploads need far more than the 5s interactive-transaction default.
+    { timeout: 120_000, maxWait: 10_000 },
+  );
 
   return {
     uploadId,

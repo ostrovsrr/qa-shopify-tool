@@ -49,7 +49,7 @@ The server has vitest tests (`npm run test`, `npm run test:integration`, `npm ru
 2. User maps CSV columns to Shopify fields on the `ColumnMappingScreen`
 3. Client submits mapping → `POST /api/customer-validation/validate` → runs all 13 rules, persists `ValidationRun`, `ValidationIssue`, and `OriginalCustomerRow` records to Postgres
 4. Client displays results; user can download `GET /api/customer-validation/report/:id` as Excel
-5. Optional: import into Shopify test stores via `/api/customer-import/*`
+5. Optional: import into Shopify test stores via `/api/customer-import/*`. The import sends the **final template dataset** (`reports/templateDataset.ts`: column mapping + merge-matching-duplicates + move-duplicates-to-Notes, same transformation as the Excel "Shopify Template" sheet — not the raw rows). The reconcile rebuilds this dataset deterministically to map bulk-result lines back to CSV rows, so the transformation must stay a pure function of (originalRows, mapping, flags).
 
 ### Data flow — Products
 1. Client uploads product CSV → `POST /api/product-upload` (parse + persist grouped by `Handle`; no mapping/validation)
