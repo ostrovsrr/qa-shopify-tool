@@ -25,8 +25,11 @@ import prisma from '../db/prisma';
 // be an authorization system built on a value the attacker controls — the worst of
 // both worlds, because it would also LOOK like security.
 //
-// When Cloudflare Access lands, the identity comes from the verified Cf-Access JWT
-// and this header stops being trusted for anything. Until then it is a label.
+// Cloudflare Access has landed: when it is in front of us, `req.accessEmail` is the
+// verified identity from the Cf-Access JWT and it wins. The X-QA-User header is only
+// consulted in local dev, where there is no edge and no attacker. Either way the
+// value is slugified before it lands in the DB — a verified email is still not
+// something this column needs to store in full.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type DestructiveAction =
@@ -47,7 +50,10 @@ const MAX_ACTOR_LENGTH = 60;
  * in a database column and in logs, not that it establishes identity — it cannot.
  */
 export function actorFrom(req: Request): string {
-  const raw = req.header(ACTOR_HEADER);
+  // The verified identity wins. It is only present when Cloudflare Access is in
+  // front of us and the token verified (see middleware/accessAuth.ts); the caller
+  // cannot forge it. The X-QA-User header is the local-dev fallback only.
+  const raw = req.accessEmail ?? req.header(ACTOR_HEADER);
   if (!raw) return 'unknown';
 
   // An opaque slug: a first name or handle. NOT an email — this column lands in the

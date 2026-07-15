@@ -5,19 +5,43 @@ PostgreSQL database.
 
 ---
 
-## ⚠ READ THIS BEFORE YOU EXPOSE IT
+## ⚠ AUTHENTICATION — CLOUDFLARE ACCESS IS REQUIRED IN PRODUCTION
 
-**There is no authentication yet.** The auth work (Cloudflare Tunnel + Cf-Access JWT)
-is deliberately not done. Everything else is.
+The app has no login of its own. It relies on **Cloudflare Access** sitting in front
+of it: Access authenticates the person at the edge (Google / email OTP) and injects a
+signed JWT on every request, which the server verifies (`middleware/accessAuth.ts`).
+Identity — who uploaded a run, who fired a cleanup — comes from that verified JWT, not
+from the spoofable `X-QA-User` header.
 
-That means: **do not put this on a public URL.** Anyone who finds it can upload a CSV,
+**In production this is mandatory and enforced by a fail-closed boot check.** With
+`NODE_ENV=production` and Access not configured, the server **refuses to start** rather
+than serve every route unauthenticated. You cannot forget to turn auth on.
+
+Why the tool would be dangerous without it: anyone who reached it could upload a CSV,
 import into your Shopify test stores, and fire the cleanup routes that delete records
-**by tag across an entire store**. There is no login, and the `X-QA-User` name the UI
-sends is a *label*, not a credential — anyone can send any name (see
-`services/actionLog.service.ts`).
+**by tag across an entire store**.
 
-Until auth lands, run it somewhere only your team can reach: a private network, a
-VPN, or a Cloudflare Tunnel with Access already in front of it.
+### Setting it up
+
+1. Put the container behind a **Cloudflare Tunnel** (or any origin Cloudflare fronts).
+2. Create a **Cloudflare Access application** covering the tool's hostname, with a
+   policy that allows your ~5 colleagues (an email list or your Google Workspace).
+3. From that Access application, copy its **Application Audience (AUD) tag**.
+4. Set two variables on the container:
+
+   ```bash
+   CF_ACCESS_TEAM_DOMAIN=yourteam.cloudflareaccess.com   # your Access team domain
+   CF_ACCESS_AUD=<the Application AUD tag>                # pins tokens to THIS app
+   ```
+
+The server fetches Cloudflare's public keys from
+`https://<team>/cdn-cgi/access/certs` (cached, auto-refreshed on rotation) and verifies
+the token's signature, `aud`, `iss`, and expiry on every request. `GET /api/health`
+is deliberately exempt so the platform's liveness probe works without a token.
+
+**Local dev needs none of this.** With the two variables unset the auth middleware is a
+passthrough and identity falls back to the `X-QA-User` label — fine, because the only
+person reaching localhost is you. The boot log says which posture is active.
 
 ---
 
@@ -28,7 +52,9 @@ VPN, or a Cloudflare Tunnel with Access already in front of it.
 | `DATABASE_URL` | yes | Postgres. Pool settings are added automatically (`connection_limit=10`, `pool_timeout=30`); an explicit value in the URL wins. |
 | `SHOPIFY_TEST_STORES` | yes | JSON array of stores. See `config/shopify.ts`. |
 | `PORT` | no | Defaults to 3001. |
-| `NODE_ENV` | yes | Must be `production` for the server to serve the client. |
+| `NODE_ENV` | yes | Must be `production` for the server to serve the client. Also makes Access mandatory: the server refuses to boot without it. |
+| `CF_ACCESS_TEAM_DOMAIN` | yes (prod) | Your Cloudflare Access team domain, e.g. `yourteam.cloudflareaccess.com`. Bare host or full URL. |
+| `CF_ACCESS_AUD` | yes (prod) | The Access **application** AUD tag. Pins tokens to this app, not any other app in the same team. |
 | `UPLOAD_DIR` | no | Defaults to `/tmp/qa-uploads` in the image. |
 | `RETENTION_DAYS` | no | Days raw uploaded rows are kept. Default 30. `0` disables the purge. |
 | `DATABASE_CONNECTION_LIMIT` | no | Default 10. Lower it if your Postgres has a small `max_connections`. |
@@ -106,7 +132,10 @@ nobody wants.
 
 ## What is deliberately not here
 
-- **Auth.** See the warning at the top. This is the last P1.
+- **A user store / passwords / sessions.** Authentication is delegated entirely to
+  Cloudflare Access (see the top). The app never sees a password and holds no session —
+  it trusts a verified per-request JWT. Removing an Access user removes their access
+  immediately, with nothing to clean up here.
 - **Backups of the app database.** Retention says how long PII lives; backups will keep
   it longer unless you align them (above).
 - **Horizontal scaling.** The store busy-lock and the resume lease are both in Postgres,

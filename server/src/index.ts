@@ -52,6 +52,7 @@ import prisma from './db/prisma';
 import { resumePendingImports } from './services/importResume.service';
 import { sweepOrphanUploads, uploadStorage } from './services/uploadFile';
 import { errorHandler, requestId } from './middleware/errorHandler';
+import { accessAuth, accessAuthEnabled } from './middleware/accessAuth';
 import { getActionLog } from './services/actionLog.service';
 import { purgeExpiredPii } from './services/retention.service';
 
@@ -88,6 +89,19 @@ app.get('/api/health', (_req, res) => {
     .then(() => res.json({ ok: true }))
     .catch((err: Error) => res.status(503).json({ ok: false, error: err.message }));
 });
+
+// ── Authentication ────────────────────────────────────────────────────────────
+//
+// Everything past this line requires a verified Cloudflare Access JWT — in
+// production. The liveness probe above is deliberately BEFORE this and stays
+// public: the platform hits it with no token, and a health check that required
+// auth would report the container unhealthy the moment Access had a wobble.
+//
+// In local dev, with no Access configured, this is a passthrough and identity
+// falls back to the self-asserted X-QA-User label. The server refuses to boot in
+// production without Access configured (see the require.main block below), so
+// "no auth" is never something you reach by forgetting to set a variable.
+app.use('/api', accessAuth);
 
 // ── File upload ─────────────────────────────────────────────────────────────
 
@@ -208,8 +222,31 @@ app.use(errorHandler);
 // imported — e.g. by Supertest in integration tests — skip listen so no port
 // is occupied and the process can exit cleanly.
 if (require.main === module) {
+  // Fail closed. In production, no Cloudflare Access config means every route
+  // would serve with no authentication — the exact "off because someone forgot"
+  // failure the retention incident taught us to refuse. Crash loudly instead.
+  if (process.env.NODE_ENV === 'production' && !accessAuthEnabled) {
+    console.error(
+      '[auth] FATAL: NODE_ENV=production but Cloudflare Access is not configured.\n' +
+        '       Set CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD, or every route would\n' +
+        '       serve with no authentication. Refusing to start. See docs/DEPLOY.md.',
+    );
+    process.exit(1);
+  }
+
   const server = app.listen(PORT, () => {
     console.log(`Server listening on http://localhost:${PORT}`);
+
+    // Say the auth posture out loud on every boot, so "is this thing protected?"
+    // is answered by the logs, not by inference.
+    if (accessAuthEnabled) {
+      console.log('[auth] Cloudflare Access enforced — identity from verified JWT.');
+    } else {
+      console.warn(
+        '[auth] WARNING: no authentication. X-QA-User is a self-asserted label, ' +
+          'not a credential. Acceptable for local dev only.',
+      );
+    }
 
     // Finish what the last process started. An import that was interrupted
     // mid-flight (a redeploy, a crash, an OOM) left PENDING rows behind: the row
