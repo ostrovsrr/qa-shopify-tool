@@ -652,7 +652,7 @@ async function finalizeCompletedRun(
   const groups = groupsFromOriginalRows(run.uploadRun.originalRows);
   const lineRefs = groups.map((g) => g.handle);
   const outcomes = resultUrl
-    ? await fetchAndParseBulkResults(resultUrl, lineRefs, parseProductSetLine)
+    ? await fetchAndParseBulkResults(resultUrl, lineRefs, { kind: 'complete' }, parseProductSetLine)
     : [];
 
   const successCount = outcomes.filter((o) => o.accepted).length;
@@ -1004,7 +1004,7 @@ async function finalizeCompletedJob(
   const slice = splitIntoBatches(groups, job.batchCount)[job.batchIndex] ?? [];
   const lineRefs = slice.map((g) => g.handle);
   const outcomes = resultUrl
-    ? await fetchAndParseBulkResults(resultUrl, lineRefs, parseProductSetLine)
+    ? await fetchAndParseBulkResults(resultUrl, lineRefs, { kind: 'complete' }, parseProductSetLine)
     : [];
 
   const successCount = outcomes.filter((o) => o.accepted).length;

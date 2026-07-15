@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import prisma from '../db/prisma';
+import { CsvParseError } from '../errors';
 import { parseProductCsvFile } from './productCsvParser';
 import { ProductHistoryItem, UpdateUploadMetadata } from '../types';
 
@@ -22,6 +23,15 @@ export async function createProductUpload(
   createdBy?: string,
 ): Promise<UploadSummary> {
   const parsed = await parseProductCsvFile(filePath);
+  if (parsed.rows.length === 0) {
+    throw new CsvParseError('The file contains a header row but no product data rows.');
+  }
+  if (!parsed.headers.includes('Handle')) {
+    throw new CsvParseError('A Shopify product CSV must contain a "Handle" column.');
+  }
+  if (parsed.groups.length === 0) {
+    throw new CsvParseError('No products were found. At least one row must have a non-empty Handle.');
+  }
   const uploadId = uuidv4();
 
   // Chunk the row insert so one createMany doesn't serialize the whole CSV
@@ -135,6 +145,8 @@ export async function updateUploadMetadata(
     data,
     select: {
       id: true,
+      createdBy: true,
+      piiPurgedAt: true,
       fileName: true,
       productCount: true,
       ticketNumber: true,

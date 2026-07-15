@@ -23,7 +23,7 @@ An internal tool for validating Shopify Customer CSV files before import. Upload
 
 ## Prerequisites
 
-- **Node.js** 18+
+- **Node.js** 20.19+
 - **PostgreSQL** 14+ running locally (or any accessible PostgreSQL instance)
 
 ---

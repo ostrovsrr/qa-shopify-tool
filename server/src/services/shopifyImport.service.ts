@@ -520,7 +520,7 @@ async function finalizeCompletedRun(
 
   const lineRefs = lineToRowFromRun(run.validationRun);
   const outcomes = resultUrl
-    ? await fetchAndParseBulkResults(resultUrl, lineRefs, parseCustomerCreateLine)
+    ? await fetchAndParseBulkResults(resultUrl, lineRefs, { kind: 'complete' }, parseCustomerCreateLine)
     : [];
 
   const flaggedRows = flaggedRowsForRun(run.validationRun);
@@ -880,7 +880,7 @@ async function finalizeCompletedJob(
     splitIntoBatches(buildImportRows(parent.validationRun), job.batchCount)[job.batchIndex] ?? [];
   const lineRefs = slice.map((r) => r.rowNumber);
   const outcomes = resultUrl
-    ? await fetchAndParseBulkResults(resultUrl, lineRefs, parseCustomerCreateLine)
+    ? await fetchAndParseBulkResults(resultUrl, lineRefs, { kind: 'complete' }, parseCustomerCreateLine)
     : [];
 
   const flaggedRows = flaggedRowsForRun(parent.validationRun);

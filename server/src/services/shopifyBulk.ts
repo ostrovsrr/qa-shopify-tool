@@ -190,13 +190,22 @@ export interface BuiltJsonl<R> {
 
 /** One parsed result line handed to the caller's parseLine. */
 export interface BulkResultLine<R> {
-  /** The source reference for this line (lineRefs[idx]); undefined if unmatched. */
-  ref: R | undefined;
+  /** The source reference for this line (lineRefs[idx]). */
+  ref: R;
   /** The mutation payload container: `line.data ?? line`. */
   data: Record<string, unknown>;
   /** The full JSONL line — a top-level `message` lives here for error lines. */
   raw: Record<string, unknown>;
 }
+
+/**
+ * Completed result files start at their first input line, so their 0/1 base can
+ * be detected safely. Partial files may start anywhere and must state the true
+ * base explicitly or every result can shift to the wrong source row.
+ */
+export type BulkResultSource =
+  | { kind: 'complete' }
+  | { kind: 'partial'; lineNumberBase: 0 | 1 };
 
 /** Download a completed bulk operation's result file and parse it line by line,
  *  mapping each line back to its source ref via __lineNumber, then delegating the
@@ -204,6 +213,7 @@ export interface BulkResultLine<R> {
 export async function fetchAndParseBulkResults<R, O>(
   url: string,
   lineRefs: R[],
+  source: BulkResultSource,
   parseLine: (line: BulkResultLine<R>) => O,
 ): Promise<O[]> {
   const res = await fetch(url);
@@ -219,29 +229,38 @@ export async function fetchAndParseBulkResults<R, O>(
 
   if (parsed.length === 0) return [];
 
-  // __lineNumber may be 0- or 1-based depending on context; detect from the
-  // minimum so the row mapping is robust either way. Fold with a loop rather
-  // than Math.min(...lineNumbers) — spreading a large result set (100k+ lines)
-  // passes every element as an argument and overflows the engine's argument
-  // limit ("Maximum call stack size exceeded").
-  //
-  // ⚠ THIS ASSUMES THE RESULT FILE STARTS AT THE FIRST LINE.
-  // It holds for a COMPLETED operation's `url`, which always does. It does NOT
-  // hold for `partialDataUrl` on a FAILED/CANCELED op, whose first line may be
-  // any line number. Feeding partial data through here collapses `base` to that
-  // first line, shifting EVERY ref: results get attributed to the wrong source
-  // rows, silently, with no error. Before wiring up partial-result salvage, pass
-  // the true base in explicitly instead of inferring it. Pinned by
-  // test/shopifyBulk.test.ts ("MISALIGNS refs ... partial data").
-  let base = Infinity;
-  for (const p of parsed) {
-    const n = Number(p.__lineNumber);
-    if (n < base) base = n;
+  const numbered = parsed.map((line, index) => {
+    const lineNumber = Number(line.__lineNumber);
+    if (!Number.isSafeInteger(lineNumber) || lineNumber < 0) {
+      throw new Error(`Bulk result line ${index + 1} has an invalid __lineNumber.`);
+    }
+    return { line, lineNumber };
+  });
+
+  let base: number;
+  if (source.kind === 'partial') {
+    base = source.lineNumberBase;
+  } else {
+    // Fold rather than spreading a 100k+ line result as function arguments.
+    base = Infinity;
+    for (const item of numbered) {
+      if (item.lineNumber < base) base = item.lineNumber;
+    }
+    if (base !== 0 && base !== 1) {
+      throw new Error(
+        `Completed bulk result starts at __lineNumber ${base}; refusing to infer a base from what may be partial data.`,
+      );
+    }
   }
 
-  return parsed.map((line) => {
-    const idx = Number(line.__lineNumber) - base;
+  return numbered.map(({ line, lineNumber }) => {
+    const idx = lineNumber - base;
     const ref = lineRefs[idx];
+    if (idx < 0 || idx >= lineRefs.length || ref === undefined) {
+      throw new Error(
+        `Bulk result __lineNumber ${lineNumber} does not map to one of the ${lineRefs.length} submitted lines.`,
+      );
+    }
     const data = (line.data ?? line) as Record<string, unknown>;
     return parseLine({ ref, data, raw: line });
   });
@@ -353,6 +372,7 @@ export async function parseBulkDeleteResults(
   const outcomes = await fetchAndParseBulkResults<string, LineOutcome>(
     url,
     ids,
+    { kind: 'complete' },
     ({ ref, data, raw }) => {
       const payload = data[spec.payloadKey] as
         | (Record<string, unknown> & { userErrors: { message: string }[] })

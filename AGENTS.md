@@ -14,6 +14,9 @@ Two separate packages — run commands from their respective directories.
 ```bash
 npm run dev              # ts-node-dev with hot reload on port 3001
 npm run build            # tsc → dist/
+npm run typecheck        # TypeScript check without emitting files
+npm test                 # 160+ unit/regression tests (no database required)
+npm run test:integration # API tests; requires TEST_DATABASE_URL for a throwaway DB
 npm run start            # run compiled dist/
 npm run prisma:generate  # regenerate Prisma client after schema changes
 npm run prisma:migrate   # apply new migrations (prompts for migration name)
@@ -37,14 +40,15 @@ cd server && npm install && npm run prisma:generate && npm run prisma:migrate
 cd ../client && npm install
 ```
 
-There are no tests or linter configs.
+CI builds both packages and runs the unit and PostgreSQL integration suites. There
+is currently no linter configuration.
 
 ## Architecture
 
 ### Data flow
 1. Client uploads CSV → `POST /api/customer-validation/preview` (returns parsed headers for column mapping)
 2. User maps CSV columns to Shopify fields on the `ColumnMappingScreen`
-3. Client submits mapping → `POST /api/customer-validation/validate` → runs all 13 rules, persists `ValidationRun`, `ValidationIssue`, and `OriginalCustomerRow` records to Postgres
+3. Client submits mapping → `POST /api/customer-validation/validate` → runs all 15 rules, persists `ValidationRun`, `ValidationIssue`, and `OriginalCustomerRow` records to Postgres
 4. Client displays results; user can download `GET /api/customer-validation/report/:id` as Excel
 
 ### Backend (`server/src/`)

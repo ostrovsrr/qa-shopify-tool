@@ -65,7 +65,7 @@ Raised by: /plan-eng-review 2026-07-14 (outside voice).
 
 ---
 
-## 3. ⚠ Partial bulk results would silently misattribute every row
+## 3. Partial bulk results would silently misattribute every row — ✅ DONE (2026-07-15)
 
 **What:** `fetchAndParseBulkResults` (`shopifyBulk.ts:198-202`) infers whether Shopify's
 `__lineNumber` is 0- or 1-based by folding over the **minimum line number in the file**. Pass it
@@ -94,3 +94,9 @@ salvage the partial results" is exactly the move that makes this live, and it is
 reach for while making imports crash-resilient.
 
 Raised by: /plan-eng-review 2026-07-14 (found while writing characterization tests).
+
+**Resolution:** `fetchAndParseBulkResults` now requires callers to identify a
+completed result or provide the true 0/1 base for partial data. Completed files
+that do not start at line 0 or 1, invalid line numbers, and out-of-range refs fail
+closed instead of producing a plausible-looking report for the wrong source rows.
+The former characterization test now asserts correct partial mapping.

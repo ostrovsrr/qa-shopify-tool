@@ -15,6 +15,7 @@ import { removeUploadFile } from '../services/uploadFile';
 import { actorFrom, recordAction } from '../services/actionLog.service';
 import { storePreview } from '../services/previewStore';
 import { reportFileName } from '../utils/reportFileName';
+import { CsvParseError } from '../errors';
 
 const uuidSchema = z.string().uuid('Invalid validation ID format.');
 
@@ -44,6 +45,9 @@ export async function previewHandler(
       return;
     }
     const { rows, headers } = await parseCsvFile(req.file.path);
+    if (rows.length === 0) {
+      throw new CsvParseError('The file contains a header row but no customer data rows.');
+    }
     const sampleRows = rows.slice(0, 5).map((r) => r.original);
     const suggestedMapping = suggestMapping(headers);
     // The preview entry now OWNS the temp file — /validate reads it again later, so

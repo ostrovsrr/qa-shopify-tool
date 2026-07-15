@@ -4,6 +4,7 @@ import { parse } from 'csv-parse';
 import { CsvParseError } from '../errors';
 import { ParsedProductCsv, ProductCsvRow, ProductGroup } from '../types';
 import { isRowFullyEmpty, normalizeRecord } from '../utils/normalize';
+import { normalizeCsvHeaders } from './csvHeaders';
 
 // The Shopify product CSV groups rows by Handle: the first row of a Handle carries
 // the product-level fields, and rows sharing the Handle add variants/images. We
@@ -55,9 +56,10 @@ export function extractMetafields(row: Record<string, string>): ParsedMetafield[
 }
 
 const PARSE_OPTIONS = {
-  columns: true,
   skip_empty_lines: false,
-  relax_column_count: true,
+  // Accept omitted trailing cells as empty, but never discard extra cells that
+  // have no matching header.
+  relax_column_count_less: true,
   cast: false,
   // Strip a leading UTF-8 BOM (Shopify/Excel exports include one). Without
   // this the first header parses as "﻿Handle", so groupByHandle can't
@@ -65,9 +67,7 @@ const PARSE_OPTIONS = {
   bom: true,
 } as const;
 
-function toParsed(records: Record<string, string>[]): ParsedProductCsv {
-  const headers = records.length > 0 ? Object.keys(records[0]) : [];
-
+function toParsed(records: Record<string, string>[], headers: string[]): ParsedProductCsv {
   // Trim trailing fully-empty rows (common when exporting from spreadsheets).
   let lastNonEmpty = records.length - 1;
   while (lastNonEmpty >= 0 && isRowFullyEmpty(records[lastNonEmpty])) {
@@ -78,10 +78,13 @@ function toParsed(records: Record<string, string>[]): ParsedProductCsv {
   for (let i = 0; i <= lastNonEmpty; i++) {
     const record = records[i];
     if (isRowFullyEmpty(record)) continue; // skip blank rows mid-file
+    const completeRecord = Object.fromEntries(
+      headers.map((header) => [header, record[header] ?? '']),
+    );
     rows.push({
       rowNumber: i + 2, // header is line 1
-      original: { ...record },
-      normalized: normalizeRecord(record),
+      original: completeRecord,
+      normalized: normalizeRecord(completeRecord),
     });
   }
 
@@ -90,7 +93,16 @@ function toParsed(records: Record<string, string>[]): ParsedProductCsv {
 
 async function parseProductCsvStream(input: Readable): Promise<ParsedProductCsv> {
   const records: Record<string, string>[] = [];
-  const parser = input.pipe(parse(PARSE_OPTIONS));
+  let headers: string[] = [];
+  const parser = input.pipe(
+    parse({
+      ...PARSE_OPTIONS,
+      columns: (rawHeaders: string[]) => {
+        headers = normalizeCsvHeaders(rawHeaders);
+        return headers;
+      },
+    }),
+  );
 
   try {
     for await (const record of parser) {
@@ -99,10 +111,14 @@ async function parseProductCsvStream(input: Readable): Promise<ParsedProductCsv>
   } catch (err) {
     // See csvParser.service.ts — a malformed CSV is the user's to fix, so tell them
     // what is wrong with it rather than hiding it behind a generic 500.
+    if (err instanceof CsvParseError) throw err;
     throw new CsvParseError((err as Error).message);
   }
 
-  return toParsed(records);
+  if (headers.length === 0) {
+    throw new CsvParseError('The file is empty or has no header row.');
+  }
+  return toParsed(records, headers);
 }
 
 /** Parse an uploaded product CSV straight off disk. The customer twin is

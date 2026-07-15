@@ -165,28 +165,34 @@ export function ImportPanel({ result }: Props) {
   useEffect(() => {
     if (!pollRunId || !pollStatus || isTerminal(pollStatus)) return;
     let active = true;
-    const timer = setInterval(async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const poll = async (): Promise<void> => {
       try {
         const next = await fetchImportFeedback(pollRunId);
         if (!active) return;
         setFeedback(next);
         if (isTerminal(next.status)) {
-          clearInterval(timer);
           for (const id of displayedRef.current) {
             fetchStoreCustomerStats(id)
               .then((st) => active && setStoreStats((m) => ({ ...m, [id]: st })))
               .catch(() => undefined);
           }
+        } else {
+          // Schedule only after this request finishes. setInterval could overlap
+          // slow Shopify reconciliations and advance the same run concurrently.
+          timer = setTimeout(poll, POLL_INTERVAL_MS);
         }
       } catch (err) {
         if (!active) return;
-        clearInterval(timer);
         setError(errMessage(err, 'Failed to check import status.'));
       }
-    }, POLL_INTERVAL_MS);
+    };
+
+    timer = setTimeout(poll, POLL_INTERVAL_MS);
     return () => {
       active = false;
-      clearInterval(timer);
+      if (timer) clearTimeout(timer);
     };
   }, [pollRunId, pollStatus]);
 
@@ -626,7 +632,7 @@ export function ImportPanel({ result }: Props) {
               <span className="spinner" /> Import {feedback.importRunId.slice(0, 8)} ·
               running in Shopify… polling for results
             </span>
-            {/* No Refresh button. A 2s interval is already re-fetching this exact
+            {/* No Refresh button. Polling is already re-fetching this exact
                 feedback (see the polling effect), so the button did nothing the app
                 was not doing anyway — it just implied the user had to act. */}
           </div>

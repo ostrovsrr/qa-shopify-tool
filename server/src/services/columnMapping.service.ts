@@ -1,3 +1,5 @@
+import { HttpError } from '../errors';
+
 export const SHOPIFY_COLUMNS = [
   'First Name',
   'Last Name',
@@ -182,6 +184,44 @@ const ALIAS_MAP: Record<string, ShopifyColumn> = {
 };
 
 const SHOPIFY_SET = new Set<string>(SHOPIFY_COLUMNS);
+const ALLOWED_TARGETS = new Set<string>([
+  ...SHOPIFY_COLUMNS,
+  APPEND_TO_TAGS,
+  APPEND_TO_NOTE,
+  KEEP_COLUMN,
+]);
+
+/** Reject mappings that reference unknown columns or silently overwrite a field. */
+export function assertValidColumnMapping(
+  headers: string[],
+  mapping: Record<string, string>,
+): void {
+  const headerSet = new Set(headers);
+  const targetOwners = new Map<string, string>();
+
+  for (const [source, target] of Object.entries(mapping)) {
+    if (!headerSet.has(source)) {
+      throw new HttpError(400, `Column mapping refers to unknown source column "${source}".`);
+    }
+    if (!ALLOWED_TARGETS.has(target)) {
+      throw new HttpError(400, `"${target || '(empty)'}" is not a valid column-mapping target.`);
+    }
+
+    // Append and Keep are deliberately many-to-one directives. Every real
+    // Shopify field is scalar and must have exactly one source owner.
+    if (target === APPEND_TO_TAGS || target === APPEND_TO_NOTE || target === KEEP_COLUMN) {
+      continue;
+    }
+    const previous = targetOwners.get(target);
+    if (previous) {
+      throw new HttpError(
+        400,
+        `Both "${previous}" and "${source}" are mapped to "${target}". Choose one source column to avoid overwriting customer data.`,
+      );
+    }
+    targetOwners.set(target, source);
+  }
+}
 
 export function suggestMapping(headers: string[]): Record<string, string> {
   const result: Record<string, string> = {};

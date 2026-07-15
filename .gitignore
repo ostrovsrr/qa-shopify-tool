@@ -51,6 +51,7 @@ Thumbs.db
 # Editor files
 .vscode/
 .idea/
+.claude/settings.local.json
 
 # TypeScript
 *.tsbuildinfo

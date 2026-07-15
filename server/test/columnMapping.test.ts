@@ -3,6 +3,7 @@ import {
   APPEND_TO_NOTE,
   APPEND_TO_TAGS,
   applyMappingToRecord,
+  assertValidColumnMapping,
   KEEP_COLUMN,
   resolveMappingTarget,
   SHOPIFY_COLUMNS,
@@ -79,6 +80,34 @@ describe('applyMappingToRecord', () => {
 });
 
 describe('mapping targets', () => {
+  it('rejects two source columns mapped to one scalar Shopify field', () => {
+    expect(() =>
+      assertValidColumnMapping(['Email', 'Legacy Email'], {
+        Email: 'Email',
+        'Legacy Email': 'Email',
+      }),
+    ).toThrow(/avoid overwriting customer data/i);
+  });
+
+  it('allows multiple append and Keep directives', () => {
+    expect(() =>
+      assertValidColumnMapping(['Segment', 'Region', 'Legacy'], {
+        Segment: APPEND_TO_TAGS,
+        Region: APPEND_TO_TAGS,
+        Legacy: KEEP_COLUMN,
+      }),
+    ).not.toThrow();
+  });
+
+  it('rejects unknown sources and targets supplied outside the mapping UI', () => {
+    expect(() => assertValidColumnMapping(['Email'], { Missing: 'Email' })).toThrow(
+      /unknown source column/i,
+    );
+    expect(() => assertValidColumnMapping(['Email'], { Email: '__proto__' })).toThrow(
+      /not a valid column-mapping target/i,
+    );
+  });
+
   it('no longer offers read-only Total Spent / Total Orders', () => {
     expect(SHOPIFY_COLUMNS).not.toContain('Total Spent');
     expect(SHOPIFY_COLUMNS).not.toContain('Total Orders');

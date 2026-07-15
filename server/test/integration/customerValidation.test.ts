@@ -106,6 +106,13 @@ runIf('customer-validation API (integration)', () => {
     expect(patched.status).toBe(200);
     expect(patched.body.ticketNumber).toBe('QA-42');
 
+    const cleared = await request(app)
+      .patch(`/api/customer-validation/${validationId}/metadata`)
+      .send({ ticketNumber: null, comments: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.ticketNumber).toBeNull();
+    expect(cleared.body.comments).toBeNull();
+
     const deleted = await request(app).delete(`/api/customer-validation/${validationId}`);
     expect(deleted.status).toBe(200);
 

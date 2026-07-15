@@ -4,6 +4,7 @@ import { parse } from 'csv-parse';
 import { CsvParseError } from '../errors';
 import { CustomerCsvRow } from '../types';
 import { isRowFullyEmpty, normalizeRecord } from '../utils/normalize';
+import { normalizeCsvHeaders } from './csvHeaders';
 
 export interface ParsedCsv {
   rows: CustomerCsvRow[];
@@ -11,9 +12,11 @@ export interface ParsedCsv {
 }
 
 const PARSE_OPTIONS = {
-  columns: true,
   skip_empty_lines: false,
-  relax_column_count: true,
+  // Missing trailing cells are common in spreadsheet exports and mean empty
+  // values. Extra cells have no header and would otherwise be silently dropped,
+  // so they remain a parse error.
+  relax_column_count_less: true,
   cast: false,
   // Strip a leading UTF-8 BOM (Shopify/Excel exports include one). Without
   // this the first header parses as "﻿<name>", so its column won't match
@@ -21,9 +24,7 @@ const PARSE_OPTIONS = {
   bom: true,
 } as const;
 
-function toRows(records: Record<string, string>[]): ParsedCsv {
-  const headers = records.length > 0 ? Object.keys(records[0]) : [];
-
+function toRows(records: Record<string, string>[], headers: string[]): ParsedCsv {
   let lastNonEmpty = records.length - 1;
   while (lastNonEmpty >= 0 && isRowFullyEmpty(records[lastNonEmpty])) {
     lastNonEmpty--;
@@ -32,12 +33,15 @@ function toRows(records: Record<string, string>[]): ParsedCsv {
   const rows: CustomerCsvRow[] = [];
   for (let i = 0; i <= lastNonEmpty; i++) {
     const record = records[i];
+    const completeRecord = Object.fromEntries(
+      headers.map((header) => [header, record[header] ?? '']),
+    );
     const rowNumber = i + 2;
 
     rows.push({
       rowNumber,
-      original: { ...record },
-      normalized: normalizeRecord(record),
+      original: completeRecord,
+      normalized: normalizeRecord(completeRecord),
     });
   }
 
@@ -46,7 +50,16 @@ function toRows(records: Record<string, string>[]): ParsedCsv {
 
 async function parseCsvStream(input: Readable): Promise<ParsedCsv> {
   const records: Record<string, string>[] = [];
-  const parser = input.pipe(parse(PARSE_OPTIONS));
+  let headers: string[] = [];
+  const parser = input.pipe(
+    parse({
+      ...PARSE_OPTIONS,
+      columns: (rawHeaders: string[]) => {
+        headers = normalizeCsvHeaders(rawHeaders);
+        return headers;
+      },
+    }),
+  );
 
   try {
     for await (const record of parser) {
@@ -58,10 +71,14 @@ async function parseCsvStream(input: Readable): Promise<ParsedCsv> {
     // line 2", which is about their file and nothing about our server, so it is
     // safe (and genuinely useful) to pass on. Without this it would fall through to
     // the generic 500 and they would be told nothing at all.
+    if (err instanceof CsvParseError) throw err;
     throw new CsvParseError((err as Error).message);
   }
 
-  return toRows(records);
+  if (headers.length === 0) {
+    throw new CsvParseError('The file is empty or has no header row.');
+  }
+  return toRows(records, headers);
 }
 
 /**

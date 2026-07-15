@@ -54,6 +54,7 @@ import { sweepOrphanUploads, uploadStorage } from './services/uploadFile';
 import { errorHandler, requestId } from './middleware/errorHandler';
 import { getActionLog } from './services/actionLog.service';
 import { purgeExpiredPii } from './services/retention.service';
+import { HttpError } from './errors';
 
 dotenv.config();
 
@@ -82,11 +83,19 @@ app.use(requestId);
 //
 // It does check the database, because a server that cannot reach Postgres cannot do
 // anything useful and should be restarted.
-app.get('/api/health', (_req, res) => {
+app.get('/api/health', (req, res) => {
   prisma
     .$queryRaw`SELECT 1`
     .then(() => res.json({ ok: true }))
-    .catch((err: Error) => res.status(503).json({ ok: false, error: err.message }));
+    // Driver errors can contain the full connection string. Health probes are
+    // commonly public to the platform, so expose only the readiness state.
+    .catch(() =>
+      res.status(503).json({
+        ok: false,
+        error: 'Database unavailable.',
+        requestId: req.requestId,
+      }),
+    );
 });
 
 // ── File upload ─────────────────────────────────────────────────────────────
@@ -108,7 +117,7 @@ const upload = multer({
     if (isCsv) {
       cb(null, true);
     } else {
-      cb(new Error('Only CSV files are accepted.'));
+      cb(new HttpError(400, 'Only CSV files are accepted.'));
     }
   },
 });

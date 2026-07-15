@@ -55,6 +55,20 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
   const [mergeMatchingDuplicates, setMergeMatchingDuplicates] = useState(false);
 
   const mappedCount = Object.values(mapping).filter(Boolean).length;
+  const targetCounts = new Map<string, number>();
+  for (const target of Object.values(mapping)) {
+    if (
+      !target ||
+      target === KEEP_TARGET ||
+      (APPEND_TARGETS as readonly string[]).includes(target)
+    ) {
+      continue;
+    }
+    targetCounts.set(target, (targetCounts.get(target) ?? 0) + 1);
+  }
+  const duplicateTargets = [...targetCounts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([target]) => target);
 
   const handleValidate = () => {
     const filtered: ColumnMapping = {};
@@ -118,7 +132,7 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
           <button
             className="btn btn-primary"
             onClick={handleValidate}
-            disabled={loading}
+            disabled={loading || duplicateTargets.length > 0}
           >
             {loading ? (
               <>
@@ -135,6 +149,12 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
         {/* Column mapping table */}
         <div className="mapping-table-section">
           <h3 className="mapping-section-title">Column Mapping</h3>
+          {duplicateTargets.length > 0 && (
+            <div className="error-banner">
+              Map only one source column to each Shopify field. Choose a single source for:{' '}
+              {duplicateTargets.join(', ')}.
+            </div>
+          )}
           <div className="mapping-table-wrap">
             <table className="mapping-table">
               <thead>

@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { Prisma } from '@prisma/client';
 import {
   AffectedRow,
   CustomerCsvRow,
@@ -10,7 +11,8 @@ import {
 } from '../types';
 import { customerValidationRules } from '../validators/customer';
 import prisma from '../db/prisma';
-import { applyMappingToRecord } from './columnMapping.service';
+import { CsvParseError } from '../errors';
+import { applyMappingToRecord, assertValidColumnMapping } from './columnMapping.service';
 import { parseCsvFile } from './csvParser.service';
 import { deletePreview, getPreview } from './previewStore';
 
@@ -37,6 +39,9 @@ export async function validateCustomerCsv(
   createdBy?: string,
 ): Promise<CustomerValidationResult> {
   const { rows: rawRows, headers } = await parseCsvFile(filePath);
+  if (rawRows.length === 0) {
+    throw new CsvParseError('The file contains a header row but no customer data rows.');
+  }
 
   // Apply mapping only to the rows fed into validators; raw data is preserved separately
   const rows = applyColumnMapping(rawRows, columnMapping);
@@ -142,6 +147,7 @@ export async function validateFromPreview(
 ): Promise<CustomerValidationResult | null> {
   const entry = getPreview(uploadId);
   if (!entry) return null;
+  assertValidColumnMapping(entry.headers, columnMapping);
   const result = await validateCustomerCsv(
     entry.filePath,
     entry.fileName,
@@ -233,12 +239,15 @@ export async function updateValidationMetadata(
     const run = await prisma.validationRun.update({
       where: { id: validationId },
       data: {
-        ticketNumber: metadata.ticketNumber ?? undefined,
-        ticketName: metadata.ticketName ?? undefined,
-        comments: metadata.comments ?? undefined,
+        // undefined means "leave unchanged"; null means "clear it".
+        ticketNumber: metadata.ticketNumber,
+        ticketName: metadata.ticketName,
+        comments: metadata.comments,
       },
       select: {
         id: true,
+        createdBy: true,
+        piiPurgedAt: true,
         fileName: true,
         fileType: true,
         totalRows: true,
@@ -264,8 +273,11 @@ export async function updateValidationMetadata(
     });
     const { importRuns, ...rest } = run;
     return { ...rest, lastImport: importRuns[0] ?? null };
-  } catch {
-    return null;
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025') {
+      return null;
+    }
+    throw err;
   }
 }
 
@@ -273,7 +285,10 @@ export async function deleteValidationRun(validationId: string): Promise<boolean
   try {
     await prisma.validationRun.delete({ where: { id: validationId } });
     return true;
-  } catch {
-    return false;
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025') {
+      return false;
+    }
+    throw err;
   }
 }

@@ -42,6 +42,8 @@ export interface ValidationHistoryImport {
 
 export interface ValidationHistoryItem {
   id: string;
+  createdBy: string | null;
+  piiPurgedAt: Date | null;
   fileName: string;
   fileType: string;
   totalRows: number;
@@ -115,6 +117,8 @@ export interface ProductHistoryImport {
 
 export interface ProductHistoryItem {
   id: string;
+  createdBy: string | null;
+  piiPurgedAt: Date | null;
   fileName: string;
   productCount: number;
   ticketNumber: string | null;

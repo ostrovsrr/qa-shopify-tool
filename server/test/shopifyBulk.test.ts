@@ -168,10 +168,12 @@ describe('fetchAndParseBulkResults', () => {
         JSON.stringify({ __lineNumber: 2, data: { id: 'b' } }),
       ].join('\n'),
     );
-    const out = await fetchAndParseBulkResults('http://x', ['rowA', 'rowB'], (l) => ({
-      ref: l.ref,
-      id: (l.data as { id: string }).id,
-    }));
+    const out = await fetchAndParseBulkResults(
+      'http://x',
+      ['rowA', 'rowB'],
+      { kind: 'complete' },
+      (l) => ({ ref: l.ref, id: (l.data as { id: string }).id }),
+    );
     expect(out).toEqual([
       { ref: 'rowA', id: 'a' },
       { ref: 'rowB', id: 'b' },
@@ -187,34 +189,33 @@ describe('fetchAndParseBulkResults', () => {
         JSON.stringify({ __lineNumber: 1, data: { id: 'b' } }),
       ].join('\n'),
     );
-    const out = await fetchAndParseBulkResults('http://x', ['rowA', 'rowB'], (l) => l.ref);
+    const out = await fetchAndParseBulkResults(
+      'http://x',
+      ['rowA', 'rowB'],
+      { kind: 'complete' },
+      (l) => l.ref,
+    );
     expect(out).toEqual(['rowA', 'rowB']);
   });
 
   it('falls back to the whole line when there is no `data` key (error lines)', async () => {
     okResponse(JSON.stringify({ __lineNumber: 1, message: 'Email is invalid' }));
-    const out = await fetchAndParseBulkResults('http://x', ['rowA'], (l) => ({
-      ref: l.ref,
-      data: l.data,
-      topLevelMessage: (l.raw as { message?: string }).message,
-    }));
+    const out = await fetchAndParseBulkResults(
+      'http://x',
+      ['rowA'],
+      { kind: 'complete' },
+      (l) => ({
+        ref: l.ref,
+        data: l.data,
+        topLevelMessage: (l.raw as { message?: string }).message,
+      }),
+    );
     expect(out[0].topLevelMessage).toBe('Email is invalid');
     // `data` falls back to the raw line itself.
     expect(out[0].data).toMatchObject({ message: 'Email is invalid' });
   });
 
-  // ⚠ LANDMINE, pinned deliberately. Base detection folds over the MINIMUM
-  // __lineNumber seen (shopifyBulk.ts:198-202), which is correct only when the
-  // result file starts at the FIRST line. For a PARTIAL result set the minimum
-  // is not line 1, so every ref shifts and results are silently attributed to
-  // the WRONG source rows. No throw, no warning — just a report that blames the
-  // wrong customers.
-  //
-  // This cannot fire today: `partialDataUrl` is selected in the poll query
-  // (shopifyBulk.ts:143) but NEVER parsed. It becomes live the moment anyone
-  // wires up partial-result salvage on a FAILED bulk op — which is exactly the
-  // thing the async fix will be tempted to reach for. See TODOS.md #3.
-  it('MISALIGNS refs when the result file does not start at the first line (partial data)', async () => {
+  it('maps a partial result with an explicit base instead of shifting refs', async () => {
     okResponse(
       [
         JSON.stringify({ __lineNumber: 5, data: { id: 'e' } }),
@@ -224,14 +225,20 @@ describe('fetchAndParseBulkResults', () => {
     const out = await fetchAndParseBulkResults(
       'http://x',
       ['rowA', 'rowB', 'rowC', 'rowD', 'rowE', 'rowF'],
+      { kind: 'partial', lineNumberBase: 1 },
       (l) => l.ref,
     );
-    // CORRECT would be ['rowE', 'rowF'] (lines 5 and 6).
-    // ACTUAL is ['rowA', 'rowB'] — base collapses to 5, so line 5 → lineRefs[0].
-    expect(out).toEqual(['rowA', 'rowB']);
+    expect(out).toEqual(['rowE', 'rowF']);
   });
 
-  it('leaves refs undefined for lines beyond the end of lineRefs', async () => {
+  it('refuses to treat a partial-looking file as a completed result', async () => {
+    okResponse(JSON.stringify({ __lineNumber: 5, data: {} }));
+    await expect(
+      fetchAndParseBulkResults('http://x', ['a', 'b', 'c', 'd', 'e'], { kind: 'complete' }, (l) => l.ref),
+    ).rejects.toThrow(/may be partial data/i);
+  });
+
+  it('throws when a result line is beyond the submitted refs', async () => {
     okResponse(
       [
         JSON.stringify({ __lineNumber: 1, data: {} }),
@@ -239,19 +246,34 @@ describe('fetchAndParseBulkResults', () => {
         JSON.stringify({ __lineNumber: 3, data: {} }),
       ].join('\n'),
     );
-    const out = await fetchAndParseBulkResults('http://x', ['a'], (l) => l.ref);
-    expect(out).toEqual(['a', undefined, undefined]);
+    await expect(
+      fetchAndParseBulkResults('http://x', ['a'], { kind: 'complete' }, (l) => l.ref),
+    ).rejects.toThrow(/does not map/i);
+  });
+
+  it('throws when __lineNumber is missing or invalid', async () => {
+    okResponse(JSON.stringify({ data: {} }));
+    await expect(
+      fetchAndParseBulkResults('http://x', ['a'], { kind: 'complete' }, (l) => l.ref),
+    ).rejects.toThrow(/invalid __lineNumber/i);
   });
 
   it('ignores blank and whitespace-only lines', async () => {
     okResponse(`\n  \n${JSON.stringify({ __lineNumber: 1, data: {} })}\n\n`);
-    const out = await fetchAndParseBulkResults('http://x', ['a'], (l) => l.ref);
+    const out = await fetchAndParseBulkResults(
+      'http://x',
+      ['a'],
+      { kind: 'complete' },
+      (l) => l.ref,
+    );
     expect(out).toEqual(['a']);
   });
 
   it('returns [] for an empty result file', async () => {
     okResponse('');
-    await expect(fetchAndParseBulkResults('http://x', ['a'], (l) => l.ref)).resolves.toEqual([]);
+    await expect(
+      fetchAndParseBulkResults('http://x', ['a'], { kind: 'complete' }, (l) => l.ref),
+    ).resolves.toEqual([]);
   });
 
   it('throws on a non-2xx download', async () => {
@@ -259,7 +281,7 @@ describe('fetchAndParseBulkResults', () => {
       'fetch',
       vi.fn(async () => ({ status: 404, text: async () => 'nope' }) as unknown as Response),
     );
-    await expect(fetchAndParseBulkResults('http://x', [], () => null)).rejects.toThrow(
+    await expect(fetchAndParseBulkResults('http://x', [], { kind: 'complete' }, () => null)).rejects.toThrow(
       /Failed to download bulk results \(HTTP 404\)/,
     );
   });
@@ -274,7 +296,12 @@ describe('fetchAndParseBulkResults', () => {
     ).join('\n');
     okResponse(lines);
     const refs = Array.from({ length: 200_000 }, (_, i) => i);
-    const out = await fetchAndParseBulkResults('http://x', refs, (l) => l.ref);
+    const out = await fetchAndParseBulkResults(
+      'http://x',
+      refs,
+      { kind: 'complete' },
+      (l) => l.ref,
+    );
     expect(out).toHaveLength(200_000);
     expect(out[0]).toBe(0);
     expect(out[199_999]).toBe(199_999);
