@@ -8,10 +8,10 @@ import {
   SHOPIFY_COLUMNS,
 } from '../services/columnMapping.service';
 import { CustomerValidationIssue, Severity } from '../types';
-import { excelSafeRecord, excelSafeText, excelSafeValues } from './excelCell';
+import { excelSafeRecord, excelSafeText } from './excelCell';
 
 // Written with ExcelJS's *streaming* workbook writer: every row is committed
-// (flushed to the output stream and freed) as it's built. This report has seven
+// (flushed to the output stream and freed) as it's built. This report has five
 // sheets, three of which repeat every uploaded row (Rows With Shopify Result,
 // Full Uploaded File, Shopify Template), so on a large import the in-memory
 // workbook plus the writeBuffer copy would exhaust the V8 heap. Streaming keeps
@@ -117,7 +117,6 @@ export async function streamShopifyVerificationReport(
   workbook.creator = 'Shopify CSV QA Tool';
   workbook.created = new Date();
 
-  addSummarySheet(workbook, importRun, validationRun);
   addResultSheet(
     workbook,
     'Errors',
@@ -134,7 +133,6 @@ export async function streamShopifyVerificationReport(
     originalByRow,
     issuesByRow,
   );
-  addInfoSheet(workbook, rowResults, issuesByRow);
   addRuleGapsSheet(workbook, rowResults);
   addRowsWithShopifyResultSheet(
     workbook,
@@ -176,80 +174,6 @@ function summarizeIssues(issues: CustomerValidationIssue[] | undefined) {
     messages: list.map((i) => i.message).join(' | '),
     suggestedFixes: list.map((i) => i.suggestedFix).filter(Boolean).join(' | '),
   };
-}
-
-function addSummarySheet(
-  workbook: ExcelJS.stream.xlsx.WorkbookWriter,
-  importRun: {
-    id: string;
-    validationId: string;
-    shopDomain: string;
-    bulkOperationId: string | null;
-    status: string;
-    successCount: number;
-    errorCount: number;
-    createdAt: Date;
-    rowResults: ReportRowResult[];
-  },
-  validationRun: {
-    fileName: string;
-    totalRows: number;
-    errors: number;
-    warnings: number;
-    info: number;
-    createdAt: Date;
-  },
-) {
-  const sheet = workbook.addWorksheet('Summary');
-  sheet.columns = [{ width: 34 }, { width: 58 }];
-
-  const title = sheet.addRow(excelSafeValues(['Shopify CSV QA Tool - Shopify Verification Report']));
-  title.getCell(1).font = { bold: true, size: 14, color: { argb: HEADER_COLOURS.Summary } };
-  sheet.addRow([]);
-
-  const missingRule = importRun.rowResults.filter((r) => !r.accepted && !r.wasFlaggedByValidator).length;
-  const falsePositive = importRun.rowResults.filter((r) => r.accepted && r.wasFlaggedByValidator).length;
-  const confirmedReject = importRun.rowResults.filter((r) => !r.accepted && r.wasFlaggedByValidator).length;
-  const confirmedClean = importRun.rowResults.filter((r) => r.accepted && !r.wasFlaggedByValidator).length;
-
-  const kv = (label: string, value: string | number) => {
-    const r = sheet.addRow(excelSafeValues([label, value]));
-    r.getCell(1).font = { bold: true };
-  };
-
-  kv('File Name', validationRun.fileName);
-  kv('Validation ID', importRun.validationId);
-  kv('Import Run ID', importRun.id);
-  kv('Shop Domain', importRun.shopDomain);
-  kv('Bulk Operation ID', importRun.bulkOperationId ?? '(parallel batch — multiple)');
-  kv('Bulk Operation Status', importRun.status);
-  kv('Imported At', importRun.createdAt.toISOString());
-  sheet.addRow([]);
-  kv('Original Total Rows', validationRun.totalRows);
-  kv('Pre-check Errors', validationRun.errors);
-  kv('Pre-check Warnings', validationRun.warnings);
-  kv('Pre-check Info', validationRun.info);
-  sheet.addRow([]);
-  kv('Shopify Accepted Rows', importRun.successCount);
-  kv('Shopify Rejected Rows', importRun.errorCount);
-  kv('Missing Rule Rows', missingRule);
-  kv('False Positive Rows', falsePositive);
-  kv('Confirmed Reject Rows', confirmedReject);
-  kv('Confirmed Clean Rows', confirmedClean);
-
-  sheet.addRow([]);
-  const header = sheet.addRow(excelSafeValues(['Bucket', 'Meaning']));
-  styleHeader(header, HEADER_COLOURS.Summary);
-  const legend: [string, string][] = [
-    ['Errors', 'Rows Shopify rejected. These are the highest priority fixes.'],
-    ['Warnings', 'Rows our pre-check flagged but Shopify accepted. Review for over-strict rules.'],
-    ['Info', 'Confirmed reject and confirmed clean row counts.'],
-    ['Rows With Shopify Result', 'Full uploaded file plus Shopify status and pre-check issue summary.'],
-    ['Shopify Template', 'Mapped Shopify import template plus Shopify result columns.'],
-  ];
-  for (const entry of legend) sheet.addRow(excelSafeValues(entry));
-
-  sheet.commit();
 }
 
 function addResultSheet(
@@ -316,36 +240,6 @@ function addResultSheet(
       };
     });
     row.commit();
-  }
-
-  sheet.commit();
-}
-
-function addInfoSheet(
-  workbook: ExcelJS.stream.xlsx.WorkbookWriter,
-  rowResults: ReportRowResult[],
-  issuesByRow: Map<number, CustomerValidationIssue[]>,
-) {
-  const sheet = workbook.addWorksheet('Info');
-  sheet.columns = [
-    { header: 'Bucket', key: 'bucket', width: 24 },
-    { header: 'Count', key: 'count', width: 12 },
-    { header: 'Rows', key: 'rows', width: 80 },
-  ];
-  styleHeader(sheet.getRow(1), HEADER_COLOURS.Info);
-
-  const buckets = [
-    ['Confirmed Reject', rowResults.filter((r) => !r.accepted && r.wasFlaggedByValidator)],
-    ['Confirmed Clean', rowResults.filter((r) => r.accepted && !r.wasFlaggedByValidator)],
-    ['Rejected With No Pre-check Error', rowResults.filter((r) => !r.accepted && summarizeIssues(issuesByRow.get(r.rowNumber)).errorCount === 0)],
-  ] as const;
-
-  for (const [bucket, rows] of buckets) {
-    sheet.addRow(excelSafeRecord({
-      bucket,
-      count: rows.length,
-      rows: rows.map((r) => r.rowNumber).join(', '),
-    }));
   }
 
   sheet.commit();

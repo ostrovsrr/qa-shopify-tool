@@ -81,7 +81,6 @@ describe('full validation pipeline (golden)', () => {
         "InvalidPhone": 1,
         "InvalidProvinceCode": 1,
         "InvalidTaxExempt": 1,
-        "LeadingTrailingWhitespace": 1,
         "LongNote": 1,
         "MissingContact": 1,
         "NonNumericField": 1,

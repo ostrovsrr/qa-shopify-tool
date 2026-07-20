@@ -6,10 +6,9 @@ import { purgedMessage } from '../services/retention.service';
 import { excelSafeRecord, excelSafeText } from './excelCell';
 
 // Product import report (no validator columns; results keyed by Handle):
-//   • Summary — run metadata + accepted/rejected (+ per-store for a batch)
 //   • Products With Shopify Result — one row per product, in CSV order
-//   • Rejections — grouped by (field, code) with counts + samples
-//   • Full Uploaded File — the raw CSV rows, for reference
+//   • Full Uploaded File — the raw CSV rows, each carrying its product's
+//     verdict (Result / Shopify Code / Shopify Message)
 //
 // Written with ExcelJS's *streaming* workbook writer, and — crucially — the
 // upload's rows are read from the DB in bounded pages rather than all at once.
@@ -22,7 +21,6 @@ const BATCH = 5000;
 const HEADER_COLOURS = {
   Summary: 'FF1E3A5F',
   Products: 'FF065F46',
-  Rejections: 'FFB91C1C',
   Uploaded: 'FF004C3F',
 };
 
@@ -62,12 +60,13 @@ async function* iterOriginalRows(
   }
 }
 
-// Streams the workbook to `stream`. `onReady` fires once, after the initial DB
-// read and before any bytes are written, so the caller can set headers first.
+// Streams the workbook to `stream`. `onReady(sourceFileName)` fires once, after
+// the initial DB read and before any bytes are written, so the caller can set
+// the Content-Disposition filename before the stream starts.
 export async function streamProductImportReport(
   importRunId: string,
   stream: Writable,
-  onReady: () => void,
+  onReady: (sourceFileName: string) => void,
 ): Promise<void> {
   // Deliberately NOT including uploadRun.originalRows — those are paged below.
   const run = await prisma.productImportRun.findUnique({
@@ -112,7 +111,7 @@ export async function streamProductImportReport(
   }
 
   // Headers must be set before the workbook writes its first byte.
-  onReady();
+  onReady(run.uploadRun.fileName);
 
   const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
     stream,
@@ -124,10 +123,8 @@ export async function streamProductImportReport(
   workbook.creator = 'Shopify Products QA Tool';
   workbook.created = new Date();
 
-  addSummarySheet(workbook, run, results, shopLabel);
   addProductsSheet(workbook, orderedHandles, resultByHandle, titleByHandle, shopLabel);
-  addRejectionsSheet(workbook, results);
-  await addFullUploadedFileSheet(workbook, originalColumns, run.uploadId);
+  await addFullUploadedFileSheet(workbook, originalColumns, run.uploadId, resultByHandle);
 
   await workbook.commit();
 }
@@ -139,74 +136,6 @@ function styleHeader(row: ExcelJS.Row, bgArgb: string): void {
     cell.alignment = { vertical: 'middle', horizontal: 'left' };
   });
   row.height = 20;
-}
-
-function addSummarySheet(
-  workbook: ExcelJS.stream.xlsx.WorkbookWriter,
-  run: {
-    id: string;
-    uploadId: string;
-    shopDomain: string;
-    bulkOperationId: string | null;
-    status: string;
-    error: string | null;
-    createdAt: Date;
-    uploadRun: { fileName: string; productCount: number };
-  },
-  results: ReportResult[],
-  shopLabel: (storeId: string | null) => string,
-): void {
-  const sheet = workbook.addWorksheet('Summary');
-  sheet.columns = [{ width: 34 }, { width: 64 }];
-
-  const title = sheet.addRow(['Shopify Products QA Tool — Import Report']);
-  title.getCell(1).font = { bold: true, size: 14, color: { argb: HEADER_COLOURS.Summary } };
-  sheet.addRow([]);
-
-  const accepted = results.filter((r) => r.accepted).length;
-  const rejected = results.length - accepted;
-
-  const kv = (label: string, value: string | number): void => {
-    const r = sheet.addRow([label, value]);
-    r.getCell(1).font = { bold: true };
-  };
-
-  kv('File Name', run.uploadRun.fileName);
-  kv('Upload ID', run.uploadId);
-  kv('Import Run ID', run.id);
-  kv('Shop Domain', run.shopDomain);
-  kv('Bulk Operation ID', run.bulkOperationId ?? '(parallel batch — multiple)');
-  kv('Bulk Operation Status', run.status);
-  if (run.error) kv('Error', run.error);
-  kv('Imported At', run.createdAt.toISOString());
-  sheet.addRow([]);
-  kv('Products In Upload', run.uploadRun.productCount);
-  kv('Products With A Result', results.length);
-  kv('Accepted', accepted);
-  kv('Rejected', rejected);
-
-  // Per-store breakdown (one row per store the results landed in).
-  const perStore = new Map<string, { total: number; accepted: number; rejected: number }>();
-  for (const r of results) {
-    const key = r.storeId ?? '';
-    const entry = perStore.get(key) ?? { total: 0, accepted: 0, rejected: 0 };
-    entry.total++;
-    if (r.accepted) entry.accepted++;
-    else entry.rejected++;
-    perStore.set(key, entry);
-  }
-
-  if (perStore.size > 1) {
-    sheet.addRow([]);
-    const header = sheet.addRow(['Store', 'Products / Accepted / Rejected']);
-    styleHeader(header, HEADER_COLOURS.Summary);
-    for (const [storeId, c] of perStore) {
-      sheet.addRow([shopLabel(storeId || null), `${c.total} / ${c.accepted} / ${c.rejected}`]);
-    }
-  }
-
-  // Small sheet with no post-row column changes — flush it all at once.
-  sheet.commit();
 }
 
 function addProductsSheet(
@@ -260,60 +189,11 @@ function addProductsSheet(
   sheet.commit();
 }
 
-function addRejectionsSheet(
-  workbook: ExcelJS.stream.xlsx.WorkbookWriter,
-  results: ReportResult[],
-): void {
-  const sheet = workbook.addWorksheet('Rejections');
-  sheet.columns = [
-    { header: 'Shopify Field', key: 'field', width: 26 },
-    { header: 'Shopify Code', key: 'code', width: 24 },
-    { header: 'Count', key: 'count', width: 10 },
-    { header: 'Sample Handles', key: 'handles', width: 50 },
-    { header: 'Sample Message', key: 'message', width: 64 },
-  ];
-  sheet.autoFilter = { from: 'A1', to: 'E1' };
-  styleHeader(sheet.getRow(1), HEADER_COLOURS.Rejections);
-
-  const groups = new Map<
-    string,
-    { field: string; code: string; count: number; handles: string[]; messages: string[] }
-  >();
-  for (const r of results.filter((x) => !x.accepted)) {
-    const key = `${r.shopifyField ?? ''}|${r.shopifyCode ?? ''}`;
-    let g = groups.get(key);
-    if (!g) {
-      g = { field: r.shopifyField ?? '', code: r.shopifyCode ?? '', count: 0, handles: [], messages: [] };
-      groups.set(key, g);
-    }
-    g.count++;
-    if (g.handles.length < 10 && !g.handles.includes(r.handle)) g.handles.push(r.handle);
-    if (r.message && g.messages.length < 1) g.messages.push(r.message);
-  }
-
-  if (groups.size === 0) {
-    sheet.addRow(['No rejections — every product was accepted.']);
-    sheet.commit();
-    return;
-  }
-
-  for (const g of [...groups.values()].sort((a, b) => b.count - a.count)) {
-    sheet.addRow(excelSafeRecord({
-      field: g.field,
-      code: g.code,
-      count: g.count,
-      handles: g.handles.join(', '),
-      message: g.messages[0] ?? '',
-    })).commit();
-  }
-
-  sheet.commit();
-}
-
 async function addFullUploadedFileSheet(
   workbook: ExcelJS.stream.xlsx.WorkbookWriter,
   originalColumns: string[],
   uploadRunId: string,
+  resultByHandle: Map<string, ReportResult>,
 ): Promise<void> {
   const sheet = workbook.addWorksheet('Full Uploaded File');
 
@@ -323,11 +203,11 @@ async function addFullUploadedFileSheet(
     return;
   }
 
-  const allColumns = ['Row Number', ...originalColumns];
+  const allColumns = ['Row Number', 'Result', 'Shopify Code', 'Shopify Message', ...originalColumns];
   sheet.columns = allColumns.map((col) => ({
     header: excelSafeText(col),
     key: col,
-    width: col === 'Row Number' ? 12 : 22,
+    width: col === 'Row Number' ? 12 : col === 'Result' ? 14 : col === 'Shopify Message' ? 50 : 22,
   }));
   sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(allColumns.length)}1` };
   styleHeader(sheet.getRow(1), HEADER_COLOURS.Uploaded);
@@ -337,9 +217,25 @@ async function addFullUploadedFileSheet(
   for await (const batch of iterOriginalRows(uploadRunId)) {
     for (const origRow of batch) {
       const data = (origRow.data ?? {}) as Record<string, string>;
-      const rowData: Record<string, string | number> = { 'Row Number': origRow.rowNumber };
+      // Results are per product (Handle); every CSV row of a product — variant
+      // and image rows included — carries its product's verdict.
+      const result = resultByHandle.get((data['Handle'] ?? '').trim());
+      const rowData: Record<string, string | number> = {
+        'Row Number': origRow.rowNumber,
+        Result: result ? (result.accepted ? 'Accepted' : 'Rejected') : 'Not imported',
+        'Shopify Code': result?.shopifyCode ?? '',
+        'Shopify Message': result?.message ?? '',
+      };
       for (const col of originalColumns) rowData[col] = data[col] ?? '';
-      sheet.addRow(excelSafeRecord(rowData)).commit();
+      const row = sheet.addRow(excelSafeRecord(rowData));
+      if (result) {
+        row.getCell(2).fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: result.accepted ? RESULT_COLOURS.accepted : RESULT_COLOURS.rejected },
+        };
+      }
+      row.commit();
       wrote = true;
     }
   }

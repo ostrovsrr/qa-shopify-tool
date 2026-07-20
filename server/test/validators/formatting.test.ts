@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { TagsRule } from '../../src/validators/customer/tags.rule';
 import { NumericFieldsRule } from '../../src/validators/customer/numericFields.rule';
-import { WhitespaceRule } from '../../src/validators/customer/whitespace.rule';
 import { HtmlInjectionRule } from '../../src/validators/customer/htmlInjection.rule';
 import { LongNoteRule } from '../../src/validators/customer/longNote.rule';
 import { countByType, makeRows } from '../helpers';
@@ -36,21 +35,6 @@ describe('NumericFieldsRule', () => {
   it('warns on non-numeric and negative values', () => {
     expect(rule.validate(makeRows([{ 'Total Spent': 'abc' }]))[0].issueType).toBe('NonNumericField');
     expect(rule.validate(makeRows([{ 'Total Orders': '-1' }]))[0].issueType).toBe('NegativeNumericField');
-  });
-});
-
-describe('WhitespaceRule', () => {
-  const rule = new WhitespaceRule();
-
-  it('flags leading/trailing whitespace in important fields', () => {
-    const issues = rule.validate(makeRows([{ 'First Name': ' John ', Email: 'a@b.com' }]));
-    expect(issues).toHaveLength(1);
-    expect(issues[0].issueType).toBe('LeadingTrailingWhitespace');
-    expect(issues[0].suggestedFix).toContain('John');
-  });
-
-  it('passes clean values', () => {
-    expect(rule.validate(makeRows([{ 'First Name': 'John' }]))).toHaveLength(0);
   });
 });
 

@@ -57,8 +57,12 @@ export function applyMappingToRecord(
       if (trimmed) (target === APPEND_TO_TAGS ? tagAppends : noteAppends).push(trimmed);
       continue;
     }
-    // "Keep" passes the column through under its original name
-    out[target === KEEP_COLUMN ? key : target] = value;
+    // "Keep" passes the column through under its original name. Trim on the way
+    // through: leading/trailing whitespace in a source cell is never meaningful to
+    // Shopify, so we clean it here rather than flag it. Both the test-store import
+    // and the "Shopify Template" report sheet build from this one function, so the
+    // cleaned value is what gets imported AND what the report shows — in lockstep.
+    out[target === KEEP_COLUMN ? key : target] = (value ?? '').trim();
   }
   if (tagAppends.length > 0) {
     out['Tags'] = [(out['Tags'] ?? '').trim(), ...tagAppends].filter(Boolean).join(TAGS_SEPARATOR);

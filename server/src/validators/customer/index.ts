@@ -11,7 +11,6 @@ import { PostalCodeRule } from './postalCode.rule';
 import { ProvinceCodeRule } from './provinceCode.rule';
 import { TagsRule } from './tags.rule';
 import { NumericFieldsRule } from './numericFields.rule';
-import { WhitespaceRule } from './whitespace.rule';
 import { LongNoteRule } from './longNote.rule';
 import { HtmlInjectionRule } from './htmlInjection.rule';
 
@@ -28,7 +27,6 @@ export const customerValidationRules: CustomerValidationRule[] = [
   new ProvinceCodeRule(),
   new TagsRule(),
   new NumericFieldsRule(),
-  new WhitespaceRule(),
   new HtmlInjectionRule(),
   new LongNoteRule(),
 ];

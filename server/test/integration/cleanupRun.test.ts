@@ -76,7 +76,7 @@ vi.mock('../../src/services/shopifyBulk', async (importOriginal) => {
 
 const prisma = (await import('../../src/db/prisma')).default;
 const { resetDb } = await import('./resetDb');
-const { startCleanupRun, reconcileCleanupRun } = await import(
+const { startCleanupRun, reconcileCleanupRun, sweepRunningCleanups } = await import(
   '../../src/services/cleanupRun.service'
 );
 
@@ -144,6 +144,36 @@ runIf('async cleanup', () => {
     expect(done?.errors).toEqual([
       { id: 'gid://shopify/Product/100', message: 'Product is referenced by an order' },
     ]);
+  });
+
+  // ── THE STORE MUST NOT STAY "BUSY" AFTER THE DELETE FINISHES ───────────────
+  // A bulk cleanup holds its store lock until reconcile brings it terminal, and
+  // reconcile only ran when a browser polled GET /api/cleanup/:id. A watcher that
+  // walked away — closed tab, or a delete that outran the client's ~5-min poll cap
+  // — left the run RUNNING with Shopify already done, so the store read "busy" until
+  // the 30-min lock TTL. The server-side sweep is the backstop: it advances the
+  // orphan itself and hands the store back, with no client in the loop.
+  it('sweepRunningCleanups frees a store whose cleanup finished but nobody polled', async () => {
+    taggedIds = manyIds(100);
+    const run = await startCleanupRun('CUSTOMER', 'store1', 'qa-import');
+
+    // Precondition: the bulk path holds the store lock while RUNNING.
+    expect(run.status).toBe('RUNNING');
+    expect(
+      await prisma.storeLock.findUnique({ where: { storeId: 'store1' } }),
+    ).not.toBeNull();
+
+    // Shopify finished the delete, but no browser is polling this run.
+    opStatus = 'COMPLETED';
+    opUrl = 'https://results/cleanup';
+
+    await sweepRunningCleanups();
+
+    const done = await prisma.cleanupRun.findUnique({ where: { id: run.id } });
+    expect(done?.status).toBe('COMPLETED');
+    expect(done?.deleted).toBe(99);
+    // The store is free again — no lingering lock, no false "busy".
+    expect(await prisma.storeLock.findUnique({ where: { storeId: 'store1' } })).toBeNull();
   });
 
   it('marks the run FAILED when Shopify ends the operation non-COMPLETED', async () => {

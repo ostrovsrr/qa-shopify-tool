@@ -11,6 +11,7 @@ import {
 } from '../services/productImport.service';
 import { recordAction } from '../services/actionLog.service';
 import { ShopifyAuthError, ShopifyConfigError } from '../services/shopifyClient';
+import { reportFileName } from '../utils/reportFileName';
 
 // Shopify config/auth failures map to dedicated status codes; everything else
 // falls through to the generic error handler. Returns true if it handled `err`.
@@ -165,14 +166,14 @@ export async function getImportReportHandler(
     // Stream the workbook straight to the response. Headers are set in the
     // onReady callback, which fires after the DB read but before the first byte,
     // so Content-Disposition is in place before streaming starts.
-    await streamProductImportReport(parsed.data, res, () => {
+    await streamProductImportReport(parsed.data, res, (sourceFileName) => {
       res.setHeader(
         'Content-Type',
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       );
       res.setHeader(
         'Content-Disposition',
-        `attachment; filename="product-import-report-${parsed.data}.xlsx"`,
+        `attachment; filename="${reportFileName('product-import-validation', sourceFileName, 'xlsx')}"`,
       );
     });
   } catch (err) {

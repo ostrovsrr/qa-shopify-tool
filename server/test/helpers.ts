@@ -4,7 +4,7 @@ import { normalizeRecord } from '../src/utils/normalize';
 /**
  * Build a single CustomerCsvRow the way the parser would: `normalized` is the
  * trimmed version of `original`. Pass the raw (untrimmed) field values so rules
- * that care about whitespace (WhitespaceRule) behave realistically.
+ * see exactly what the parser would hand them.
  */
 export function makeRow(
   rowNumber: number,

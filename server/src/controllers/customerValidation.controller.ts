@@ -169,7 +169,7 @@ export async function getReportHandler(
       );
       res.setHeader(
         'Content-Disposition',
-        `attachment; filename="${reportFileName('prevalidation', sourceFileName, 'xlsx')}"`,
+        `attachment; filename="${reportFileName('prevalidation-report', sourceFileName, 'xlsx')}"`,
       );
     });
   } catch (err) {

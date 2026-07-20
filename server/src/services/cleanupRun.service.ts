@@ -300,6 +300,46 @@ export async function reconcileCleanupRun(id: string): Promise<CleanupRun | null
   });
 }
 
+/**
+ * Advance every still-running cleanup, independent of any browser.
+ *
+ * The bulk path holds its store lock until reconcileCleanupRun brings the run to
+ * terminal — and that only ever runs when a client polls GET /api/cleanup/:id. A
+ * cleanup whose watcher walked away (closed the tab, or a bulk delete that outran
+ * the client's ~5-min poll cap) then sits RUNNING with Shopify already finished,
+ * holding its store "busy" until the 30-min lock TTL finally expires. The store is
+ * falsely unavailable for up to half an hour after the delete actually completed.
+ *
+ * This is the server-side backstop: a periodic sweep reconciles those orphaned runs
+ * itself, so the lock is handed back within one sweep of Shopify finishing rather
+ * than at the TTL ceiling. reconcileCleanupRun is idempotent and guards on status,
+ * so racing a live client poll on the same run is harmless.
+ *
+ * Only bulk-path rows are touched (bulkOperationId set). A PENDING row has no
+ * operation id yet and belongs to resume-on-boot, not here — the reconcile guard
+ * would bounce it anyway.
+ *
+ * Serves the customer and product flows alike — one engine, both flows.
+ */
+export async function sweepRunningCleanups(): Promise<void> {
+  const stuck = await prisma.cleanupRun.findMany({
+    where: {
+      status: { notIn: TERMINAL_BULK_STATUSES },
+      bulkOperationId: { not: null },
+    },
+    select: { id: true },
+  });
+
+  for (const { id } of stuck) {
+    // One unreachable store must not stop the rest from being reconciled.
+    try {
+      await reconcileCleanupRun(id);
+    } catch (err) {
+      console.error(`[cleanup-sweep] failed to reconcile ${id}:`, (err as Error).message);
+    }
+  }
+}
+
 export async function getCleanupRun(id: string): Promise<CleanupRun | null> {
   return prisma.cleanupRun.findUnique({ where: { id } });
 }

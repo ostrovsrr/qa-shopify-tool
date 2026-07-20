@@ -206,7 +206,7 @@ export async function getImportReportHandler(
       );
       res.setHeader(
         'Content-Disposition',
-        `attachment; filename="${reportFileName('shopify-import-validation', sourceFileName, 'xlsx')}"`,
+        `attachment; filename="${reportFileName('customer-import-validation', sourceFileName, 'xlsx')}"`,
       );
     });
   } catch (err) {

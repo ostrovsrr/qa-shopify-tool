@@ -103,7 +103,6 @@ export async function streamExcelReport(
   workbook.creator = 'Shopify CSV QA Tool';
   workbook.created = new Date();
 
-  addSummarySheet(workbook, run, issues);
   addIssuesSheet(workbook, 'Errors', issues.filter((i) => i.severity === 'Error'));
   addIssuesSheet(workbook, 'Warnings', issues.filter((i) => i.severity === 'Warning'));
   addFullUploadedFileSheet(workbook, originalColumns, runData.originalRows);
@@ -130,74 +129,6 @@ function styleHeader(row: ExcelJS.Row, bgArgb: string) {
     cell.alignment = { vertical: 'middle', horizontal: 'left' };
   });
   row.height = 20;
-}
-
-function addSummarySheet(
-  workbook: ExcelJS.stream.xlsx.WorkbookWriter,
-  run: {
-    id: string;
-    fileName: string;
-    totalRows: number;
-    errors: number;
-    warnings: number;
-    info: number;
-    createdAt: Date;
-  },
-  issues: CustomerValidationIssue[],
-) {
-  const sheet = workbook.addWorksheet('Summary');
-  sheet.columns = [{ width: 28 }, { width: 44 }];
-
-  const title = sheet.addRow(['Shopify CSV QA Tool — Validation Report']);
-  title.getCell(1).font = { bold: true, size: 14, color: { argb: 'FF1E3A5F' } };
-  sheet.addRow([]);
-
-  const kv = (label: string, value: string | number) => {
-    const r = sheet.addRow([label, value]);
-    r.getCell(1).font = { bold: true };
-  };
-
-  kv('File Name', run.fileName);
-  kv('Validation ID', run.id);
-  kv('Total Rows', run.totalRows);
-  kv('Total Errors', run.errors);
-  kv('Total Warnings', run.warnings);
-  kv('Total Info', run.info);
-  kv('Created Date', run.createdAt.toISOString());
-  sheet.addRow([]);
-
-  const breakdownTitle = sheet.addRow(['Issue Type Breakdown']);
-  breakdownTitle.getCell(1).font = { bold: true, size: 12 };
-
-  const headerRow = sheet.addRow(['Issue Type', 'Count', 'Severity']);
-  styleHeader(headerRow, HEADER_COLOURS['Summary']);
-  sheet.getColumn(3).width = 14;
-
-  const counts = new Map<string, { count: number; severity: Severity }>();
-  for (const issue of issues) {
-    const existing = counts.get(issue.issueType);
-    if (existing) {
-      existing.count++;
-    } else {
-      counts.set(issue.issueType, { count: 1, severity: issue.severity });
-    }
-  }
-
-  for (const [issueType, { count, severity }] of [...counts.entries()].sort((a, b) =>
-    a[0].localeCompare(b[0]),
-  )) {
-    const r = sheet.addRow([issueType, count, severity]);
-    r.getCell(3).fill = {
-      type: 'pattern',
-      pattern: 'solid',
-      fgColor: { argb: SEVERITY_COLOURS[severity] },
-    };
-  }
-
-  // Summary is small and sets a column width after adding rows (getColumn(3)),
-  // so commit the whole sheet at once rather than per row — column metadata is
-  // written when the sheet is committed.
-  sheet.commit();
 }
 
 function addIssuesSheet(

@@ -54,6 +54,7 @@ import { sweepOrphanUploads, uploadStorage } from './services/uploadFile';
 import { errorHandler, requestId } from './middleware/errorHandler';
 import { getActionLog } from './services/actionLog.service';
 import { purgeExpiredPii } from './services/retention.service';
+import { sweepRunningCleanups } from './services/cleanupRun.service';
 import { HttpError } from './errors';
 
 dotenv.config();
@@ -258,6 +259,21 @@ if (require.main === module) {
     };
     purge();
     setInterval(purge, 24 * 60 * 60 * 1000).unref();
+
+    // A bulk cleanup's store lock is released only when reconcileCleanupRun brings
+    // the run terminal, and that runs only when a browser polls GET /api/cleanup/:id.
+    // A cleanup whose watcher walked away — closed tab, or a delete that outran the
+    // client's ~5-min poll cap — sits RUNNING with Shopify already finished, holding
+    // its store "busy" until the 30-min lock TTL. This backstop advances those
+    // orphaned runs server-side so the store is freed within a sweep of Shopify
+    // finishing. Covers customers and products (one engine). See sweepRunningCleanups.
+    const reconcileCleanups = (): void => {
+      void sweepRunningCleanups().catch((err: Error) => {
+        console.error('[cleanup-sweep] failed:', err.message);
+      });
+    };
+    reconcileCleanups();
+    setInterval(reconcileCleanups, 60 * 1000).unref();
   });
 
   // ── Graceful shutdown ─────────────────────────────────────────────────────

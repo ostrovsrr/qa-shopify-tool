@@ -65,6 +65,21 @@ describe('applyMappingToRecord', () => {
     expect(out['Note']).toBe('legacy-crm');
   });
 
+  // We used to WARN on leading/trailing whitespace and leave the value dirty.
+  // Now we clean it silently here — the one function the import and the report's
+  // "Shopify Template" sheet both build from — so what gets imported is trimmed.
+  it('trims leading/trailing whitespace from mapped and kept values', () => {
+    const out = applyMappingToRecord(
+      { 'E-mail': '  a@x.com ', 'First Name': ' John ', 'Loyalty Tier': ' gold ' },
+      { 'E-mail': 'Email', 'First Name': 'First Name', 'Loyalty Tier': KEEP_COLUMN },
+    );
+    expect(out).toEqual({
+      Email: 'a@x.com',
+      'First Name': 'John',
+      'Loyalty Tier': 'gold',
+    });
+  });
+
   it('keeps columns mapped to Keep under their original names', () => {
     const out = applyMappingToRecord(
       { 'E-mail': 'a@x.com', 'Loyalty Tier': 'gold', 'Member Since': '2019' },
