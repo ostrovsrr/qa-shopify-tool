@@ -1,0 +1,567 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shopify CSV QA Tool — Architecture</title>
+<style>
+  :root {
+    /* neutrals — cool ink bias toward the steel accent */
+    --paper: #f5f6f4;
+    --surface: #ffffff;
+    --surface-2: #eceef0;
+    --line: #d6dade;
+    --ink: #10151b;
+    --ink-soft: #3c454e;
+    --ink-faint: #6c757e;
+
+    /* domain accents */
+    --cust: #3b6fd4;         /* customers lane — indigo */
+    --cust-tint: #e8eefb;
+    --prod: #c47a1e;         /* products lane — amber */
+    --prod-tint: #f8efe0;
+    --shared: #2f8a86;       /* shared infra — steel-teal */
+    --shared-tint: #e0f0ef;
+    --ext: #4f9d63;          /* external Shopify — green */
+    --ext-tint: #e6f1e8;
+    --data: #6b6f8c;         /* postgres/prisma — slate-violet */
+    --data-tint: #ebecf2;
+
+    /* semantic — state machine only */
+    --ok: #3f9b57;
+    --warn: #c98a1a;
+    --bad: #cf4b45;
+
+    --radius: 9px;
+    --mono: ui-monospace, "Cascadia Code", "SF Mono", "Consolas", monospace;
+    --sans: "Segoe UI", system-ui, -apple-system, Helvetica, Arial, sans-serif;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #0d1218;
+      --surface: #161d25;
+      --surface-2: #1e2731;
+      --line: #2b3742;
+      --ink: #e9edf1;
+      --ink-soft: #b3bdc7;
+      --ink-faint: #7c8894;
+
+      --cust: #6fa0f2;    --cust-tint: #182436;
+      --prod: #e0a94e;    --prod-tint: #33270f;
+      --shared: #4fc0ba;  --shared-tint: #10302e;
+      --ext: #6bc47f;     --ext-tint: #12291a;
+      --data: #a3a7cc;    --data-tint: #20222f;
+
+      --ok: #5fc079;  --warn: #e0a94e;  --bad: #e5726c;
+    }
+  }
+  :root[data-theme="light"] {
+    --paper: #f5f6f4; --surface: #ffffff; --surface-2: #eceef0; --line: #d6dade;
+    --ink: #10151b; --ink-soft: #3c454e; --ink-faint: #6c757e;
+    --cust: #3b6fd4; --cust-tint: #e8eefb; --prod: #c47a1e; --prod-tint: #f8efe0;
+    --shared: #2f8a86; --shared-tint: #e0f0ef; --ext: #4f9d63; --ext-tint: #e6f1e8;
+    --data: #6b6f8c; --data-tint: #ebecf2;
+    --ok: #3f9b57; --warn: #c98a1a; --bad: #cf4b45;
+  }
+  :root[data-theme="dark"] {
+    --paper: #0d1218; --surface: #161d25; --surface-2: #1e2731; --line: #2b3742;
+    --ink: #e9edf1; --ink-soft: #b3bdc7; --ink-faint: #7c8894;
+    --cust: #6fa0f2; --cust-tint: #182436; --prod: #e0a94e; --prod-tint: #33270f;
+    --shared: #4fc0ba; --shared-tint: #10302e; --ext: #6bc47f; --ext-tint: #12291a;
+    --data: #a3a7cc; --data-tint: #20222f;
+    --ok: #5fc079; --warn: #e0a94e; --bad: #e5726c;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 1120px;
+    margin: 0 auto;
+    padding: clamp(28px, 5vw, 64px) clamp(18px, 4vw, 40px) 72px;
+  }
+
+  /* ── header ─────────────────────────────────────────── */
+  header { margin-bottom: 40px; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--shared);
+    margin: 0 0 14px;
+  }
+  h1 {
+    font-size: clamp(28px, 4.6vw, 46px);
+    line-height: 1.05;
+    letter-spacing: -0.02em;
+    font-weight: 720;
+    margin: 0 0 14px;
+    text-wrap: balance;
+  }
+  .lede {
+    max-width: 68ch;
+    font-size: clamp(15px, 1.6vw, 17px);
+    color: var(--ink-soft);
+    margin: 0 0 22px;
+  }
+  .stack {
+    display: flex; flex-wrap: wrap; gap: 8px;
+    font-family: var(--mono); font-size: 12.5px;
+  }
+  .chip {
+    padding: 5px 11px; border: 1px solid var(--line);
+    border-radius: 999px; background: var(--surface);
+    color: var(--ink-soft);
+  }
+  .chip b { color: var(--ink); font-weight: 600; }
+
+  /* ── legend ─────────────────────────────────────────── */
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 18px 26px;
+    margin: 26px 0 8px; padding: 14px 18px;
+    border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--surface);
+    font-family: var(--mono); font-size: 12.5px; color: var(--ink-soft);
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 8px; }
+  .dot { width: 11px; height: 11px; border-radius: 3px; flex: none; }
+
+  /* ── layers ─────────────────────────────────────────── */
+  .layer {
+    position: relative;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface);
+    padding: 18px 18px 20px;
+    margin-top: 34px;
+  }
+  .layer::before {
+    /* connector rail down into the next layer */
+    content: "";
+    position: absolute; left: 50%; bottom: -34px;
+    width: 2px; height: 34px; transform: translateX(-50%);
+    background: linear-gradient(var(--line), var(--line));
+  }
+  .layer:last-of-type::before { display: none; }
+
+  .layer-head {
+    display: flex; align-items: baseline; gap: 12px;
+    margin-bottom: 16px; flex-wrap: wrap;
+  }
+  .layer-num {
+    font-family: var(--mono); font-size: 12px; font-weight: 600;
+    color: var(--shared); letter-spacing: 0.08em;
+  }
+  .layer-title {
+    font-size: 17px; font-weight: 660; letter-spacing: -0.01em;
+  }
+  .layer-note {
+    font-family: var(--mono); font-size: 12px; color: var(--ink-faint);
+    margin-left: auto;
+  }
+
+  .cols { display: grid; gap: 14px; }
+  .cols.two { grid-template-columns: 1fr 1fr; }
+  .cols.spine { grid-template-columns: 1fr; }
+
+  /* node card */
+  .node {
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--nc, var(--line));
+    border-radius: 7px;
+    background: var(--surface-2);
+    padding: 12px 14px;
+  }
+  .node h4 {
+    margin: 0 0 4px; font-size: 14px; font-weight: 640;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .node .tag {
+    font-family: var(--mono); font-size: 10.5px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    padding: 2px 7px; border-radius: 5px;
+    color: var(--nc, var(--ink-soft));
+    background: var(--nct, var(--surface));
+  }
+  .node p { margin: 4px 0 0; font-size: 12.8px; color: var(--ink-soft); }
+  .node code, .file {
+    font-family: var(--mono); font-size: 12px;
+    color: var(--ink-soft); word-break: break-word;
+  }
+  .files { margin: 8px 0 0; display: flex; flex-wrap: wrap; gap: 6px; }
+  .files .file {
+    background: var(--surface); border: 1px solid var(--line);
+    padding: 2px 7px; border-radius: 5px; font-size: 11px; color: var(--ink-faint);
+  }
+
+  .cust { --nc: var(--cust); --nct: var(--cust-tint); }
+  .prod { --nc: var(--prod); --nct: var(--prod-tint); }
+  .shared { --nc: var(--shared); --nct: var(--shared-tint); }
+  .ext { --nc: var(--ext); --nct: var(--ext-tint); }
+  .data { --nc: var(--data); --nct: var(--data-tint); }
+
+  .lane-label {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em;
+    text-transform: uppercase; margin: 0 0 8px; font-weight: 600;
+  }
+  .lane-label.c { color: var(--cust); }
+  .lane-label.p { color: var(--prod); }
+
+  /* two-target layer (data + external) */
+  .split { display: grid; grid-template-columns: 1.15fr 1fr; gap: 14px; }
+
+  .subgrid { display: grid; gap: 8px; grid-template-columns: 1fr 1fr; }
+
+  /* ── state machine strip ────────────────────────────── */
+  .section-h {
+    margin: 56px 0 6px; font-size: 20px; font-weight: 680; letter-spacing: -0.01em;
+  }
+  .section-sub { margin: 0 0 20px; color: var(--ink-soft); font-size: 14.5px; max-width: 70ch; }
+
+  .fsm {
+    display: flex; align-items: stretch; flex-wrap: wrap; gap: 10px;
+    border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--surface); padding: 18px;
+  }
+  .state {
+    flex: 1 1 120px; min-width: 120px;
+    border: 1px solid var(--line); border-radius: 7px;
+    background: var(--surface-2); padding: 11px 13px;
+  }
+  .state .k {
+    font-family: var(--mono); font-size: 12.5px; font-weight: 700;
+    display: flex; align-items: center; gap: 7px; margin-bottom: 3px;
+  }
+  .state .k::before { content:""; width: 9px; height: 9px; border-radius: 50%; background: var(--sc, var(--ink-faint)); flex:none; }
+  .state p { margin: 0; font-size: 12px; color: var(--ink-soft); }
+  .state.pending { --sc: var(--ink-faint); }
+  .state.running { --sc: var(--warn); }
+  .state.ok { --sc: var(--ok); }
+  .state.bad { --sc: var(--bad); }
+  .arrow {
+    align-self: center; font-family: var(--mono); color: var(--ink-faint);
+    font-size: 18px; flex: none;
+  }
+
+  /* ── decisions ──────────────────────────────────────── */
+  .cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+  .dcard {
+    border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--surface); padding: 16px 17px;
+  }
+  .dcard h3 {
+    margin: 0 0 7px; font-size: 15px; font-weight: 660;
+    display: flex; align-items: center; gap: 9px;
+  }
+  .dcard h3 .mk {
+    font-family: var(--mono); font-size: 11px; font-weight: 700;
+    color: var(--shared); border: 1px solid var(--line);
+    border-radius: 5px; padding: 1px 6px;
+  }
+  .dcard p { margin: 0; font-size: 13.2px; color: var(--ink-soft); }
+
+  footer {
+    margin-top: 48px; padding-top: 18px; border-top: 1px solid var(--line);
+    font-family: var(--mono); font-size: 12px; color: var(--ink-faint);
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+  }
+
+  @media (max-width: 720px) {
+    .cols.two, .split, .cards, .subgrid { grid-template-columns: 1fr; }
+    .layer-note { margin-left: 0; width: 100%; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">Full-stack architecture · internal QA tooling</p>
+    <h1>Shopify CSV QA Tool</h1>
+    <p class="lede">
+      A single Express server and React client, over one PostgreSQL database, that
+      validates and test-imports Shopify CSV migrations. Two structurally identical
+      flows — <strong>Customers</strong> and <strong>Products</strong> — share one
+      Shopify bulk-operation engine. Every import is durable and resumable: the row
+      is written to the database <em>before</em> the side effect ever touches a real store.
+    </p>
+    <div class="stack">
+      <span class="chip"><b>React 18</b> · Vite · React Router</span>
+      <span class="chip"><b>Express 4</b> · TypeScript</span>
+      <span class="chip"><b>Prisma 5</b> · PostgreSQL</span>
+      <span class="chip"><b>Shopify Admin API</b> · GraphQL Bulk</span>
+      <span class="chip">Multer · ExcelJS · Zod</span>
+    </div>
+  </header>
+
+  <div class="legend" aria-label="Legend">
+    <span><i class="dot" style="background:var(--cust)"></i> Customers flow</span>
+    <span><i class="dot" style="background:var(--prod)"></i> Products flow</span>
+    <span><i class="dot" style="background:var(--shared)"></i> Shared engine</span>
+    <span><i class="dot" style="background:var(--data)"></i> Persistence</span>
+    <span><i class="dot" style="background:var(--ext)"></i> External / Shopify</span>
+  </div>
+
+  <!-- LAYER 1 — CLIENT -->
+  <section class="layer">
+    <div class="layer-head">
+      <span class="layer-num">CLIENT</span>
+      <span class="layer-title">React SPA — <code style="font-family:var(--mono);font-size:14px">client/src</code></span>
+      <span class="layer-note">Vite dev :5173 · proxies /api → :3001 · served static in prod</span>
+    </div>
+    <div class="cols two">
+      <div>
+        <p class="lane-label c">/customers → CustomerDashboard</p>
+        <div class="node cust">
+          <h4>Customer QA UI</h4>
+          <p>Upload → column-mapping → validation results → Excel report → optional test-store import &amp; reconcile.</p>
+          <div class="files">
+            <span class="file">UploadArea</span>
+            <span class="file">ColumnMappingScreen</span>
+            <span class="file">IssuesTable</span>
+            <span class="file">ImportPanel</span>
+            <span class="file">ValidationHistory</span>
+          </div>
+        </div>
+      </div>
+      <div>
+        <p class="lane-label p">/products → ProductDashboard</p>
+        <div class="node prod">
+          <h4>Product QA UI</h4>
+          <p>Upload (Shopify template CSV) → parallel import across stores → rejections grouped by (field, code). No mapping / no validators.</p>
+          <div class="files">
+            <span class="file">ProductUploadArea</span>
+            <span class="file">StoreImportControls</span>
+            <span class="file">ProductResultsView</span>
+            <span class="file">ProductHistory</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="cols two" style="margin-top:14px">
+      <div class="node cust"><h4><span class="tag">axios</span> validationApi.ts</h4><p>Customer endpoints + status polling.</p></div>
+      <div class="node prod"><h4><span class="tag">axios</span> productApi.ts</h4><p>Product endpoints + import polling (<code>cleanupPoller</code>, <code>actor</code>).</p></div>
+    </div>
+  </section>
+
+  <!-- LAYER 2 — EXPRESS -->
+  <section class="layer">
+    <div class="layer-head">
+      <span class="layer-num">API</span>
+      <span class="layer-title">Express server — one origin, one process</span>
+      <span class="layer-note">src/index.ts · cors · requestId · errorHandler · /api/health</span>
+    </div>
+    <div class="cols spine" style="margin-bottom:14px">
+      <div class="node shared">
+        <h4><span class="tag">middleware</span> Ingress</h4>
+        <p><b>Multer</b> streams uploads to a temp file on disk (never the heap; 100 MB cap, CSV-only). <b>requestId</b> tags every request; the error handler returns a generic 500 + correlation id so <code>DATABASE_URL</code> / tokens never leak to the browser.</p>
+      </div>
+    </div>
+    <div class="cols two">
+      <div class="node cust">
+        <h4>Customer controllers</h4>
+        <p>Validation lifecycle + test-store import &amp; validator-feedback loop.</p>
+        <div class="files">
+          <span class="file">customerValidation.controller</span>
+          <span class="file">customerImport.controller</span>
+        </div>
+        <p style="margin-top:8px"><code>/api/customer-validation/*</code><br><code>/api/customer-import/*</code></p>
+      </div>
+      <div class="node prod">
+        <h4>Product controllers</h4>
+        <p>Upload persistence + single/batch import runs.</p>
+        <div class="files">
+          <span class="file">productUpload.controller</span>
+          <span class="file">productImport.controller</span>
+        </div>
+        <p style="margin-top:8px"><code>/api/product-upload/*</code><br><code>/api/product-import/*</code></p>
+      </div>
+    </div>
+    <div class="cols spine" style="margin-top:14px">
+      <div class="node ext">
+        <h4><span class="tag">shared</span> shopifyHealth.controller</h4>
+        <p><code>/api/shopify/stores</code> · per-store <code>/stats</code> (customers) &amp; <code>/product-stats</code> · <code>/cleanup-qa</code> vs <code>/cleanup-qa-products</code> · <code>/api/cleanup/:id</code> · <code>/api/action-log</code>.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- LAYER 3 — SERVICES -->
+  <section class="layer">
+    <div class="layer-head">
+      <span class="layer-num">DOMAIN</span>
+      <span class="layer-title">Services — twin lanes over a shared bulk engine</span>
+      <span class="layer-note">src/services · src/validators · src/reports</span>
+    </div>
+    <div class="cols two">
+      <div>
+        <p class="lane-label c">Customers</p>
+        <div class="node cust">
+          <h4>Validate</h4>
+          <p><b>13 rules</b> (email, phone, postal, province, duplicates, HTML injection…) orchestrated over parsed rows.</p>
+          <div class="files">
+            <span class="file">customerValidation.service</span>
+            <span class="file">csvParser.service</span>
+            <span class="file">columnMapping.service</span>
+            <span class="file">validators/customer/*</span>
+          </div>
+        </div>
+        <div class="node cust" style="margin-top:10px">
+          <h4>Import &amp; feedback</h4>
+          <p>Sends the <b>final template dataset</b> (mapping + duplicate handling) — a pure function so reconcile can rebuild it. Compares validator predictions vs real Shopify results.</p>
+          <div class="files">
+            <span class="file">shopifyImport.service</span>
+            <span class="file">templateDataset</span>
+            <span class="file">importFeedback.service</span>
+          </div>
+        </div>
+      </div>
+      <div>
+        <p class="lane-label p">Products</p>
+        <div class="node prod">
+          <h4>Upload</h4>
+          <p>Parse + persist grouped by <code>Handle</code>. Import unit is a <b>product</b> (many CSV rows), not a row.</p>
+          <div class="files">
+            <span class="file">productUpload.service</span>
+            <span class="file">productCsvParser</span>
+          </div>
+        </div>
+        <div class="node prod" style="margin-top:10px">
+          <h4>Import &amp; report</h4>
+          <p>Parallel <code>productSet</code> across N stores; rejections grouped by real userError <code>(field, code)</code>.</p>
+          <div class="files">
+            <span class="file">productImport.service</span>
+            <span class="file">productImportReport</span>
+            <span class="file">productFeedback.service</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="cols spine" style="margin-top:16px">
+      <div class="node shared">
+        <h4><span class="tag">shared kernel</span> Shopify bulk engine</h4>
+        <p>Entity-agnostic protocol driver: <b>staged upload → run mutation → poll → download &amp; parse JSONL</b>. Callers inject the mutation + line parser. Used by both imports <em>and</em> both delete-by-tag cleanups.</p>
+        <div class="subgrid" style="margin-top:10px">
+          <div class="node shared" style="background:var(--surface)"><h4>shopifyBulk</h4><p>Bulk protocol + terminal-status constants.</p></div>
+          <div class="node shared" style="background:var(--surface)"><h4>shopifyClient</h4><p>GraphQL client, throttle, typed auth/api errors.</p></div>
+          <div class="node shared" style="background:var(--surface)"><h4>storeLock</h4><p>One lock per <em>store</em> — Shopify allows one bulk op per shop.</p></div>
+          <div class="node shared" style="background:var(--surface)"><h4>shopifyCleanup · cleanupRun</h4><p>Async delete-by-tag, advanced per poll.</p></div>
+        </div>
+        <div class="files" style="margin-top:10px">
+          <span class="file">config/shopify (multi-store, Zod)</span>
+          <span class="file">importResume.service</span>
+          <span class="file">retention.service (PII purge)</span>
+          <span class="file">actionLog.service</span>
+          <span class="file">reports/excelReport (ExcelJS)</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- LAYER 4 — DATA + EXTERNAL -->
+  <section class="layer">
+    <div class="layer-head">
+      <span class="layer-num">EDGE</span>
+      <span class="layer-title">Persistence &amp; external boundary</span>
+      <span class="layer-note">db/prisma.ts singleton</span>
+    </div>
+    <div class="split">
+      <div class="node data">
+        <h4><span class="tag">Prisma · PostgreSQL</span> shopify_csv_qa</h4>
+        <p>One database, two model families that mirror the flows, plus shared operational tables.</p>
+        <div class="subgrid" style="margin-top:10px">
+          <div class="node cust" style="background:var(--surface)">
+            <h4 style="font-size:12.5px">Customer models</h4>
+            <p style="font-size:11.5px">ValidationRun · ValidationIssue · OriginalCustomerRow · ImportRun · ImportBatchJob · ImportRowResult</p>
+          </div>
+          <div class="node prod" style="background:var(--surface)">
+            <h4 style="font-size:12.5px">Product models</h4>
+            <p style="font-size:11.5px">ProductUploadRun · ProductImportRun · ProductImportJob · ProductImportResult · ProductOriginalRow</p>
+          </div>
+          <div class="node shared" style="background:var(--surface)">
+            <h4 style="font-size:12.5px">Shared / ops</h4>
+            <p style="font-size:11.5px">StoreLock · CleanupRun · ActionLog (append-only audit)</p>
+          </div>
+          <div class="node data" style="background:var(--surface)">
+            <h4 style="font-size:12.5px">Intentional drift</h4>
+            <p style="font-size:11.5px">crossReferenceData lives in DB, not schema — migrate with <code>--create-only</code>.</p>
+          </div>
+        </div>
+      </div>
+      <div class="node ext">
+        <h4><span class="tag">External</span> Shopify test stores</h4>
+        <p>N configured stores (admin token <em>or</em> client-credentials), addressed by <code>storeId</code> — <b>no silent default</b>. The engine talks GraphQL Bulk to each real store: <code>customerCreate</code>, <code>productSet</code>, and bulk delete-by-tag.</p>
+        <div class="files" style="margin-top:10px">
+          <span class="file">bulkOperationRunMutation</span>
+          <span class="file">stagedUploadsCreate</span>
+          <span class="file">JSONL results</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- STATE MACHINE -->
+  <h2 class="section-h">Async import lifecycle</h2>
+  <p class="section-sub">
+    Both flows share one state machine. The run is persisted <strong>before</strong> the bulk op is submitted, so a crash leaves a recoverable <code>PENDING</code> row rather than an untracked mutation writing real records with no trace. Terminal states are reached by reconcile-on-poll; a server-side sweep advances runs whose browser walked away.
+  </p>
+  <div class="fsm">
+    <div class="state pending">
+      <span class="k">PENDING</span>
+      <p>Row written, bulk op <em>not yet</em> submitted. The durability boundary.</p>
+    </div>
+    <span class="arrow">→</span>
+    <div class="state running">
+      <span class="k">RUNNING</span>
+      <p>Op queued at Shopify; each poll reconciles progress &amp; renews the store lock.</p>
+    </div>
+    <span class="arrow">→</span>
+    <div class="state ok">
+      <span class="k">COMPLETED</span>
+      <p>JSONL parsed; per-row / per-product results persisted.</p>
+    </div>
+    <span class="arrow">/</span>
+    <div class="state bad">
+      <span class="k">FAILED · CANCELED · EXPIRED</span>
+      <p>Terminal error captured; store lock released, run stays legible.</p>
+    </div>
+  </div>
+
+  <!-- DECISIONS -->
+  <h2 class="section-h">Load-bearing decisions</h2>
+  <p class="section-sub">The design choices that make a shared, hosted QA tool safe to point at real Shopify stores.</p>
+  <div class="cards">
+    <div class="dcard">
+      <h3><span class="mk">lock</span> One lock per store</h3>
+      <p>Shopify permits a single bulk mutation per shop, and cleanups delete across a whole store by tag. Keying the lock on bare <code>storeId</code> serializes imports vs cleanups on the same shop while N-store batches stay parallel across <em>different</em> shops.</p>
+    </div>
+    <div class="dcard">
+      <h3><span class="mk">boot</span> Resume &amp; sweep on start</h3>
+      <p>On boot, <code>resumePendingImports</code> adopts or relaunches interrupted runs; orphan uploads are swept, expired PII purged, and stuck cleanups reconciled server-side. A <code>claimedAt</code> claim stops overlapping (rolling-deploy) boots from double-working a row.</p>
+    </div>
+    <div class="dcard">
+      <h3><span class="mk">pii</span> Uploads are merchant PII</h3>
+      <p>Raw CSVs stream to a temp file and are unlinked by whoever consumes them; <code>previewStore</code> holds only the path. A retention job purges source rows past the window — never while an import still needs them to rebuild its dataset.</p>
+    </div>
+    <div class="dcard">
+      <h3><span class="mk">audit</span> Attribution ≠ authorization</h3>
+      <p><code>createdBy</code> and <code>ActionLog</code> exist for display and audit in a deliberately shared workspace — they never gate access. Every destructive action (6 routes) is logged append-only so “who deleted this?” has an answer.</p>
+    </div>
+  </div>
+
+  <footer>
+    <span>Shopify CSV QA Tool · server + client + PostgreSQL</span>
+    <span>Diagram derived from source · index.ts, schema.prisma, services/</span>
+  </footer>
+</div>
+</body>
+</html>

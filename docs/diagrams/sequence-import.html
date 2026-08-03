@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shopify CSV QA Tool — Import Sequence</title>
+<style>
+  :root {
+    --paper: #f5f6f4; --surface: #ffffff; --surface-2: #eceef0; --line: #d6dade;
+    --ink: #10151b; --ink-soft: #3c454e; --ink-faint: #6c757e;
+    --cust: #3b6fd4; --cust-tint: #e8eefb;
+    --prod: #c47a1e; --prod-tint: #f8efe0;
+    --shared: #2f8a86; --shared-tint: #e0f0ef;
+    --ext: #4f9d63; --ext-tint: #e6f1e8;
+    --data: #6b6f8c; --data-tint: #ebecf2;
+    --emph: #b0842a; --emph-tint: #f4e9cf;
+    --ok: #3f9b57; --bad: #cf4b45;
+    --radius: 9px;
+    --mono: ui-monospace, "Cascadia Code", "SF Mono", "Consolas", monospace;
+    --sans: "Segoe UI", system-ui, -apple-system, Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #0d1218; --surface: #161d25; --surface-2: #1e2731; --line: #2b3742;
+      --ink: #e9edf1; --ink-soft: #b3bdc7; --ink-faint: #7c8894;
+      --cust: #6fa0f2; --cust-tint: #182436; --prod: #e0a94e; --prod-tint: #33270f;
+      --shared: #4fc0ba; --shared-tint: #10302e; --ext: #6bc47f; --ext-tint: #12291a;
+      --data: #a3a7cc; --data-tint: #20222f; --emph: #e0b45a; --emph-tint: #2e2510;
+      --ok: #5fc079; --bad: #e5726c;
+    }
+  }
+  :root[data-theme="light"] {
+    --paper: #f5f6f4; --surface: #ffffff; --surface-2: #eceef0; --line: #d6dade;
+    --ink: #10151b; --ink-soft: #3c454e; --ink-faint: #6c757e;
+    --cust: #3b6fd4; --cust-tint: #e8eefb; --prod: #c47a1e; --prod-tint: #f8efe0;
+    --shared: #2f8a86; --shared-tint: #e0f0ef; --ext: #4f9d63; --ext-tint: #e6f1e8;
+    --data: #6b6f8c; --data-tint: #ebecf2; --emph: #b0842a; --emph-tint: #f4e9cf;
+    --ok: #3f9b57; --bad: #cf4b45;
+  }
+  :root[data-theme="dark"] {
+    --paper: #0d1218; --surface: #161d25; --surface-2: #1e2731; --line: #2b3742;
+    --ink: #e9edf1; --ink-soft: #b3bdc7; --ink-faint: #7c8894;
+    --cust: #6fa0f2; --cust-tint: #182436; --prod: #e0a94e; --prod-tint: #33270f;
+    --shared: #4fc0ba; --shared-tint: #10302e; --ext: #6bc47f; --ext-tint: #12291a;
+    --data: #a3a7cc; --data-tint: #20222f; --emph: #e0b45a; --emph-tint: #2e2510;
+    --ok: #5fc079; --bad: #e5726c;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font-family: var(--sans); line-height: 1.5; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1160px; margin: 0 auto; padding: clamp(28px,5vw,64px) clamp(18px,4vw,40px) 72px; }
+
+  .eyebrow {
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--shared); margin: 0 0 14px;
+  }
+  h1 { font-size: clamp(28px,4.6vw,46px); line-height: 1.05; letter-spacing: -0.02em; font-weight: 720; margin: 0 0 14px; text-wrap: balance; }
+  .lede { max-width: 72ch; font-size: clamp(15px,1.6vw,17px); color: var(--ink-soft); margin: 0 0 24px; }
+
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 12px 22px; align-items: center;
+    padding: 12px 18px; border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--surface); font-family: var(--mono); font-size: 12px; color: var(--ink-soft);
+    margin-bottom: 26px;
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 8px; }
+  .lg-line { width: 30px; height: 0; border-top: 2px solid var(--ink-soft); position: relative; }
+  .lg-line.ret { border-top-style: dashed; border-color: var(--ink-faint); }
+  .lg-line.emp { border-color: var(--emph); border-top-width: 2.5px; }
+  .lg-sw { width: 12px; height: 12px; border-radius: 3px; }
+
+  .diagram {
+    border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--surface); padding: 6px; overflow-x: auto;
+  }
+  svg { display: block; width: 100%; height: auto; min-width: 720px; }
+
+  /* svg theme classes */
+  .lifeline { stroke: var(--line); stroke-width: 1.4; stroke-dasharray: 3 5; }
+  .phead { fill: var(--surface-2); stroke: var(--line); }
+  .phead-top { stroke-width: 3; }
+  .plabel { fill: var(--ink); font: 640 13px var(--sans); }
+  .psub { fill: var(--ink-faint); font: 10.5px var(--mono); }
+  .msg-call { stroke: var(--ink-soft); stroke-width: 1.5; fill: none; }
+  .msg-return { stroke: var(--ink-faint); stroke-width: 1.3; stroke-dasharray: 5 4; fill: none; }
+  .msg-emph { stroke: var(--emph); stroke-width: 2.1; fill: none; }
+  .self { stroke: var(--ink-soft); stroke-width: 1.5; fill: none; }
+  .mtext { fill: var(--ink); font: 11.6px var(--mono); }
+  .mtext.dim { fill: var(--ink-faint); font-style: italic; }
+  .mtext.emph { fill: var(--emph); font-weight: 600; }
+  .mbg { fill: var(--paper); }
+  .frag { fill: none; stroke-width: 1.3; rx: 7; }
+  .frag.cust { stroke: var(--cust); }
+  .frag.shared { stroke: var(--shared); }
+  .frag-fill.cust { fill: var(--cust-tint); opacity: .35; }
+  .frag-fill.shared { fill: var(--shared-tint); opacity: .3; }
+  .frag-tab { rx: 4; }
+  .frag-tab.cust { fill: var(--cust); }
+  .frag-tab.shared { fill: var(--shared); }
+  .frag-tabtext { fill: var(--surface); font: 700 10.5px var(--mono); letter-spacing: .04em; }
+  .divider { stroke: var(--shared); stroke-width: 1; stroke-dasharray: 4 4; opacity: .7; }
+  .branch { fill: var(--shared); font: italic 700 10.5px var(--mono); }
+  .num { fill: var(--ink-faint); font: 10px var(--mono); }
+  .dot { fill: var(--emph); }
+
+  .asides { display: grid; grid-template-columns: repeat(3,1fr); gap: 14px; margin-top: 26px; }
+  .aside { border: 1px solid var(--line); border-left: 3px solid var(--ac,var(--line)); border-radius: 8px; background: var(--surface); padding: 14px 15px; }
+  .aside h3 { margin: 0 0 6px; font-size: 13.5px; font-weight: 660; display: flex; gap: 8px; align-items: center; }
+  .aside h3 .mk { font-family: var(--mono); font-size: 10px; font-weight: 700; color: var(--ac); border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; }
+  .aside p { margin: 0; font-size: 12.6px; color: var(--ink-soft); }
+  .aside.busy { --ac: var(--bad); } .aside.boot { --ac: var(--shared); } .aside.lock { --ac: var(--emph); }
+  .aside code { font-family: var(--mono); font-size: 11.5px; color: var(--ink); }
+
+  footer {
+    margin-top: 40px; padding-top: 18px; border-top: 1px solid var(--line);
+    font-family: var(--mono); font-size: 12px; color: var(--ink-faint);
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+  }
+  @media (max-width: 780px) { .asides { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p class="eyebrow">Runtime behavior · async import lifecycle</p>
+  <h1>Import Request — Sequence</h1>
+  <p class="lede">
+    One single-store customer import, end to end. The defining move: the run row is written to Postgres <strong>before</strong> the bulk mutation is ever submitted, so a crash can only ever leave a recoverable <code style="font-family:var(--mono)">PENDING</code> row — never an untracked operation writing real customers into a real store. The HTTP request returns in seconds; the operation is finalized later by <em>reconcile-on-poll</em>. The product flow is the exact twin of this.
+  </p>
+
+  <div class="legend">
+    <span><i class="lg-line"></i> synchronous call</span>
+    <span><i class="lg-line ret"></i> return</span>
+    <span><i class="lg-line emp"></i> writes before side effect</span>
+    <span><i class="lg-sw" style="background:var(--shared)"></i> reconcile loop</span>
+    <span><i class="lg-sw" style="background:var(--emph)"></i> durability boundary</span>
+  </div>
+
+  <div class="diagram">
+    <svg id="seq" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Sequence diagram of an async customer import">
+      <defs>
+        <marker id="ah-call" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z"/></marker>
+        <marker id="ah-emph" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z"/></marker>
+        <marker id="ah-ret" markerWidth="11" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8" fill="none" stroke-width="1.3"/></marker>
+      </defs>
+    </svg>
+  </div>
+
+  <div class="asides">
+    <div class="aside busy">
+      <h3><span class="mk">409</span> Store busy</h3>
+      <p>The store lock is taken in the <em>same</em> transaction as the <code>PENDING</code> write. If a colleague is already working that shop the transaction rolls back — no row, no orphan — and the caller gets a 409 to retry, not an error.</p>
+    </div>
+    <div class="aside boot">
+      <h3><span class="mk">boot</span> Resume backstop</h3>
+      <p>A <code>PENDING</code> row means the process died between writing the row and getting a bulk-op id. On the next boot, <code>resumePendingImports</code> either <em>adopts</em> the shop's live operation or <em>relaunches</em> it — deterministically, from the same rows.</p>
+    </div>
+    <div class="aside lock">
+      <h3><span class="mk">TTL</span> Lock lifetime</h3>
+      <p>Each poll that finds the op still running <code>renewStoreLock</code>s. If the last browser walks away, a server-side sweep advances the orphaned run and the lock's TTL frees the store — no shop stays busy forever.</p>
+    </div>
+  </div>
+
+  <footer>
+    <span>startCustomerImport → reconcileImportRun</span>
+    <span>Source: services/shopifyImport.service.ts · controllers/customerImport.controller.ts</span>
+  </footer>
+</div>
+
+<script>
+(function () {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.getElementById("seq");
+
+  const P = [
+    { label: "Browser", sub: "React client", accent: "var(--cust)" },
+    { label: "Express API", sub: "controllers", accent: "var(--shared)" },
+    { label: "Import service", sub: "shopifyImport", accent: "var(--ink-soft)" },
+    { label: "PostgreSQL", sub: "Prisma · StoreLock", accent: "var(--data)" },
+    { label: "Shopify", sub: "Admin GraphQL Bulk", accent: "var(--ext)" },
+  ];
+
+  // f=from, t=to lifeline index · kind: call | return | self
+  const M = [
+    { f:0,t:1, k:"call",   x:"POST /customer-import/:id/run  { storeId }" },
+    { f:1,t:2, k:"call",   x:"startCustomerImport(validationId, storeId)" },
+    { f:2,t:3, k:"call",   x:"load ValidationRun + originalRows" },
+    { f:3,t:2, k:"return", x:"rows" },
+    { f:2,t:4, k:"call",   x:"verifyConnection()" },
+    { f:4,t:2, k:"return", x:"healthy · shopDomain" },
+    { f:2,t:2, k:"self",   x:"build JSONL + qa-import tags (in memory)" },
+    { f:2,t:3, k:"call",   x:"$transaction — acquireStoreLock + create ImportRun (PENDING)", emph:true },
+    { f:2,t:4, k:"call",   x:"stagedUpload(JSONL) → bulkOperationRunMutation" },
+    { f:4,t:2, k:"return", x:"bulkOperationId" },
+    { f:2,t:3, k:"call",   x:"update ImportRun → RUNNING + bulkOperationId" },
+    { f:2,t:1, k:"return", x:"{ ok, importRunId }" },
+    { f:1,t:0, k:"return", x:"202 Accepted + feedback" },
+
+    { f:0,t:1, k:"call",   x:"GET /customer-import/:id      (poll ≈ every 3s)", gap:36 },
+    { f:1,t:2, k:"call",   x:"reconcileImportRun(id)" },
+    { f:2,t:3, k:"call",   x:"load ImportRun (+ batchJobs)" },
+    { f:2,t:4, k:"call",   x:"poll bulkOperation status" },
+    { f:4,t:2, k:"return", x:"status" },
+
+    { f:2,t:3, k:"call",   x:"renewStoreLock (push TTL out)", gap:30, branch:"still RUNNING — leave it" },
+    { f:1,t:0, k:"return", x:"RUNNING → client polls again ↺", dim:true },
+
+    { f:2,t:4, k:"call",   x:"download results (JSONL)", gap:24, branch:"COMPLETED" },
+    { f:4,t:2, k:"return", x:"JSONL result lines" },
+    { f:2,t:3, k:"call",   x:"$txn — guard RUNNING→COMPLETED + insert rowResults (chunked)", emph:true },
+    { f:2,t:3, k:"call",   x:"releaseStoreLock" },
+
+    { f:2,t:3, k:"call",   x:"mark terminal + releaseStoreLock", gap:24, branch:"FAILED · CANCELED · EXPIRED" },
+
+    { f:1,t:0, k:"return", x:"feedback — four-bucket summary", gap:18 },
+  ];
+
+  // fragments reference message indices (inclusive)
+  const FRAGS = [
+    { a:0,  b:12, cls:"cust",   tab:"A · START — returns in seconds" },
+    { a:13, b:25, cls:"shared", tab:"B · RECONCILE-ON-POLL — repeats until terminal" },
+    { a:18, b:24, cls:"shared", tab:"ALT · poll result", nested:true },
+  ];
+
+  // ── geometry ──
+  const W = 1120, marginX = 130;
+  const colGap = (W - 2 * marginX) / (P.length - 1);
+  const px = P.map((_, i) => marginX + i * colGap);
+  const headTop = 10, headH = 50, lifeTop = headTop + headH;
+  const rowH = 42;
+  const msgTop = lifeTop + 70;
+
+  // cumulative y with per-message gap
+  const y = [];
+  let cur = msgTop;
+  M.forEach((m, i) => { cur += (m.gap || 0); y[i] = cur; cur += rowH; });
+  const totalH = cur + 40;
+  svg.setAttribute("viewBox", `0 0 ${W} ${totalH}`);
+
+  function el(tag, attrs, parent) {
+    const n = document.createElementNS(NS, tag);
+    for (const k in attrs) n.setAttribute(k, attrs[k]);
+    (parent || svg).appendChild(n);
+    return n;
+  }
+
+  // ── fragments (behind everything) ──
+  FRAGS.forEach((fr) => {
+    const top = y[fr.a] - (fr.nested ? 20 : 26);
+    const bot = y[fr.b] + 16;
+    const inset = fr.nested ? 60 : 30;
+    const x0 = px[Math.min(...M.slice(fr.a, fr.b + 1).flatMap(m => [m.f, m.t]))] - inset;
+    const x1 = px[Math.max(...M.slice(fr.a, fr.b + 1).flatMap(m => [m.f, m.t]))] + inset;
+    el("rect", { x:x0, y:top, width:x1-x0, height:bot-top, class:`frag-fill ${fr.cls}` });
+    el("rect", { x:x0, y:top, width:x1-x0, height:bot-top, class:`frag ${fr.cls}`, rx:7 });
+    // tab
+    const tw = fr.tab.length * 6.6 + 16;
+    el("rect", { x:x0, y:top - 9, width:tw, height:18, class:`frag-tab ${fr.cls}`, rx:4 });
+    el("text", { x:x0 + 8, y:top + 4, class:"frag-tabtext" }).textContent = fr.tab;
+  });
+
+  // ── branch dividers (inside the ALT) ──
+  const altFrag = FRAGS.find(f => f.nested);
+  M.forEach((m, i) => {
+    if (!m.branch) return;
+    const x0 = px[Math.min(...M.slice(altFrag.a, altFrag.b + 1).flatMap(mm => [mm.f, mm.t]))] - 60;
+    const x1 = px[Math.max(...M.slice(altFrag.a, altFrag.b + 1).flatMap(mm => [mm.f, mm.t]))] + 60;
+    const dy = y[i] - 22;
+    if (i !== altFrag.a) el("line", { x1:x0, y1:dy, x2:x1, y2:dy, class:"divider" });
+    el("text", { x:x0 + 10, y:dy + (i === altFrag.a ? 4 : 13), class:"branch" }).textContent = "[ " + m.branch + " ]";
+  });
+
+  // ── lifelines ──
+  px.forEach((x) => el("line", { x1:x, y1:lifeTop, x2:x, y2:totalH - 20, class:"lifeline" }));
+
+  // ── participant heads ──
+  P.forEach((p, i) => {
+    const w = 150, x = px[i] - w / 2;
+    el("rect", { x, y:headTop, width:w, height:headH, class:"phead", rx:8 });
+    el("line", { x1:x+1, y1:headTop, x2:x+w-1, y2:headTop, class:"phead-top", style:`stroke:${p.accent}` });
+    el("text", { x:px[i], y:headTop + 21, "text-anchor":"middle", class:"plabel" }).textContent = p.label;
+    el("text", { x:px[i], y:headTop + 37, "text-anchor":"middle", class:"psub" }).textContent = p.sub;
+  });
+
+  // ── messages ──
+  const pending = []; // text nodes to backfill bg after measuring
+  M.forEach((m, i) => {
+    const yy = y[i];
+    if (m.k === "self") {
+      const x = px[m.f], w = 128;
+      el("path", { d:`M${x},${yy-8} h${w} v18 h-${w}`, class:"self", "marker-end":"url(#ah-call)" });
+      addText(px[m.f] + w + 10, yy + 6, m, "start");
+    } else {
+      const dir = m.t > m.f ? 1 : -1;
+      const x1 = px[m.f] + dir * 3;
+      const x2 = px[m.t] - dir * 5;
+      const cls = m.emph ? "msg-emph" : (m.k === "return" ? "msg-return" : "msg-call");
+      const marker = m.emph ? "url(#ah-emph)" : (m.k === "return" ? "url(#ah-ret)" : "url(#ah-call)");
+      el("line", { x1, y1:yy, x2, y2:yy, class:cls, "marker-end":marker });
+      if (m.emph) el("circle", { cx:x1, cy:yy, r:2.6, class:"dot" });
+      addText((px[m.f] + px[m.t]) / 2, yy - 7, m, "middle");
+    }
+    // sequence number at far left
+    el("text", { x:14, y:yy + 3, class:"num" }).textContent = String(i + 1).padStart(2, "0");
+  });
+
+  function addText(tx, ty, m, anchor) {
+    const t = el("text", { x:tx, y:ty, "text-anchor":anchor, class:"mtext" + (m.dim ? " dim" : "") + (m.emph ? " emph" : "") });
+    t.textContent = m.x;
+    pending.push(t);
+  }
+
+  // backfill paper background behind each label so it reads over lifelines
+  pending.forEach((t) => {
+    const b = t.getBBox();
+    const pad = 4;
+    const r = document.createElementNS(NS, "rect");
+    r.setAttribute("x", b.x - pad); r.setAttribute("y", b.y - 1.5);
+    r.setAttribute("width", b.width + pad * 2); r.setAttribute("height", b.height + 3);
+    r.setAttribute("class", "mbg"); r.setAttribute("rx", "3");
+    svg.insertBefore(r, t);
+  });
+})();
+</script>
+</body>
+</html>
