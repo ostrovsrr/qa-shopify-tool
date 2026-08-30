@@ -157,6 +157,21 @@ services:
     ports:
       - "127.0.0.1:3105:3001"
 
+  se6:
+    <<: *app
+    environment:
+      <<: *app-env
+      SHOPIFY_TEST_STORES: ${SHOPIFY_STORES_SE6:?set SHOPIFY_STORES_SE6 in deploy/.env}
+    ports:
+      - "127.0.0.1:3106:3001"
+  se7:
+    <<: *app
+    environment:
+      <<: *app-env
+      SHOPIFY_TEST_STORES: ${SHOPIFY_STORES_SE7:?set SHOPIFY_STORES_SE7 in deploy/.env}
+    ports:
+      - "127.0.0.1:3107:3001"
+
 volumes:
   # The app database. Uploaded CSVs are NOT here and get no volume on purpose:
   # they stream to ephemeral container storage and die with the container, which
