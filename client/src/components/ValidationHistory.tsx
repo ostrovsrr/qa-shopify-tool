@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { deleteValidation, fetchHistory, updateValidationMetadata } from '../api/validationApi';
+import { getActor } from '../api/actor';
 import {
   UpdateMetadataPayload,
   ValidationHistoryImport,
@@ -132,9 +133,16 @@ export function ValidationHistory({ onOpen, refreshTrigger }: Props) {
   const [error, setError] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
 
+  // YOUR runs, always. The database is shared across every colleague's instance,
+  // so an unfiltered list is the whole team's work — and the query is capped, so
+  // one busy colleague pushes everyone else off their own page.
+  //
+  // The server still supports the general filter (?createdBy=<name>, or omitted
+  // for everyone); it is simply not offered here. See utils/historyQuery.ts.
   const load = () => {
     setLoading(true);
-    fetchHistory()
+    setError('');
+    fetchHistory(true)
       .then(setHistory)
       .catch(() => setError('Failed to load history.'))
       .finally(() => setLoading(false));
@@ -171,7 +179,13 @@ export function ValidationHistory({ onOpen, refreshTrigger }: Props) {
   if (loading) return <p className="history-loading">Loading history…</p>;
   if (error) return <p className="history-error">{error}</p>;
   if (history.length === 0)
-    return <p className="history-empty">No previous validation runs found.</p>;
+    return (
+      <p className="history-empty">
+        {getActor()
+          ? 'No validation runs from you yet.'
+          : 'No validation runs from this browser yet — set your name, top right, so your runs are recorded under it.'}
+      </p>
+    );
 
   return (
     <div className="history-section">

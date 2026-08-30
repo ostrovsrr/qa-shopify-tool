@@ -9,6 +9,7 @@ import {
 } from '../services/productUpload.service';
 import { removeUploadFile } from '../services/uploadFile';
 import { actorFrom, recordAction } from '../services/actionLog.service';
+import { parseHistoryQuery } from '../utils/historyQuery';
 
 const uuidSchema = z.string().uuid('Invalid upload ID format.');
 
@@ -48,12 +49,12 @@ export async function uploadHandler(
 
 // GET /api/product-upload/history — declared before /:id so it isn't an id param.
 export async function getHistoryHandler(
-  _req: Request,
+  req: Request,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
   try {
-    res.json(await getUploadHistory());
+    res.json(await getUploadHistory(parseHistoryQuery(req)));
   } catch (err) {
     next(err);
   }

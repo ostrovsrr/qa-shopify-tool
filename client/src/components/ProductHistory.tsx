@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { deleteUpload, fetchHistory, updateUploadMetadata } from '../api/productApi';
+import { getActor } from '../api/actor';
 import { ProductHistoryImport, ProductHistoryItem, UpdateMetadataPayload } from '../types';
 
 // Shows whether an upload was imported to Shopify and how it landed. Completed
@@ -128,9 +129,11 @@ export function ProductHistory({ onOpen, refreshTrigger }: Props) {
   const [error, setError] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
 
+  // Twin of ValidationHistory: your uploads only. Same reason, same shape.
   const load = () => {
     setLoading(true);
-    fetchHistory()
+    setError('');
+    fetchHistory(true)
       .then(setHistory)
       .catch(() => setError('Failed to load history.'))
       .finally(() => setLoading(false));
@@ -167,7 +170,13 @@ export function ProductHistory({ onOpen, refreshTrigger }: Props) {
   if (loading) return <p className="history-loading">Loading history…</p>;
   if (error) return <p className="history-error">{error}</p>;
   if (history.length === 0)
-    return <p className="history-empty">No previous uploads found.</p>;
+    return (
+      <p className="history-empty">
+        {getActor()
+          ? 'No uploads from you yet.'
+          : 'No uploads from this browser yet — set your name, top right, so your uploads are recorded under it.'}
+      </p>
+    );
 
   return (
     <div className="history-section">
