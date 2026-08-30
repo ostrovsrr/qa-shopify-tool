@@ -13,7 +13,11 @@ interface GraphQLError {
 
 interface GraphQLResponse<T> {
   data?: T;
-  errors?: GraphQLError[];
+  // NOT always the GraphQL shape. Shopify answers a request that never reached the
+  // GraphQL layer — a shop domain that does not resolve to a store, an uninstalled
+  // app — with {"errors":"Not Found"}, a bare STRING. Typing this as an array only
+  // is what let `.find` be called on a string. See the handling in query().
+  errors?: GraphQLError[] | string;
   extensions?: {
     cost?: {
       throttleStatus?: ThrottleStatus;
@@ -164,7 +168,29 @@ export class ShopifyClient {
         this.lastThrottle = body.extensions.cost.throttleStatus;
       }
 
-      if (body.errors && body.errors.length > 0) {
+      // A STRING, not the GraphQL array. This is what a wrong shop domain looks
+      // like: {"errors":"Not Found"}. It has .length, so a bare truthy+length check
+      // waved it through and `.find` then threw "body.errors.find is not a
+      // function" — an unhandled TypeError, which the error handler turned into a
+      // generic 500 and a request id. The one fact the user needed (your store
+      // domain is wrong) was the one fact they were not told. Answer it directly:
+      // this is the first error a colleague hits after a typo in their store list.
+      if (typeof body.errors === 'string') {
+        if (body.errors.length === 0) {
+          throw new ShopifyApiError('Shopify returned an empty error.');
+        }
+        // ShopifyConfigError, not ShopifyApiError, and deliberately so. A shop
+        // domain that does not resolve to a store IS a configuration fault, and
+        // errorHandler surfaces this type to the browser with a "check the store
+        // configuration" hint. ShopifyApiError is redacted behind a request id —
+        // correct for arbitrary Shopify text, wrong for the one message a
+        // colleague who typo'd their store domain actually needs to read.
+        throw new ShopifyConfigError(
+          `Shopify rejected the request: ${body.errors}. Check the store's shop domain is spelled correctly and that the app is installed on it.`,
+        );
+      }
+
+      if (Array.isArray(body.errors) && body.errors.length > 0) {
         const access = body.errors.find(
           (e) => e.extensions?.code === 'ACCESS_DENIED',
         );

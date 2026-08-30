@@ -23,6 +23,19 @@ WORKDIR /app/server
 COPY server/package*.json ./
 RUN npm ci
 
+# OpenSSL, in the BUILD stage, before `prisma generate`.
+#
+# Not a duplicate of the runtime install below. `prisma generate` picks its query
+# engine by detecting the OpenSSL version present AT GENERATE TIME. With no openssl
+# on the box it does not fail — it guesses, picks debian-openssl-1.1.x, and the
+# image builds green. The runtime stage then installs openssl 3.0.x, and every
+# query dies at runtime with "could not locate the Query Engine for runtime
+# debian-openssl-3.0.x". Both stages must see the same OpenSSL for `native` to mean
+# the same thing in both.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends openssl \
+  && rm -rf /var/lib/apt/lists/*
+
 COPY server/ ./
 # The Prisma client is generated code — it must exist before tsc runs.
 RUN npx prisma generate

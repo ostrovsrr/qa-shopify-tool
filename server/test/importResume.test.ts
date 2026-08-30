@@ -1,5 +1,11 @@
-import { describe, expect, it } from 'vitest';
-import { decideResume, STALE_CLAIM_MS } from '../src/services/importResume.service';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  decideResume,
+  resumeStore,
+  STALE_CLAIM_MS,
+} from '../src/services/importResume.service';
+import type { ResumableRow, ResumableStore } from '../src/services/importResume.service';
+import { resetShopifyConfigCache } from '../src/config/shopify';
 import type { CurrentBulkOperation } from '../src/services/shopifyBulk';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -108,5 +114,96 @@ describe('STALE_CLAIM_MS', () => {
   it('is a finite, sane reclaim window', () => {
     expect(STALE_CLAIM_MS).toBeGreaterThan(60_000);
     expect(STALE_CLAIM_MS).toBeLessThanOrEqual(60 * 60 * 1000);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WHOSE ROW IS THIS?
+//
+// Deployed one-instance-per-colleague against a SHARED database, every instance
+// sees every PENDING row but holds tokens for only its own stores. An instance
+// must leave another instance's rows completely alone.
+//
+// The danger is not that resume fails on a store it cannot reach — it is that it
+// CLAIMS the row first. A claim followed by a failure marks a colleague's healthy,
+// still-running import FAILED and tells them to re-run it, which duplicates the
+// import or bounces off the per-shop limit. So the guard has to come before the
+// claim, and that is exactly what these tests pin.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('resumeStore — shared database, per-instance store tokens', () => {
+  const OURS = 'ours-qa';
+  const THEIRS = 'theirs-qa';
+
+  function fakeStore(rows: ResumableRow[]) {
+    const calls = { claimed: [] as string[], failed: [] as string[] };
+    const store: ResumableStore = {
+      label: 'test',
+      findResumable: async () => rows,
+      claim: async (id) => {
+        calls.claimed.push(id);
+        return true;
+      },
+      adopt: async () => undefined,
+      relaunch: async () => undefined,
+      fail: async (id) => {
+        calls.failed.push(id);
+      },
+      lockOwner: (row) => ({
+        ownerType: 'IMPORT_RUN',
+        ownerId: row.id,
+        operation: 'a customer import',
+      }),
+    };
+    return { store, calls };
+  }
+
+  beforeEach(() => {
+    process.env.SHOPIFY_TEST_STORES = JSON.stringify([
+      { id: OURS, label: 'Ours', shop: 'ours-qa.myshopify.com', adminToken: 'shpat_ours' },
+    ]);
+    resetShopifyConfigCache();
+  });
+
+  afterEach(() => {
+    delete process.env.SHOPIFY_TEST_STORES;
+    resetShopifyConfigCache();
+  });
+
+  it('never claims a row whose store this instance has no token for', async () => {
+    const { store, calls } = fakeStore([
+      { id: 'run-1', storeId: THEIRS, createdAt: ROW_CREATED },
+    ]);
+
+    const summary = await resumeStore(store);
+
+    expect(calls.claimed).toEqual([]);
+    expect(summary.skipped).toBe(1);
+  });
+
+  it("does not mark another instance's healthy run FAILED", async () => {
+    const { store, calls } = fakeStore([
+      { id: 'run-1', storeId: THEIRS, createdAt: ROW_CREATED },
+    ]);
+
+    await resumeStore(store);
+
+    // The whole point: their import is still running at Shopify, driven by their
+    // own instance. Failing it here would be a lie AND destroy their run.
+    expect(calls.failed).toEqual([]);
+  });
+
+  it('skips every foreign row without touching any of them', async () => {
+    const { store, calls } = fakeStore([
+      { id: 'run-1', storeId: THEIRS, createdAt: ROW_CREATED },
+      { id: 'run-2', storeId: 'third-qa', createdAt: ROW_CREATED },
+    ]);
+
+    const summary = await resumeStore(store);
+
+    expect(summary.skipped).toBe(2);
+    expect(summary.failed).toBe(0);
+    expect(calls.claimed).toEqual([]);
+    expect(calls.failed).toEqual([]);
   });
 });

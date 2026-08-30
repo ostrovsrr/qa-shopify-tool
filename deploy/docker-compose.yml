@@ -1,0 +1,164 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Five instances, one database, one box.
+#
+# Each Solution Engineer gets their own container holding tokens for ONLY their
+# own test stores. That is the entire isolation mechanism, and it is a real one:
+# getShopifyClient() throws ShopifyConfigError for any storeId it has no config
+# for (services/shopifyClient.ts), so an instance cannot touch a store whose token
+# is not in its own environment. There is no check to bypass and no header to
+# spoof, because there is no token.
+#
+# All five share ONE database, so history is visible to everyone in one place.
+# Read "What the shared database means" in deploy/.env.example before you accept
+# that — it is a deliberate trade, not a free lunch.
+#
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#
+# ── THIS STACK HAS NO AUTHENTICATION ─────────────────────────────────────────
+#
+# Anyone who can reach a port can use that SE's stores, including the routes that
+# delete records by tag across an entire store. Ports are published on 127.0.0.1
+# ONLY (see the port mappings), so nothing is reachable from outside the host
+# until you put it on a private network. Run Tailscale on this box, or a VPN, or
+# a Cloudflare Tunnel. Do not give this public DNS.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: qa-shopify-tool
+
+# ── Shared app definition ────────────────────────────────────────────────────
+# Anchored so the five instances differ ONLY in their stores and their port.
+x-app: &app
+  build:
+    context: ..
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  environment: &app-env
+    NODE_ENV: production
+    DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}@postgres:5432/shopify_csv_qa
+    SHOPIFY_API_VERSION: ${SHOPIFY_API_VERSION:-2026-01}
+
+    # Five instances against one Postgres. The app defaults to 10 connections per
+    # instance, which would be 50 against a default max_connections of 100 —
+    # workable, but it leaves nothing for psql, backups, or a sixth instance.
+    DATABASE_CONNECTION_LIMIT: ${DATABASE_CONNECTION_LIMIT:-5}
+
+    # RETENTION_DAYS is deliberately NOT set here.
+    #
+    # It defaults to 0 (off). All five containers run the purge against the SAME
+    # database, so a value set on one instance deletes everyone's rows, and the
+    # most aggressive value wins. If you ever turn it on, set it IDENTICALLY on
+    # all five, and read the retention section of docs/DEPLOY.md first — a
+    # forgotten retention variable irreversibly gutted 47 real runs once already.
+
+  # The image's own CMD runs `prisma migrate deploy` before starting. That is right
+  # for a single container and wrong for five: five concurrent migrations against
+  # one database race. The `migrate` service below does it once, and these just run.
+  command: ["node", "dist/index.js"]
+
+  # Node is guaranteed present; curl and wget are not in node:20-slim.
+  healthcheck:
+    test:
+      - CMD
+      - node
+      - -e
+      - "fetch('http://localhost:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 20s
+
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+
+services:
+  # ── Database ───────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
+      POSTGRES_DB: shopify_csv_qa
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Loopback only: the database is for the containers, not the network. The app
+    # services reach it as `postgres:5432` over the compose network and do not use
+    # this mapping at all — it exists so YOU can run psql or a backup.
+    #
+    # Defaults to 5433, not 5432, so it cannot collide with a local development
+    # Postgres. On a dedicated box set POSTGRES_HOST_PORT=5432 if you prefer.
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d shopify_csv_qa"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Migrations: once, before anything serves ───────────────────────────────
+  #
+  # `migrate deploy` applies pending migrations and CANNOT reset or drop anything.
+  # Never `migrate dev` here: its drift check can offer a destructive reset, and
+  # this database has intentional drift (validation_runs.crossReferenceData).
+  migrate:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: "no"
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}@postgres:5432/shopify_csv_qa
+    command: ["npx", "prisma", "migrate", "deploy"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ── One instance per Solution Engineer ─────────────────────────────────────
+  #
+  # To add a sixth: copy a block, give it the next port, and add SHOPIFY_STORES_SE6
+  # to deploy/.env. Nothing else changes.
+  se1:
+    <<: *app
+    environment:
+      <<: *app-env
+      SHOPIFY_TEST_STORES: ${SHOPIFY_STORES_SE1:?set SHOPIFY_STORES_SE1 in deploy/.env}
+    ports:
+      - "127.0.0.1:3101:3001"
+
+  se2:
+    <<: *app
+    environment:
+      <<: *app-env
+      SHOPIFY_TEST_STORES: ${SHOPIFY_STORES_SE2:?set SHOPIFY_STORES_SE2 in deploy/.env}
+    ports:
+      - "127.0.0.1:3102:3001"
+
+  se3:
+    <<: *app
+    environment:
+      <<: *app-env
+      SHOPIFY_TEST_STORES: ${SHOPIFY_STORES_SE3:?set SHOPIFY_STORES_SE3 in deploy/.env}
+    ports:
+      - "127.0.0.1:3103:3001"
+
+  se4:
+    <<: *app
+    environment:
+      <<: *app-env
+      SHOPIFY_TEST_STORES: ${SHOPIFY_STORES_SE4:?set SHOPIFY_STORES_SE4 in deploy/.env}
+    ports:
+      - "127.0.0.1:3104:3001"
+
+  se5:
+    <<: *app
+    environment:
+      <<: *app-env
+      SHOPIFY_TEST_STORES: ${SHOPIFY_STORES_SE5:?set SHOPIFY_STORES_SE5 in deploy/.env}
+    ports:
+      - "127.0.0.1:3105:3001"
+
+volumes:
+  # The app database. Uploaded CSVs are NOT here and get no volume on purpose:
+  # they stream to ephemeral container storage and die with the container, which
+  # is the correct posture for raw merchant PII (see Dockerfile, UPLOAD_DIR).
+  pgdata:

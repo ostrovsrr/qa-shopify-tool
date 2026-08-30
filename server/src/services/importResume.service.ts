@@ -110,6 +110,24 @@ export async function resumeStore(store: ResumableStore): Promise<ResumeSummary>
   const rows = await store.findResumable(staleBefore);
 
   for (const row of rows) {
+    // NOT OURS — leave it alone, and do NOT claim it.
+    //
+    // Deployed one-instance-per-colleague against a SHARED database, each instance
+    // holds tokens for only its own stores, but findResumable sees every PENDING row
+    // in the database. Without this guard, any instance rebooting would claim a
+    // colleague's healthy in-flight row, fail to build a client for a store it has no
+    // token for, and the catch below would mark their run FAILED — while their import
+    // is still running perfectly at Shopify, and their own instance is still driving
+    // it. The claim is what makes it destructive, so the skip has to come first.
+    //
+    // resolveStoreId returns null for a store this instance has no config for. A row
+    // with a NULL storeId is a legacy single-store row and is left to the existing
+    // path, which fails it honestly.
+    if (row.storeId && !resolveStoreId(row.storeId)) {
+      summary.skipped++;
+      continue;
+    }
+
     // Claim first. Two overlapping boots (a rolling deploy) must not both work
     // the same row — that is how you get two bulk ops submitted for one job.
     const claimed = await store.claim(row.id, staleBefore);
