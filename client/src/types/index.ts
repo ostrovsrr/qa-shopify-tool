@@ -76,6 +76,10 @@ export interface ShopifyHealth {
   apiVersion?: string;
   grantedScopes?: string[];
   missingScopes?: string[];
+  /** Scopes that degrade a flow without breaking it. `ok` stays true. */
+  degradedScopes?: string[];
+  /** What silently stops working because of degradedScopes. */
+  warning?: string;
   error?: string;
   hint?: string;
 }

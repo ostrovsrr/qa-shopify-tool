@@ -91,8 +91,17 @@ export async function fetchValidatorFeedbackMarkdown(importRunId: string): Promi
   return data;
 }
 
-export async function fetchHistory(): Promise<ValidationHistoryItem[]> {
-  const { data } = await api.get<ValidationHistoryItem[]>('/customer-validation/history');
+/** `mineOnly` narrows the list to this browser's actor. A VIEW preference, not a
+ *  permission — everything is still readable without it (see api/actor.ts). The
+ *  server resolves "me" from the X-QA-User header, so the name is never repeated
+ *  in the URL and the two cannot disagree. */
+export async function fetchHistory(
+  mineOnly = false,
+): Promise<ValidationHistoryItem[]> {
+  const { data } = await api.get<ValidationHistoryItem[]>(
+    '/customer-validation/history',
+    { params: mineOnly ? { createdBy: 'me' } : undefined },
+  );
   return data;
 }
 

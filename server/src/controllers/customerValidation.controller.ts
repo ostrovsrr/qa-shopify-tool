@@ -15,6 +15,7 @@ import { removeUploadFile } from '../services/uploadFile';
 import { actorFrom, recordAction } from '../services/actionLog.service';
 import { storePreview } from '../services/previewStore';
 import { reportFileName } from '../utils/reportFileName';
+import { parseHistoryQuery } from '../utils/historyQuery';
 import { CsvParseError } from '../errors';
 
 const uuidSchema = z.string().uuid('Invalid validation ID format.');
@@ -185,12 +186,12 @@ export async function getReportHandler(
 }
 
 export async function getHistoryHandler(
-  _req: Request,
+  req: Request,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
   try {
-    const history = await getValidationHistory();
+    const history = await getValidationHistory(parseHistoryQuery(req));
     res.json(history);
   } catch (err) {
     next(err);

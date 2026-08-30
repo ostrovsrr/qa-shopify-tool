@@ -964,6 +964,9 @@ body {
 .store-card-badge.bad { background: var(--error-bg); color: var(--error); }
 .store-card-badge.pending { background: var(--bg); color: var(--text-muted); }
 .store-card-error { color: var(--error); font-size: 12px; }
+/* Connected, but something will be silently skipped. Warning colour, not error:
+   the store works — it just will not do everything the CSV asked for. */
+.store-card-warning { color: var(--warning); font-size: 12px; }
 .store-card-stats {
   display: flex;
   flex-direction: column;

@@ -193,8 +193,41 @@ export async function getValidationResult(
   };
 }
 
-export async function getValidationHistory(): Promise<ValidationHistoryItem[]> {
+// ─────────────────────────────────────────────────────────────────────────────
+// HISTORY IS A VIEW, NOT A PERMISSION.
+//
+// `createdBy` filters WHICH ROWS YOU LOOK AT. It must never decide what anyone is
+// allowed to see or do — it comes from the X-QA-User header, which any caller can
+// set to anything (see services/actionLog.service.ts). Filtering a list by it is
+// exactly what it is for; gating an action on it would be authorization built on
+// attacker-controlled input.
+//
+// Why it exists: deployed one instance per colleague against ONE shared database,
+// this query returned the 50 most recent runs IN THE WHOLE DATABASE. Fifty is a
+// shared budget — one colleague doing fifty validations pushes everybody else's
+// work off the end of their own history page.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface HistoryQuery {
+  /** Already-normalized actor slug. Undefined = everyone. */
+  createdBy?: string;
+  limit?: number;
+}
+
+export const HISTORY_DEFAULT_LIMIT = 50;
+export const HISTORY_MAX_LIMIT = 500;
+
+/** Clamp so a hand-typed ?limit= cannot ask for the entire table. */
+export function clampHistoryLimit(raw?: number): number {
+  if (raw === undefined || !Number.isFinite(raw)) return HISTORY_DEFAULT_LIMIT;
+  return Math.min(Math.max(Math.trunc(raw), 1), HISTORY_MAX_LIMIT);
+}
+
+export async function getValidationHistory(
+  query: HistoryQuery = {},
+): Promise<ValidationHistoryItem[]> {
   const runs = await prisma.validationRun.findMany({
+    where: query.createdBy ? { createdBy: query.createdBy } : undefined,
     select: {
       id: true,
       createdBy: true,
@@ -223,7 +256,7 @@ export async function getValidationHistory(): Promise<ValidationHistoryItem[]> {
       },
     },
     orderBy: { createdAt: 'desc' },
-    take: 50,
+    take: clampHistoryLimit(query.limit),
   });
   return runs.map(({ importRuns, ...run }) => ({
     ...run,

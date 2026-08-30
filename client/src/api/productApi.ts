@@ -46,8 +46,14 @@ export async function fetchUpload(uploadId: string): Promise<UploadDetail> {
   return data;
 }
 
-export async function fetchHistory(): Promise<ProductHistoryItem[]> {
-  const { data } = await api.get<ProductHistoryItem[]>('/product-upload/history');
+/** Twin of the customer fetchHistory — same semantics, deliberately identical.
+ *  A view preference, not a permission. */
+export async function fetchHistory(
+  mineOnly = false,
+): Promise<ProductHistoryItem[]> {
+  const { data } = await api.get<ProductHistoryItem[]>('/product-upload/history', {
+    params: mineOnly ? { createdBy: 'me' } : undefined,
+  });
   return data;
 }
 

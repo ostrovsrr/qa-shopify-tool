@@ -3,6 +3,7 @@ import prisma from '../db/prisma';
 import { CsvParseError } from '../errors';
 import { parseProductCsvFile } from './productCsvParser';
 import { ProductHistoryItem, UpdateUploadMetadata } from '../types';
+import { clampHistoryLimit, HistoryQuery } from './customerValidation.service';
 
 // Thin upload: parse the product CSV, group by Handle for the product count, and
 // persist the run + its raw rows. No validation, no column mapping — the CSV is
@@ -111,9 +112,21 @@ const lastImportSelect = {
   select: { status: true, successCount: true, errorCount: true, createdAt: true },
 } as const;
 
-export async function getUploadHistory(): Promise<ProductHistoryItem[]> {
+/**
+ * Twin of getValidationHistory — same view-not-permission rule, same reason.
+ * See the comment there.
+ *
+ * This one additionally had NO `take` at all: it returned every product upload
+ * ever made, by anyone. Fine for one user and a handful of runs; an unbounded
+ * query against a shared database that only grows.
+ */
+export async function getUploadHistory(
+  query: HistoryQuery = {},
+): Promise<ProductHistoryItem[]> {
   const uploads = await prisma.productUploadRun.findMany({
+    where: query.createdBy ? { createdBy: query.createdBy } : undefined,
     orderBy: { createdAt: 'desc' },
+    take: clampHistoryLimit(query.limit),
     select: {
       id: true,
       createdBy: true,

@@ -193,6 +193,26 @@ describe('resumeStore — shared database, per-instance store tokens', () => {
     expect(calls.failed).toEqual([]);
   });
 
+  it('does NOT skip when this instance has no usable store config', async () => {
+    // An empty or unparseable store list makes resolveStoreId return null for
+    // EVERY store alike, so an unguarded ownership check would match every row
+    // and resume would silently do nothing — a misconfiguration turned into a
+    // no-op, which is precisely what this service exists to prevent. With
+    // nothing to judge ownership against, rows must fall through to the normal
+    // path and fail loudly instead.
+    process.env.SHOPIFY_TEST_STORES = '[]';
+    resetShopifyConfigCache();
+
+    const { store, calls } = fakeStore([
+      { id: 'run-1', storeId: THEIRS, createdAt: ROW_CREATED },
+    ]);
+
+    const summary = await resumeStore(store);
+
+    expect(summary.skipped).toBe(0);
+    expect(calls.claimed).toEqual(['run-1']);
+  });
+
   it('skips every foreign row without touching any of them', async () => {
     const { store, calls } = fakeStore([
       { id: 'run-1', storeId: THEIRS, createdAt: ROW_CREATED },

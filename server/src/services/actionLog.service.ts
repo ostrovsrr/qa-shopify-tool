@@ -46,19 +46,26 @@ const MAX_ACTOR_LENGTH = 60;
  * Sanitised, not verified. The point of the sanitising is that this string ends up
  * in a database column and in logs, not that it establishes identity — it cannot.
  */
-export function actorFrom(req: Request): string {
-  const raw = req.header(ACTOR_HEADER);
-  if (!raw) return 'unknown';
-
-  // An opaque slug: a first name or handle. NOT an email — this column lands in the
-  // history UI and in logs, and there is no reason for it to carry an identifier
-  // more personal than the tool actually needs.
-  const slug = raw
+/**
+ * An opaque slug: a first name or handle. NOT an email — this value lands in the
+ * history UI and in logs, and there is no reason for it to carry an identifier
+ * more personal than the tool actually needs.
+ *
+ * Exported because the history FILTER has to normalize a query param exactly the
+ * way the writer normalized the header, or "?createdBy=Josh" silently matches
+ * nothing while the rows plainly say "josh".
+ */
+export function normalizeActor(raw: string): string {
+  return raw
     .toLowerCase()
     .replace(/[^a-z0-9._-]/g, '')
     .slice(0, MAX_ACTOR_LENGTH);
+}
 
-  return slug || 'unknown';
+export function actorFrom(req: Request): string {
+  const raw = req.header(ACTOR_HEADER);
+  if (!raw) return 'unknown';
+  return normalizeActor(raw) || 'unknown';
 }
 
 interface LogEntry {
