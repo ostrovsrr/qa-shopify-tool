@@ -58,6 +58,11 @@ export interface HealthReport {
   apiVersion: string;
   grantedScopes: string[];
   missingScopes: string[];
+  /** Granted-scope gaps that DEGRADE a flow without breaking it. Never affects
+   *  `ok` — see DEGRADED_SCOPES. */
+  degradedScopes?: string[];
+  /** Human sentence for degradedScopes: what silently stops working. */
+  warning?: string;
   error?: string;
 }
 
@@ -66,6 +71,30 @@ const REQUIRED_SCOPES = [
   'read_customers',
   'write_products',
   'read_products',
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SCOPES THAT DEGRADE A FLOW INSTEAD OF BREAKING IT.
+//
+// Not in REQUIRED_SCOPES on purpose. A missing scope here must NOT mark the store
+// "not ready": read_locations is used only by the PRODUCT import, and failing a
+// store for the customer flow — which never touches locations — would be a lie in
+// the other direction.
+//
+// But silence was worse. Without read_locations, fetchLocationId() returns
+// undefined (it swallows the access-denied so one scope cannot fail every product
+// line), buildVariantFields then skips inventoryQuantities entirely, and a CSV's
+// "Variant Inventory Qty" column is DROPPED while the run reports success. For a
+// tool whose whole job is answering "did this import correctly?", reporting a pass
+// on a field that never landed is the worst failure it has.
+//
+// So: it does not block, and it does not hide.
+const DEGRADED_SCOPES: { scope: string; consequence: string }[] = [
+  {
+    scope: 'read_locations',
+    consequence:
+      'product imports cannot resolve an inventory location, so "Variant Inventory Qty" is skipped and inventory levels are NOT set',
+  },
 ];
 
 // Transient HTTP statuses worth retrying — Shopify's gateway returns 502/503/504
@@ -232,7 +261,12 @@ export class ShopifyClient {
       (s) => !grantedScopes.includes(s),
     );
 
+    const degraded = DEGRADED_SCOPES.filter(
+      (d) => !grantedScopes.includes(d.scope),
+    );
+
     return {
+      // Deliberately NOT affected by `degraded` — see DEGRADED_SCOPES.
       ok: missingScopes.length === 0,
       storeId: this.config.id,
       label: this.config.label,
@@ -240,6 +274,13 @@ export class ShopifyClient {
       apiVersion: this.config.apiVersion,
       grantedScopes,
       missingScopes,
+      degradedScopes: degraded.length > 0 ? degraded.map((d) => d.scope) : undefined,
+      warning:
+        degraded.length > 0
+          ? degraded
+              .map((d) => `Missing "${d.scope}": ${d.consequence}.`)
+              .join(' ')
+          : undefined,
       error:
         missingScopes.length > 0
           ? `Missing required scope(s): ${missingScopes.join(', ')}`

@@ -383,6 +383,14 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
           </div>
         )}
 
+        {/* The store is CONNECTED and will import — but something in the CSV will
+            be silently dropped. Shown on its own, not folded into the error above,
+            because "not ready" and "ready but it will quietly ignore a column" are
+            different things and the second one is the one that fools you. */}
+        {h && h.ok && h.warning && (
+          <div className="store-card-warning">{h.warning}</div>
+        )}
+
         <div className="store-card-stats">
           {batch !== null && (
             <span>
