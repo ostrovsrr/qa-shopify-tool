@@ -18,6 +18,7 @@ import {
   ShopifyStore,
   StoreProductStats,
 } from '../types';
+import { shopifyAdminUrl } from '../utils/shopifyAdmin';
 import { ProductResultsView } from './ProductResultsView';
 
 interface Props {
@@ -353,6 +354,7 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
     const h = storeHealth[storeId];
     const st = storeStats[storeId];
     const cleaning = cleaningStores.has(storeId);
+    const adminUrl = shopifyAdminUrl(store?.shop, 'products');
     const batch = inParallelReview
       ? batchSizeFor(index, productCount, selectedStoreIds.length)
       : null;
@@ -402,13 +404,25 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
           </span>
         </div>
 
-        <button
-          className="btn btn-outline btn-sm"
-          onClick={() => cleanStore(storeId)}
-          disabled={cleaning || (st != null && st.qaImportProducts === 0)}
-        >
-          {cleaning ? 'Cleaning…' : 'Clean QA'}
-        </button>
+        <div className="store-card-actions">
+          {adminUrl && (
+            <a
+              className="btn btn-outline btn-sm"
+              href={adminUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Open products ↗
+            </a>
+          )}
+          <button
+            className="btn btn-outline btn-sm"
+            onClick={() => cleanStore(storeId)}
+            disabled={cleaning || (st != null && st.qaImportProducts === 0)}
+          >
+            {cleaning ? 'Cleaning…' : 'Clean QA'}
+          </button>
+        </div>
       </div>
     );
   };

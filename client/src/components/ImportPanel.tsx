@@ -19,6 +19,7 @@ import {
   StoreCustomerStats,
   ValidationResult,
 } from '../types';
+import { shopifyAdminUrl } from '../utils/shopifyAdmin';
 
 interface Props {
   result: ValidationResult;
@@ -393,6 +394,7 @@ export function ImportPanel({ result }: Props) {
     const h = storeHealth[storeId];
     const st = storeStats[storeId];
     const cleaning = cleaningStores.has(storeId);
+    const adminUrl = shopifyAdminUrl(store?.shop, 'customers');
     const batch = inParallelReview
       ? batchSizeFor(index, result.totalRows, selectedStoreIds.length)
       : null;
@@ -456,13 +458,25 @@ export function ImportPanel({ result }: Props) {
         {/* Not disabled while the count is still loading. The cleanup re-reads the
             store itself, so it never needed the count to be on screen first — and
             gating it meant the button sat dead for a minute on a big store. */}
-        <button
-          className="btn btn-outline btn-sm"
-          onClick={() => cleanStore(storeId)}
-          disabled={cleaning || (st != null && st.qaImportCustomers === 0)}
-        >
-          {cleaning ? 'Cleaning…' : 'Clean QA'}
-        </button>
+        <div className="store-card-actions">
+          {adminUrl && (
+            <a
+              className="btn btn-outline btn-sm"
+              href={adminUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Open customers ↗
+            </a>
+          )}
+          <button
+            className="btn btn-outline btn-sm"
+            onClick={() => cleanStore(storeId)}
+            disabled={cleaning || (st != null && st.qaImportCustomers === 0)}
+          >
+            {cleaning ? 'Cleaning…' : 'Clean QA'}
+          </button>
+        </div>
       </div>
     );
   };

@@ -971,7 +971,15 @@ body {
   color: var(--text-muted);
   font-size: 13px;
 }
-.store-card .btn { align-self: flex-start; }
+/* Direct-child only: buttons inside .store-card-actions take their alignment
+   from that wrapper, not from here. */
+.store-card > .btn { align-self: flex-start; }
+.store-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
 .muted { color: var(--text-muted); font-size: 14px; margin: 4px 0; }
 .subsection-title {
   font-size: 15px;
