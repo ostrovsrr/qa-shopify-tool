@@ -1,5 +1,5 @@
 import prisma from '../db/prisma';
-import { resolveStoreId } from '../config/shopify';
+import { getShopifyStoresConfig, resolveStoreId } from '../config/shopify';
 import { getShopifyClient } from './shopifyClient';
 import { CurrentBulkOperation, fetchCurrentBulkOperation } from './shopifyBulk';
 import { acquireStoreLock, StoreLockOwner } from './storeLock.service';
@@ -109,6 +109,21 @@ export async function resumeStore(store: ResumableStore): Promise<ResumeSummary>
 
   const rows = await store.findResumable(staleBefore);
 
+  // CAN we tell whose row is whose?
+  //
+  // The ownership skip below asks "is this store missing from MY config?" That is
+  // only a meaningful question when this instance HAS a usable config. If the
+  // store list is empty or failed to parse, resolveStoreId returns null for every
+  // store alike, the skip matches every row, and resume silently does nothing —
+  // turning a misconfiguration into a no-op with no error anywhere, which is the
+  // failure mode this whole service exists to prevent.
+  //
+  // So ownership is only judged when there is something to judge against.
+  // Otherwise every row falls through to the normal path, which fails it loudly
+  // with a real reason ("...is not configured") instead of quietly ignoring it.
+  const storesConfig = getShopifyStoresConfig();
+  const canJudgeOwnership = storesConfig.ok && storesConfig.stores.length > 0;
+
   for (const row of rows) {
     // NOT OURS — leave it alone, and do NOT claim it.
     //
@@ -120,10 +135,9 @@ export async function resumeStore(store: ResumableStore): Promise<ResumeSummary>
     // is still running perfectly at Shopify, and their own instance is still driving
     // it. The claim is what makes it destructive, so the skip has to come first.
     //
-    // resolveStoreId returns null for a store this instance has no config for. A row
-    // with a NULL storeId is a legacy single-store row and is left to the existing
-    // path, which fails it honestly.
-    if (row.storeId && !resolveStoreId(row.storeId)) {
+    // A row with a NULL storeId is a legacy single-store row and is left to the
+    // existing path, which fails it honestly.
+    if (canJudgeOwnership && row.storeId && !resolveStoreId(row.storeId)) {
       summary.skipped++;
       continue;
     }
