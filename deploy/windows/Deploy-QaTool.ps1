@@ -87,19 +87,35 @@ if ($tasks.Count -gt 0) {
     Write-Host "stopped $($t.TaskName)"
   }
 
-  # Stop-ScheduledTask returns before the process tree is gone. Wait for the ports
-  # to actually free, or the build races the shutdown and fails EPERM anyway.
-  $deadline = (Get-Date).AddSeconds(60)
+  # Stop-ScheduledTask returns before the process tree is gone. Give a clean
+  # shutdown a short grace period, then stop waiting -- an orphaned node never
+  # releases on its own, so a long wait here is 60 seconds of nothing.
+  $deadline = (Get-Date).AddSeconds(10)
   while ((Get-Date) -lt $deadline) {
     $live = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
               Where-Object { $_.LocalPort -ge 3101 -and $_.LocalPort -le 3199 })
     if ($live.Count -eq 0) { break }
     Start-Sleep -Seconds 2
   }
+  # Stop-ScheduledTask kills the task's PowerShell process, but does NOT reliably
+  # take the node child with it -- Start-Instance.ps1 runs node as a child and the
+  # orphan keeps the port and keeps the Prisma engine DLL mapped, which is exactly
+  # what makes `npm ci` fail EPERM. So kill what is still holding our ports.
+  $live = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+            Where-Object { $_.LocalPort -ge 3101 -and $_.LocalPort -le 3199 })
+  foreach ($c in $live) {
+    $proc = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
+    if ($proc -and $proc.ProcessName -eq 'node') {
+      Write-Host "killing orphaned node PID $($proc.Id) still holding port $($c.LocalPort)"
+      Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+    }
+  }
+  Start-Sleep -Seconds 3
+
   $live = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
             Where-Object { $_.LocalPort -ge 3101 -and $_.LocalPort -le 3199 })
   if ($live.Count -gt 0) {
-    Write-Warning "Ports still listening after 60s: $($live.LocalPort -join ', '). The build may fail with EPERM."
+    Write-Warning "Ports still listening: $(($live.LocalPort | Sort-Object -Unique) -join ', '). The build will probably fail with EPERM."
   } else {
     Write-Host 'all instance ports released'
   }
