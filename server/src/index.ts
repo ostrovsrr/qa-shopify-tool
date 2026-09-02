@@ -60,7 +60,19 @@ import { HttpError } from './errors';
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT ?? 3001;
+const PORT = Number(process.env.PORT ?? 3001);
+
+// Which interfaces to accept connections on. Node's default is every interface
+// (0.0.0.0), and that stays the default here so nothing changes for `npm run dev`
+// or for a container already isolated by its port mapping.
+//
+// Set BIND_ADDR=127.0.0.1 to make the process itself refuse non-local connections.
+// That is a second lock, independent of the firewall: on a native Windows host a
+// disabled or reset firewall rule would otherwise expose an app that has NO
+// AUTHENTICATION, including the routes that delete records by tag across a whole
+// Shopify store. The firewall decides who may reach the port; this decides whether
+// the port is reachable off-box at all.
+const BIND_ADDR = process.env.BIND_ADDR ?? '0.0.0.0';
 
 // ── Middleware ──────────────────────────────────────────────────────────────
 
@@ -218,8 +230,8 @@ app.use(errorHandler);
 // imported — e.g. by Supertest in integration tests — skip listen so no port
 // is occupied and the process can exit cleanly.
 if (require.main === module) {
-  const server = app.listen(PORT, () => {
-    console.log(`Server listening on http://localhost:${PORT}`);
+  const server = app.listen(PORT, BIND_ADDR, () => {
+    console.log(`Server listening on http://localhost:${PORT} (bound to ${BIND_ADDR})`);
 
     // Finish what the last process started. An import that was interrupted
     // mid-flight (a redeploy, a crash, an OOM) left PENDING rows behind: the row
