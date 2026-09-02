@@ -52,7 +52,7 @@ import prisma from './db/prisma';
 import { resumePendingImports } from './services/importResume.service';
 import { sweepOrphanUploads, uploadStorage } from './services/uploadFile';
 import { errorHandler, requestId } from './middleware/errorHandler';
-import { getActionLog } from './services/actionLog.service';
+import { getActionLog, normalizeActor } from './services/actionLog.service';
 import { purgeExpiredPii } from './services/retention.service';
 import { sweepRunningCleanups } from './services/cleanupRun.service';
 import { HttpError } from './errors';
@@ -109,6 +109,26 @@ app.get('/api/health', (req, res) => {
         requestId: req.requestId,
       }),
     );
+});
+
+// ── Whose instance is this? ─────────────────────────────────────────────────
+//
+// Every instance belongs to exactly one Solution Engineer -- that is the whole
+// isolation model (see deploy/docker-compose.yml). So the instance can say whose it
+// is, and the browser can use that as the default name instead of making each
+// colleague type their own into every browser they ever open.
+//
+// STILL A LABEL, NOT A LOGIN. This is a default for a display name that lands in the
+// action log, and the client remains free to send any name at all. Nothing is gated
+// on it and nothing ever should be -- see services/actionLog.service.ts. Serving it
+// from the server makes the label CONSISTENT, not trustworthy.
+//
+// Normalised with the same function the writer uses, so the default matches what the
+// history filter will look for. Unset is fine and means "no default".
+app.get('/api/instance', (_req, res) => {
+  const raw = process.env.QA_INSTANCE_OWNER ?? '';
+  const owner = normalizeActor(raw);
+  res.json({ owner: owner || null });
 });
 
 // ── File upload ─────────────────────────────────────────────────────────────

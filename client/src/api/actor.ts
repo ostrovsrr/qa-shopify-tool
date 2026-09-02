@@ -26,6 +26,19 @@ import { AxiosInstance } from 'axios';
 
 const STORAGE_KEY = 'qa-tool-user';
 
+// The name this INSTANCE belongs to, from GET /api/instance.
+//
+// Each instance is one Solution Engineer's (that is the isolation model), so it can
+// supply a sensible default and nobody has to type their own name into every browser
+// they use. It is only ever a FALLBACK: a name the person chose themselves is stored
+// under STORAGE_KEY and always wins, so a colleague borrowing someone's URL can set
+// their own and keep it.
+//
+// Deliberately not written to localStorage. Persisting it would make a default
+// indistinguishable from a deliberate choice, and it would then survive even after
+// the instance's owner changed.
+let instanceDefault = '';
+
 /** An opaque slug — a first name or handle. Deliberately NOT an email: this lands in
  *  a shared history and in server logs, and there is no reason for it to carry a
  *  more personal identifier than the tool actually needs. */
@@ -36,8 +49,17 @@ export function normalizeActor(raw: string): string {
     .slice(0, 60);
 }
 
+export function setInstanceDefault(name: string | null | undefined): void {
+  instanceDefault = normalizeActor(name ?? '');
+}
+
+/** True when the current actor is this instance's default rather than a chosen name. */
+export function isUsingInstanceDefault(): boolean {
+  return !localStorage.getItem(STORAGE_KEY) && Boolean(instanceDefault);
+}
+
 export function getActor(): string {
-  return localStorage.getItem(STORAGE_KEY) ?? '';
+  return localStorage.getItem(STORAGE_KEY) ?? instanceDefault;
 }
 
 export function setActor(name: string): void {

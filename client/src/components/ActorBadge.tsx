@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { getActor, setActor } from '../api/actor';
+import { getActor, isUsingInstanceDefault, setActor } from '../api/actor';
 
 // The tool is a shared workspace — everyone sees every run, and any colleague can
 // clean up any store. So runs say who uploaded them and destructive actions are
@@ -9,6 +9,9 @@ import { getActor, setActor } from '../api/actor';
 // (see api/actor.ts). Presenting it as a sign-in would be a lie about what it does.
 export function ActorBadge(): JSX.Element {
   const [name, setName] = useState(getActor());
+  // Whether that name came from this instance (SE7 -> "pratha") or the person typed
+  // it. Only changes the wording of the tooltip -- both are equally just a label.
+  const [isDefault, setIsDefault] = useState(isUsingInstanceDefault());
   // Starts CLOSED even when no name is set. Opening an input inside the nav bar on
   // first load reads as a login prompt, which is exactly the wrong idea — nothing is
   // gated on this — and it crowds the header for a value that is entirely optional.
@@ -18,6 +21,7 @@ export function ActorBadge(): JSX.Element {
   const save = (): void => {
     setActor(draft);
     setName(getActor());
+    setIsDefault(isUsingInstanceDefault());
     setEditing(false);
   };
 
@@ -52,7 +56,9 @@ export function ActorBadge(): JSX.Element {
       onClick={open}
       title={
         name
-          ? `Runs you upload are labelled "${name}". Click to change.`
+          ? isDefault
+            ? `Runs you upload are labelled "${name}", this instance's default. Click to change it for this browser.`
+            : `Runs you upload are labelled "${name}". Click to change.`
           : 'Optional: add your name so colleagues can see who uploaded a run.'
       }
     >

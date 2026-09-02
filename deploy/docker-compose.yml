@@ -122,6 +122,7 @@ services:
     environment:
       <<: *app-env
       SHOPIFY_TEST_STORES: ${SHOPIFY_STORES_SE1:?set SHOPIFY_STORES_SE1 in deploy/.env}
+      QA_INSTANCE_OWNER: ${QA_OWNER_SE1:-}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:3101:3001"
 
@@ -130,6 +131,7 @@ services:
     environment:
       <<: *app-env
       SHOPIFY_TEST_STORES: ${SHOPIFY_STORES_SE2:?set SHOPIFY_STORES_SE2 in deploy/.env}
+      QA_INSTANCE_OWNER: ${QA_OWNER_SE2:-}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:3102:3001"
 
@@ -138,6 +140,7 @@ services:
     environment:
       <<: *app-env
       SHOPIFY_TEST_STORES: ${SHOPIFY_STORES_SE3:?set SHOPIFY_STORES_SE3 in deploy/.env}
+      QA_INSTANCE_OWNER: ${QA_OWNER_SE3:-}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:3103:3001"
 
@@ -146,6 +149,7 @@ services:
     environment:
       <<: *app-env
       SHOPIFY_TEST_STORES: ${SHOPIFY_STORES_SE4:?set SHOPIFY_STORES_SE4 in deploy/.env}
+      QA_INSTANCE_OWNER: ${QA_OWNER_SE4:-}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:3104:3001"
 
@@ -154,6 +158,7 @@ services:
     environment:
       <<: *app-env
       SHOPIFY_TEST_STORES: ${SHOPIFY_STORES_SE5:?set SHOPIFY_STORES_SE5 in deploy/.env}
+      QA_INSTANCE_OWNER: ${QA_OWNER_SE5:-}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:3105:3001"
 
@@ -162,6 +167,7 @@ services:
     environment:
       <<: *app-env
       SHOPIFY_TEST_STORES: ${SHOPIFY_STORES_SE6:?set SHOPIFY_STORES_SE6 in deploy/.env}
+      QA_INSTANCE_OWNER: ${QA_OWNER_SE6:-}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:3106:3001"
 
@@ -170,6 +176,7 @@ services:
     environment:
       <<: *app-env
       SHOPIFY_TEST_STORES: ${SHOPIFY_STORES_SE7:?set SHOPIFY_STORES_SE7 in deploy/.env}
+      QA_INSTANCE_OWNER: ${QA_OWNER_SE7:-}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:3107:3001"
 

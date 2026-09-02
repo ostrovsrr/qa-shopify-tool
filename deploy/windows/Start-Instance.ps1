@@ -140,6 +140,12 @@ $env:SHOPIFY_API_VERSION       = $cfg['SHOPIFY_API_VERSION']
 $env:DATABASE_CONNECTION_LIMIT = if ($cfg['DATABASE_CONNECTION_LIMIT']) { $cfg['DATABASE_CONNECTION_LIMIT'] } else { '5' }
 $env:UPLOAD_DIR                = Join-Path $env:TEMP "qa-uploads-$($Instance.ToLower())"
 
+# Whose instance this is. Serves the default display name to the browser so nobody
+# types their own name into every browser they open (GET /api/instance). Unset is
+# fine -- the badge just starts empty. It is a LABEL, not a login: the client can
+# still send any name, and nothing is gated on it.
+$env:QA_INSTANCE_OWNER         = $cfg["QA_OWNER_$Instance"]
+
 # RETENTION_DAYS is deliberately NOT set, and must not be set here.
 #
 # All seven instances share one database, so a value set for one deletes
