@@ -1,0 +1,127 @@
+# Native Windows deployment (HELIOS-SERVER)
+
+The Docker path in `deploy/docker-compose.yml` is the reference design. This is the
+same design on a Windows host that has no Docker and no WSL, which is what
+HELIOS-SERVER is.
+
+What carries over unchanged:
+
+- **One instance per Solution Engineer**, each holding credentials for only its own
+  test stores. `getShopifyClient()` throws for any store it has no config for, so an
+  instance cannot touch a store whose token is not in its process. That is the entire
+  isolation mechanism and there is nothing else.
+- **One shared PostgreSQL**, so run history is visible to everyone in one place.
+- **Migrations run once**, not per instance.
+- **`RETENTION_DAYS` stays unset.**
+
+What differs: scheduled tasks instead of containers, native PostgreSQL instead of
+`postgres:16`, and ports bound per `BIND_ADDR` + a host firewall rule instead of a
+Docker port mapping.
+
+## ⚠ There is no authentication
+
+Not "not configured" — it does not exist in the code on `main`. Anyone who can reach
+an instance port gets that SE's full API, including six destructive routes: deleting
+validation runs and product uploads, and the two cleanup routes that **delete records
+by tag across an entire Shopify store**.
+
+The only controls are the firewall rule's `RemoteAddress` and `BIND_ADDR`. Keep both
+tight, and do not give this a public DNS name.
+
+A Cloudflare Access implementation exists unmerged on the `hosting-async-fix` branch
+(`middleware/accessAuth.ts`). It needs a tunnel and a public hostname, which is a
+different deployment shape than this one.
+
+## Layout
+
+| Path | What |
+|---|---|
+| `C:\apps\qa-shopify-tool` | Git checkout + build output. Disposable; `git reset --hard` runs against it. |
+| `C:\ProgramData\qa-shopify-tool\deploy.env` | **Credentials.** Deliberately outside the checkout. |
+| `C:\ProgramData\qa-shopify-tool\logs\se*.log` | Per-instance stdout/stderr, rolled at 20 MB. |
+| Task Scheduler `\QA Shopify Tool\` | One `qa-shopify-se*` task per instance. |
+
+`deploy.env` is `deploy/.env` — the same format, the same keys. It sits outside the
+checkout so that `git reset --hard` cannot clobber it and no `git add` can publish it
+to what is a **public** repository.
+
+## First run
+
+Elevated, on the server:
+
+```powershell
+# 1. Put the credentials in place (from your laptop, before this):
+#    scp deploy/.env all-users@10.20.30.208:C:/ProgramData/qa-shopify-tool/deploy.env
+
+cd C:\apps\qa-shopify-tool\deploy\windows   # or wherever you unpacked the scripts
+
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-Prerequisites.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Deploy-QaTool.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Register-Instances.ps1
+```
+
+`Register-Instances.ps1` derives the instance list from the `SHOPIFY_STORES_SE*` keys
+that actually have values, so adding an SE means adding a key and re-running it.
+
+## Updating
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Deploy-QaTool.ps1
+```
+
+Pulls `main`, rebuilds both halves, runs `prisma migrate deploy` once, restarts every
+instance. Roughly 30 seconds of downtime per instance.
+
+## Ports
+
+| Instance | Port | URL for that SE |
+|---|---|---|
+| SE1 | 3101 | `http://10.20.30.208:3101` |
+| SE2 | 3102 | `http://10.20.30.208:3102` |
+| SE3 | 3103 | `http://10.20.30.208:3103` |
+| SE4 | 3104 | `http://10.20.30.208:3104` |
+| SE5 | 3105 | `http://10.20.30.208:3105` |
+| SE6 | 3106 | `http://10.20.30.208:3106` |
+| SE7 | 3107 | `http://10.20.30.208:3107` |
+
+3101+ rather than 3001+ because 3001 is the development API port; colliding with it
+would break `npm run dev` on the same machine.
+
+PostgreSQL listens on 127.0.0.1:5432 and gets no firewall rule.
+
+## Operating
+
+```powershell
+# state of every instance
+Get-ScheduledTask -TaskPath '\QA Shopify Tool\' |
+  Get-ScheduledTaskInfo | Format-Table TaskName, LastRunTime, LastTaskResult
+
+# health
+3101..3107 | ForEach-Object {
+  try   { "$_ -> $((Invoke-RestMethod "http://127.0.0.1:$_/api/health").status)" }
+  catch { "$_ -> DOWN" }
+}
+
+# logs
+Get-Content C:\ProgramData\qa-shopify-tool\logs\se1.log -Tail 50 -Wait
+
+# restart one
+Stop-ScheduledTask  -TaskName qa-shopify-se1 -TaskPath '\QA Shopify Tool\'
+Start-ScheduledTask -TaskName qa-shopify-se1 -TaskPath '\QA Shopify Tool\'
+```
+
+## Known limitations
+
+- **`all-users` is a shared admin account.** Anyone who logs into it can read
+  `deploy.env`, and ACLs cannot change that while the account is shared and
+  administrative. A dedicated service account is a small change, not a redesign.
+- **Two concurrent imports into the same Shopify store are impossible** — Shopify
+  allows one bulk operation per shop, surfaced as a 409. Different stores run in
+  parallel. Two SEs sharing a store will collide.
+- **`product_original_rows` grows per upload** and nothing prunes it. `RETENTION_DAYS`
+  is the lever, and it is off; read the retention section of `docs/DEPLOY.md` before
+  touching it.
+- **No backups.** Nothing dumps this database anywhere.
+- **One CPU-bound validation blocks that instance's other requests** — Node is
+  single-threaded and validation is synchronous. Per-SE instances mean an SE only
+  ever blocks themselves.
