@@ -28,6 +28,19 @@ by tag across an entire Shopify store**.
 The only controls are the firewall rule's `RemoteAddress` and `BIND_ADDR`. Keep both
 tight, and do not give this a public DNS name.
 
+> **The firewall rule is currently not enforcing anything on one profile.**
+> HELIOS-SERVER has the **Private** Windows Firewall profile **disabled**. A rule only
+> filters on a profile that is switched on, so if the active network is classified
+> Private, ports 3101–3107 are reachable from anywhere that can route to the box —
+> not just `10.20.30.0/24` — with no authentication in front of them.
+> `Register-Instances.ps1` warns about this on every run. Enabling that profile is a
+> machine-wide change that affects everything else on this shared box, so it is a
+> deliberate decision for whoever owns the machine, not something the deploy does.
+
+PostgreSQL is bound to `localhost` (`listen_addresses`), so the database is not exposed
+even with the firewall profile off. `Install-Prerequisites.ps1` enforces that — the EDB
+installer's default is `'*'`, which would otherwise put the superuser account on the LAN.
+
 A Cloudflare Access implementation exists unmerged on the `hosting-async-fix` branch
 (`middleware/accessAuth.ts`). It needs a tunnel and a public hostname, which is a
 different deployment shape than this one.

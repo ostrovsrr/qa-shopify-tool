@@ -73,6 +73,28 @@ if ($pgService) {
 Set-Service -Name $pgService.Name -StartupType Automatic
 if ($pgService.Status -ne 'Running') { Start-Service -Name $pgService.Name }
 
+
+# ── Keep PostgreSQL off the network ─────────────────────────────────────────
+#
+# The EDB installer ships listen_addresses = '*'. On a host whose firewall
+# profile is disabled -- which is the case here -- that puts the superuser
+# account on the LAN with nothing in front of it. The app connects over
+# 127.0.0.1, so there is no reason for it to listen anywhere else.
+$pgConf = "C:\Program Files\PostgreSQL\$PostgresVersion\data\postgresql.conf"
+if (Test-Path -LiteralPath $pgConf) {
+  $conf = Get-Content -LiteralPath $pgConf -Raw
+  if ($conf -match "(?m)^\s*listen_addresses\s*=\s*'\*'") {
+    Copy-Item -LiteralPath $pgConf -Destination "$pgConf.bak-qa-deploy" -Force
+    $conf = $conf -replace "(?m)^\s*listen_addresses\s*=\s*'\*'.*$", "listen_addresses = 'localhost'`t`t# qa-shopify-tool deploy: app connects over 127.0.0.1 only"
+    Set-Content -LiteralPath $pgConf -Value $conf -Encoding ascii
+    Write-Host 'listen_addresses set to localhost; restarting PostgreSQL'
+    Restart-Service -Name $pgService.Name -Force
+    Start-Sleep -Seconds 5
+  } else {
+    Write-Host 'listen_addresses already restricted'
+  }
+}
+
 # ── Database ────────────────────────────────────────────────────────────────
 Write-Step "Database '$Database'"
 $psql = "C:\Program Files\PostgreSQL\$PostgresVersion\bin\psql.exe"

@@ -133,6 +133,15 @@ if (-not $SkipFirewall) {
     -Description 'QA Shopify Tool SE instances. NO AUTHENTICATION behind this rule -- keep RemoteAddress tight.' | Out-Null
 
   Write-Host "firewall: TCP $portRange allowed from $($AllowFrom -join ', ')"
+
+  # A rule only filters on a profile that is switched ON. This box ships with the
+  # Private profile DISABLED, and on a disabled profile the RemoteAddress scoping
+  # above is decoration: every port is reachable by anyone who can route to the
+  # host. Say so loudly rather than leaving a false sense of restriction.
+  $offProfiles = @(Get-NetFirewallProfile | Where-Object { -not $_.Enabled })
+  if ($offProfiles.Count -gt 0) {
+    Write-Warning ("Windows Firewall is DISABLED for: {0}. The RemoteAddress restriction just applied does NOT apply on those profiles -- if the active network uses one, ports {1} are reachable from anywhere that can route here, with no authentication in front of them. Enable the profile, or accept that exposure knowingly." -f (($offProfiles.Name) -join ', '), $portRange)
+  }
 }
 
 Write-Host "`nStarting instances now (they would otherwise wait for the next boot)..."
