@@ -1,5 +1,5 @@
 import type { Request } from 'express';
-import { normalizeActor } from '../services/actionLog.service';
+import { actorKey } from '../services/actionLog.service';
 import { HistoryQuery, clampHistoryLimit } from '../services/customerValidation.service';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -33,9 +33,10 @@ export function parseHistoryQuery(req: Request): HistoryQuery {
       rawCreatedBy === SELF
         ? (req.header('x-qa-user') ?? '')
         : rawCreatedBy;
-    // Normalized the same way the writer normalized it, or "?createdBy=Josh"
-    // matches nothing while every row plainly reads "josh".
-    createdBy = normalizeActor(wanted) || undefined;
+    // The COMPARISON form, not the display form. Rows store what the person typed
+    // ("Josh"), so the filter lowercases both sides -- here, and again in the
+    // database query, which must be case-insensitive or this key matches nothing.
+    createdBy = actorKey(wanted) || undefined;
 
     // Asked to filter by self, but this browser has not picked a name yet. Rows
     // are stored as 'unknown' in that case, so match those rather than silently

@@ -41,12 +41,14 @@ let instanceDefault = '';
 
 /** An opaque slug — a first name or handle. Deliberately NOT an email: this lands in
  *  a shared history and in server logs, and there is no reason for it to carry a
- *  more personal identifier than the tool actually needs. */
+ *  more personal identifier than the tool actually needs.
+ *
+ *  Case is PRESERVED: the history reads "by Josh", not "by josh". Matching ignores
+ *  case on the server instead (actorKey in services/actionLog.service). Must stay in
+ *  step with that function -- if this strips a character the server keeps, a name
+ *  typed here would not match the same name typed anywhere else. */
 export function normalizeActor(raw: string): string {
-  return raw
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]/g, '')
-    .slice(0, 60);
+  return raw.replace(/[^A-Za-z0-9._-]/g, '').slice(0, 60);
 }
 
 export function setInstanceDefault(name: string | null | undefined): void {

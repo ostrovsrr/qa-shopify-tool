@@ -51,15 +51,31 @@ const MAX_ACTOR_LENGTH = 60;
  * history UI and in logs, and there is no reason for it to carry an identifier
  * more personal than the tool actually needs.
  *
- * Exported because the history FILTER has to normalize a query param exactly the
- * way the writer normalized the header, or "?createdBy=Josh" silently matches
- * nothing while the rows plainly say "josh".
+ * CASE IS PRESERVED, because this string is displayed: the history reads
+ * "by Rodion", not "by rodion". It is therefore NOT a comparison key — use
+ * actorKey() for that, and never compare two of these with ===.
+ *
+ * Exported because the history FILTER has to sanitise a query param exactly the
+ * way the writer sanitised the header, or "?createdBy=Josh!" and the stored "Josh"
+ * would differ by a character the writer had already stripped.
  */
 export function normalizeActor(raw: string): string {
-  return raw
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]/g, '')
-    .slice(0, MAX_ACTOR_LENGTH);
+  return raw.replace(/[^A-Za-z0-9._-]/g, '').slice(0, MAX_ACTOR_LENGTH);
+}
+
+/**
+ * The comparison form. "Josh", "josh" and "JOSH" are one person.
+ *
+ * Kept separate from what gets STORED, on purpose. Lowercasing on write would make
+ * the display name a casualty of the lookup; matching case-sensitively would split
+ * one colleague into three depending on how they capitalised themselves the day
+ * they typed it. So: store what they typed, match without regard to case.
+ *
+ * Anything comparing actors — the history filter, "?createdBy=me" — must go through
+ * here, and the database comparison must be case-insensitive to match.
+ */
+export function actorKey(raw: string): string {
+  return normalizeActor(raw).toLowerCase();
 }
 
 export function actorFrom(req: Request): string {

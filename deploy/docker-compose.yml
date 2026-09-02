@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Seven instances, one database, one box.
+# Eight instances, one database, one box.
 #
 # Each Solution Engineer gets their own container holding tokens for ONLY their
 # own test stores. That is the entire isolation mechanism, and it is a real one:
@@ -8,7 +8,7 @@
 # is not in its own environment. There is no check to bypass and no header to
 # spoof, because there is no token.
 #
-# All seven share ONE database, so history is visible to everyone in one place.
+# All eight share ONE database, so history is visible to everyone in one place.
 # Read "What the shared database means" in deploy/.env.example before you accept
 # that — it is a deliberate trade, not a free lunch.
 #
@@ -26,7 +26,7 @@
 name: qa-shopify-tool
 
 # ── Shared app definition ────────────────────────────────────────────────────
-# Anchored so the seven instances differ ONLY in their stores and their port.
+# Anchored so the eight instances differ ONLY in their stores and their port.
 x-app: &app
   build:
     context: ..
@@ -115,7 +115,7 @@ services:
 
   # ── One instance per Solution Engineer ─────────────────────────────────────
   #
-  # To add an eighth: copy a block, give it the next port, and add SHOPIFY_STORES_SE8
+  # To add a ninth: copy a block, give it the next port, and add SHOPIFY_STORES_SE9
   # to deploy/.env. Nothing else changes.
   se1:
     <<: *app
@@ -179,6 +179,15 @@ services:
       QA_INSTANCE_OWNER: ${QA_OWNER_SE7:-}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:3107:3001"
+
+  se8:
+    <<: *app
+    environment:
+      <<: *app-env
+      SHOPIFY_TEST_STORES: ${SHOPIFY_STORES_SE8:?set SHOPIFY_STORES_SE8 in deploy/.env}
+      QA_INSTANCE_OWNER: ${QA_OWNER_SE8:-}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:3108:3001"
 
 
 volumes:

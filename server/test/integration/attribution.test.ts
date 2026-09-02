@@ -62,7 +62,9 @@ runIf('attribution and the destructive-action log', () => {
     const run = await prisma.productUploadRun.findUniqueOrThrow({
       where: { id: res.body.uploadId },
     });
-    expect(run.createdBy).toBe('josh.smithexample.com'); // '@' stripped
+    // Case is PRESERVED -- this string is displayed as "by Josh.Smith", so it is
+    // not lowercased on the way in. Matching ignores case instead (actorKey).
+    expect(run.createdBy).toBe('Josh.SmithExample.COM'); // '@' stripped
     expect(run.createdBy).not.toContain('@');
   });
 

@@ -227,7 +227,11 @@ export async function getValidationHistory(
   query: HistoryQuery = {},
 ): Promise<ValidationHistoryItem[]> {
   const runs = await prisma.validationRun.findMany({
-    where: query.createdBy ? { createdBy: query.createdBy } : undefined,
+    // Case-insensitive: rows store the display form ("Josh") and the filter
+    // supplies the lowercased key. See actorKey() in services/actionLog.service.
+    where: query.createdBy
+      ? { createdBy: { equals: query.createdBy, mode: 'insensitive' } }
+      : undefined,
     select: {
       id: true,
       createdBy: true,

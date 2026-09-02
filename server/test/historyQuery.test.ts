@@ -14,9 +14,10 @@ import {
 // readable by a request that omits the parameter, exactly as before.
 //
 // The two ways it can silently be useless:
-//   1. Normalization drift. Rows are written through normalizeActor ("Josh" →
-//      "josh"). If the filter does not normalize identically, ?createdBy=Josh
-//      matches zero rows while the page plainly shows runs by "josh".
+//   1. Normalization drift. Rows store what the person typed ("Josh"), and the
+//      filter supplies the lowercased comparison key from actorKey(). If the
+//      database comparison is not case-insensitive, ?createdBy=Josh matches zero
+//      rows while the page plainly shows runs by "Josh".
 //   2. Widening on a miss. Asked for a narrower list and quietly handed back
 //      everyone's is the failure that makes people stop trusting the control.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -42,9 +43,10 @@ describe('parseHistoryQuery — who', () => {
     expect(parseHistoryQuery(req({ createdBy: 'me' }, 'josh')).createdBy).toBe('josh');
   });
 
-  it('normalizes an explicit name the same way the writer did', () => {
-    // The row was stored as "josh" by normalizeActor. A filter that does not
-    // lower-case would match nothing and look like "Josh has never run anything".
+  it('reduces an explicit name to the lowercase comparison key', () => {
+    // The row is stored as "Josh". The filter carries the key, and the query
+    // matches case-insensitively -- otherwise this looks like "Josh has never
+    // run anything".
     expect(parseHistoryQuery(req({ createdBy: 'Josh' })).createdBy).toBe('josh');
     expect(parseHistoryQuery(req({ createdBy: 'J O S H' })).createdBy).toBe('josh');
     expect(parseHistoryQuery(req({ createdBy: 'josh@example.com' })).createdBy).toBe(
