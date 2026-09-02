@@ -178,11 +178,40 @@ if (-not $nodeExe) { $nodeExe = 'C:\Program Files\nodejs\node.exe' }
 if (-not (Test-Path -LiteralPath $nodeExe)) { throw "node.exe not found" }
 
 Set-Location $serverDir
-"[$(Get-Date -Format o)] starting $Instance on port $port (bind $($env:BIND_ADDR))" |
-  Out-File -FilePath $logFile -Append -Encoding utf8
 
-& $nodeExe $entry *>&1 | ForEach-Object {
-  "[$(Get-Date -Format o)] $_" | Out-File -FilePath $logFile -Append -Encoding utf8
+function Write-Log { param($m) "[$(Get-Date -Format o)] $m" | Out-File -FilePath $logFile -Append -Encoding utf8 }
+
+# ── Supervisor loop ─────────────────────────────────────────────────────────
+#
+# Task Scheduler's own RestartOnFailure is NOT relied on: this box registers tasks
+# with UseUnifiedSchedulingEngine, and that engine does not honour restart-on-failure
+# for a long-running action that exits non-zero. Verified by killing the node process
+# -- the task ended with 0xFFFFFFFF and never came back.
+#
+# So the restart lives here, where it is fast (seconds, not a minute) and visible in
+# the log. Register-Instances.ps1 additionally puts a repeating trigger on the task,
+# which catches the case where THIS process dies too.
+#
+# Config errors are deliberately NOT retried here -- everything above this point
+# throws and exits, so a bad store list fails loudly instead of spinning.
+$backoff    = 2
+$maxBackoff = 60
+
+while ($true) {
+  Write-Log "starting $Instance on port $port (bind $($env:BIND_ADDR))"
+  $started = Get-Date
+
+  & $nodeExe $entry *>&1 | ForEach-Object { Write-Log $_ }
+  $code = $LASTEXITCODE
+
+  $ranFor = (Get-Date) - $started
+  Write-Log "node exited with $code after $([int]$ranFor.TotalSeconds)s"
+
+  # A process that stayed up is a crash, not a misconfiguration: reset the backoff
+  # so a one-off crash restarts immediately rather than inheriting an old penalty.
+  if ($ranFor.TotalSeconds -ge 60) { $backoff = 2 }
+
+  Write-Log "restarting in ${backoff}s"
+  Start-Sleep -Seconds $backoff
+  $backoff = [Math]::Min($backoff * 2, $maxBackoff)
 }
-
-exit $LASTEXITCODE

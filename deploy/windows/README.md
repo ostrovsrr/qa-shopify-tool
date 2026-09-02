@@ -110,6 +110,26 @@ Stop-ScheduledTask  -TaskName qa-shopify-se1 -TaskPath '\QA Shopify Tool\'
 Start-ScheduledTask -TaskName qa-shopify-se1 -TaskPath '\QA Shopify Tool\'
 ```
 
+## How an instance recovers
+
+Two layers, because the obvious one does not work:
+
+1. **`Start-Instance.ps1` supervises node itself** — if node exits, it logs the exit
+   code and restarts within seconds, backing off to a 60s ceiling if it keeps dying
+   immediately. A process that stayed up for a minute resets the backoff.
+2. **The task repeats every 5 minutes** with `MultipleInstances = IgnoreNew`, so a
+   tick while healthy does nothing and a tick after the launcher itself died restarts
+   it. Worst-case downtime if the whole task process dies: 5 minutes.
+
+Task Scheduler's own `RestartOnFailure` is set but **is not what saves you**. This
+machine registers tasks with `UseUnifiedSchedulingEngine`, which does not honour
+restart-on-failure for a long-running action that exits non-zero. Verified by killing
+a node process: the task ended at `0xFFFFFFFF` and never came back. That is what the
+two layers above are for.
+
+Config errors are deliberately not retried in the loop — a bad or missing store list
+throws before the loop starts, so it fails loudly rather than spinning.
+
 ## Known limitations
 
 - **`all-users` is a shared admin account.** Anyone who logs into it can read

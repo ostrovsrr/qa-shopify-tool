@@ -67,7 +67,21 @@ foreach ($instance in $cfg.Instances) {
   # SYSTEM: starts with nobody logged in, and no password to store on a shared box.
   $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
 
-  $trigger = New-ScheduledTaskTrigger -AtStartup
+  # Two triggers, because one is not enough:
+  #
+  #   AtStartup  -- comes up with the box, nobody logged in.
+  #   Repeating  -- the safety net. RestartOnFailure below is set but this machine
+  #                 uses the Unified Scheduling Engine, which does not honour it for
+  #                 a long-running action that exits non-zero (verified: killing node
+  #                 left the task dead at 0xFFFFFFFF). With MultipleInstances set to
+  #                 IgnoreNew, a tick while the instance is healthy is a no-op, and a
+  #                 tick after it died restarts it. Start-Instance.ps1 restarts node
+  #                 in seconds; this catches the launcher itself dying.
+  $startupTrigger = New-ScheduledTaskTrigger -AtStartup
+  $repeatTrigger  = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) `
+                      -RepetitionInterval (New-TimeSpan -Minutes 5) `
+                      -RepetitionDuration ([TimeSpan]::MaxValue)
+  $trigger = @($startupTrigger, $repeatTrigger)
 
   # ExecutionTimeLimit 0 = never kill it: this is a long-running server, not a job.
   # RestartCount/Interval is the supervisor a real service would give us.
