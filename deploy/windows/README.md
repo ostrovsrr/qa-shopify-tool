@@ -69,8 +69,14 @@ that actually have values, so adding an SE means adding a key and re-running it.
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Deploy-QaTool.ps1
 ```
 
-Pulls `main`, rebuilds both halves, runs `prisma migrate deploy` once, restarts every
-instance. Roughly 30 seconds of downtime per instance.
+Pulls `main`, **stops every instance**, rebuilds both halves, runs
+`prisma migrate deploy` once, then starts them again.
+
+Everything is down for the whole rebuild — a minute or two, not a rolling restart.
+That is forced: Windows will not let `npm ci` replace
+`node_modules\.prisma\client\query_engine-windows.dll.node` while a running instance
+has that engine mapped, so the processes must stop before the build, not after it.
+Tell people before you run it.
 
 ## Ports
 

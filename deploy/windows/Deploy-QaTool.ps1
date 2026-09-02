@@ -67,6 +67,44 @@ if (Test-Path -LiteralPath (Join-Path $serverDir '.env')) {
   Write-Warning "server\.env exists in the checkout. Instances set their own process environment and dotenv does not override it, but this file should not be here. Remove it."
 }
 
+# ── Stop the instances BEFORE building ──────────────────────────────────────
+#
+# Windows will not let a loaded DLL be replaced. With instances running, `npm ci`
+# dies with
+#   EPERM: operation not permitted, unlink
+#   node_modules\.prisma\client\query_engine-windows.dll.node
+# because every running instance has that engine mapped into its process. The
+# container path never hits this -- a container is replaced wholesale rather than
+# rebuilt in place.
+#
+# So an update costs roughly a minute of downtime. That is inherent here, not a
+# shortcoming of the script.
+$tasks = @(Get-ScheduledTask -TaskPath '\QA Shopify Tool\' -ErrorAction SilentlyContinue)
+if ($tasks.Count -gt 0) {
+  Write-Step 'Stopping instances for the rebuild'
+  foreach ($t in $tasks) {
+    Stop-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -ErrorAction SilentlyContinue
+    Write-Host "stopped $($t.TaskName)"
+  }
+
+  # Stop-ScheduledTask returns before the process tree is gone. Wait for the ports
+  # to actually free, or the build races the shutdown and fails EPERM anyway.
+  $deadline = (Get-Date).AddSeconds(60)
+  while ((Get-Date) -lt $deadline) {
+    $live = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+              Where-Object { $_.LocalPort -ge 3101 -and $_.LocalPort -le 3199 })
+    if ($live.Count -eq 0) { break }
+    Start-Sleep -Seconds 2
+  }
+  $live = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+            Where-Object { $_.LocalPort -ge 3101 -and $_.LocalPort -le 3199 })
+  if ($live.Count -gt 0) {
+    Write-Warning "Ports still listening after 60s: $($live.LocalPort -join ', '). The build may fail with EPERM."
+  } else {
+    Write-Host 'all instance ports released'
+  }
+}
+
 # ── Client ──────────────────────────────────────────────────────────────────
 #
 # Built BEFORE the instances start: server/src/index.ts mounts express.static only
@@ -105,16 +143,18 @@ try {
 }
 
 # ── Restart ─────────────────────────────────────────────────────────────────
-if (-not $SkipRestart) {
-  Write-Step 'Restarting instances'
-  $tasks = @(Get-ScheduledTask -TaskPath '\QA Shopify Tool\' -ErrorAction SilentlyContinue)
+if ($SkipRestart) {
+  if ($tasks.Count -gt 0) {
+    Write-Warning '-SkipRestart: instances were stopped for the rebuild and have NOT been started again.'
+  }
+} else {
+  Write-Step 'Starting instances'
   if ($tasks.Count -eq 0) {
     Write-Warning 'No instance tasks registered yet. Run Register-Instances.ps1.'
   } else {
     foreach ($t in $tasks) {
-      Stop-ScheduledTask  -TaskName $t.TaskName -TaskPath $t.TaskPath -ErrorAction SilentlyContinue
       Start-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath
-      Write-Host "restarted $($t.TaskName)"
+      Write-Host "started $($t.TaskName)"
     }
   }
 }
