@@ -78,9 +78,13 @@ foreach ($instance in $cfg.Instances) {
   #                 tick after it died restarts it. Start-Instance.ps1 restarts node
   #                 in seconds; this catches the launcher itself dying.
   $startupTrigger = New-ScheduledTaskTrigger -AtStartup
+  # No -RepetitionDuration: an empty Duration means REPEAT INDEFINITELY.
+  # Do not be tempted by [TimeSpan]::MaxValue -- it serialises to
+  # P99999999DT23H59M59S and Task Scheduler rejects the whole task XML as out of
+  # range, which (because the task is unregistered first) leaves the instance
+  # deleted rather than merely unchanged.
   $repeatTrigger  = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) `
-                      -RepetitionInterval (New-TimeSpan -Minutes 5) `
-                      -RepetitionDuration ([TimeSpan]::MaxValue)
+                      -RepetitionInterval (New-TimeSpan -Minutes 5)
   $trigger = @($startupTrigger, $repeatTrigger)
 
   # ExecutionTimeLimit 0 = never kill it: this is a long-running server, not a job.
@@ -96,6 +100,9 @@ foreach ($instance in $cfg.Instances) {
 
   Unregister-ScheduledTask -TaskName $taskName -TaskPath $TaskPath -Confirm:$false -ErrorAction SilentlyContinue
 
+  # -ErrorAction Stop: this raises a NON-terminating CimException by default, so
+  # without it a failed registration still fell through to the success message
+  # below while the task stayed unregistered.
   Register-ScheduledTask `
     -TaskName $taskName `
     -TaskPath $TaskPath `
@@ -103,7 +110,8 @@ foreach ($instance in $cfg.Instances) {
     -Trigger $trigger `
     -Principal $principal `
     -Settings $settings `
-    -Description "QA Shopify Tool -- $instance on port $port. Stores are scoped to $instance only; see Start-Instance.ps1." | Out-Null
+    -Description "QA Shopify Tool -- $instance on port $port. Stores are scoped to $instance only; see Start-Instance.ps1." `
+    -ErrorAction Stop | Out-Null
 
   Write-Host "registered $taskName -> port $port"
 }
