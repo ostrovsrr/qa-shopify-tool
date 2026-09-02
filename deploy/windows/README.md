@@ -93,15 +93,20 @@ Tell people before you run it.
 
 ## Ports
 
-| Instance | Port | URL for that SE |
-|---|---|---|
-| SE1 | 3101 | `http://10.20.30.208:3101` |
-| SE2 | 3102 | `http://10.20.30.208:3102` |
-| SE3 | 3103 | `http://10.20.30.208:3103` |
-| SE4 | 3104 | `http://10.20.30.208:3104` |
-| SE5 | 3105 | `http://10.20.30.208:3105` |
-| SE6 | 3106 | `http://10.20.30.208:3106` |
-| SE7 | 3107 | `http://10.20.30.208:3107` |
+| Instance | Port | Owner | URL for that SE |
+|---|---|---|---|
+| SE1 | 3101 | rodion | `http://10.20.30.208:3101` |
+| SE2 | 3102 | raiya | `http://10.20.30.208:3102` |
+| SE3 | 3103 | kashif | `http://10.20.30.208:3103` |
+| SE4 | 3104 | ali | `http://10.20.30.208:3104` |
+| SE5 | 3105 | joshua | `http://10.20.30.208:3105` |
+| SE6 | 3106 | mandy | `http://10.20.30.208:3106` |
+| SE7 | 3107 | pratha | `http://10.20.30.208:3107` |
+
+The owner column is `QA_OWNER_SE*` in `deploy.env`, served by `GET /api/instance` and
+used as the default name in the header badge, so nobody types their name into every
+browser they open. Anyone can still set their own — a chosen name is kept in that
+browser and always wins. It is a label on the action log, never authorization.
 
 3101+ rather than 3001+ because 3001 is the development API port; colliding with it
 would break `npm run dev` on the same machine.
