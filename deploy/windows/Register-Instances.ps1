@@ -35,7 +35,8 @@ param(
   [int]$MonitorPort = 3100,
 
   [switch]$SkipFirewall,
-  [switch]$SkipMonitor
+  [switch]$SkipMonitor,
+  [switch]$SkipPostgresWatchdog
 )
 
 $ErrorActionPreference = 'Stop'
@@ -157,6 +158,41 @@ if (-not $SkipMonitor) {
     -ErrorAction Stop | Out-Null
 
   Write-Host "registered qa-shopify-monitor -> port $MonitorPort"
+}
+
+
+# ── PostgreSQL watchdog ─────────────────────────────────────────────────────
+#
+# The database is the dependency all instances share, and nothing restarted it.
+# Windows service recovery does not help: the service runs `pg_ctl runservice`,
+# which exits CLEANLY when the postmaster dies, so SCM sees a normal stop and the
+# `sc failure` actions never fire. Verified by killing the postmaster -- it stayed
+# down for two minutes with no SCM failure events at all.
+#
+# Checking state every minute works whatever the reason. One minute rather than the
+# instances' five, because everything depends on this and the check is just a
+# service-status query.
+if (-not $SkipPostgresWatchdog) {
+  $pgScript = Join-Path $PSScriptRoot 'Ensure-Postgres.ps1'
+  if (-not (Test-Path -LiteralPath $pgScript)) { throw "Not found: $pgScript" }
+
+  $wAction = New-ScheduledTaskAction -Execute 'powershell.exe' `
+    -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $pgScript)
+  $wPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+  $wStartup   = New-ScheduledTaskTrigger -AtStartup
+  $wRepeat    = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
+  # ExecutionTimeLimit is short on purpose: this is a one-shot check, and a hung
+  # check should be killed rather than block the next tick.
+  $wSettings  = New-ScheduledTaskSettingsSet `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -MultipleInstances IgnoreNew
+
+  Unregister-ScheduledTask -TaskName 'qa-shopify-postgres-watchdog' -TaskPath $TaskPath -Confirm:$false -ErrorAction SilentlyContinue
+  Register-ScheduledTask -TaskName 'qa-shopify-postgres-watchdog' -TaskPath $TaskPath `
+    -Action $wAction -Trigger @($wStartup, $wRepeat) -Principal $wPrincipal -Settings $wSettings `
+    -Description 'QA Shopify Tool -- starts PostgreSQL if it is not running. Create postgres-watchdog.disabled to pause it for maintenance.' `
+    -ErrorAction Stop | Out-Null
+  Write-Host 'registered qa-shopify-postgres-watchdog (every 1 min)'
 }
 
 # ── Firewall ────────────────────────────────────────────────────────────────
