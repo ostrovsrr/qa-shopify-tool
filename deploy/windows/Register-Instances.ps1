@@ -30,7 +30,12 @@ param(
   # Shopify store. Keep this as tight as the team can stand.
   [string[]]$AllowFrom = @('10.20.30.0/24'),
 
-  [switch]$SkipFirewall
+  # The read-only status page. Not an SE instance: it holds no store credentials
+  # and talks to nothing but the other instances health endpoints.
+  [int]$MonitorPort = 3100,
+
+  [switch]$SkipFirewall,
+  [switch]$SkipMonitor
 )
 
 $ErrorActionPreference = 'Stop'
@@ -116,12 +121,53 @@ foreach ($instance in $cfg.Instances) {
   Write-Host "registered $taskName -> port $port"
 }
 
+
+# ── The status page ─────────────────────────────────────────────────────────
+#
+# Read-only fleet view on $MonitorPort, registered exactly like an instance so it
+# comes back on boot and restarts itself. It is the answer to "is it up, and has it
+# been up" -- a question a spot check cannot answer, which is how one instance spent
+# a day dying and being revived without anyone noticing.
+if (-not $SkipMonitor) {
+  $monitorLauncher = Join-Path $PSScriptRoot 'Start-Monitor.ps1'
+  if (-not (Test-Path -LiteralPath $monitorLauncher)) { throw "Launcher not found: $monitorLauncher" }
+
+  $mAction = New-ScheduledTaskAction `
+    -Execute 'powershell.exe' `
+    -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -AppRoot "{1}" -ConfigFile "{2}" -Port {3} -FirstPort {4} -LastPort {5}' -f `
+                $monitorLauncher, $AppRoot, $ConfigFile, $MonitorPort, $ports[0], $ports[-1])
+
+  $mPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+  $mStartup   = New-ScheduledTaskTrigger -AtStartup
+  $mRepeat    = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) -RepetitionInterval (New-TimeSpan -Minutes 5)
+  $mSettings  = New-ScheduledTaskSettingsSet `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
+    -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
+    -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -MultipleInstances IgnoreNew
+
+  Unregister-ScheduledTask -TaskName 'qa-shopify-monitor' -TaskPath $TaskPath -Confirm:$false -ErrorAction SilentlyContinue
+  Register-ScheduledTask `
+    -TaskName 'qa-shopify-monitor' `
+    -TaskPath $TaskPath `
+    -Action $mAction `
+    -Trigger @($mStartup, $mRepeat) `
+    -Principal $mPrincipal `
+    -Settings $mSettings `
+    -Description "QA Shopify Tool -- read-only fleet status page on port $MonitorPort. No control endpoints." `
+    -ErrorAction Stop | Out-Null
+
+  Write-Host "registered qa-shopify-monitor -> port $MonitorPort"
+}
+
 # ── Firewall ────────────────────────────────────────────────────────────────
 if (-not $SkipFirewall) {
   $ruleName = 'QA Shopify Tool (instances)'
   Remove-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
 
-  $portRange = "$([int]($ports | Measure-Object -Minimum).Minimum)-$([int]($ports | Measure-Object -Maximum).Maximum)"
+  # Include the status page port, so the one URL people bookmark is reachable by
+  # exactly the same set of addresses as the instances -- no wider.
+  $allPorts  = @($ports); if (-not $SkipMonitor) { $allPorts += $MonitorPort }
+  $portRange = "$([int](($allPorts | Measure-Object -Minimum).Minimum))-$([int](($allPorts | Measure-Object -Maximum).Maximum))"
   New-NetFirewallRule `
     -DisplayName $ruleName `
     -Direction Inbound `
@@ -148,4 +194,5 @@ Write-Host "`nStarting instances now (they would otherwise wait for the next boo
 foreach ($instance in $cfg.Instances) {
   Start-ScheduledTask -TaskName "qa-shopify-$($instance.ToLower())" -TaskPath $TaskPath
 }
+if (-not $SkipMonitor) { Start-ScheduledTask -TaskName 'qa-shopify-monitor' -TaskPath $TaskPath }
 Write-Host 'Done.'

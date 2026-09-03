@@ -47,9 +47,12 @@ function Invoke-Native {
   } finally { Pop-Location }
 }
 
+# 3100 is the status page, 3101+ the instances. Both must release their ports
+# before a rebuild, or npm ci fails EPERM against a mapped Prisma engine and a
+# stale monitor quietly keeps serving the old code.
 function Get-InstancePorts {
   @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
-    Where-Object { $_.LocalPort -ge 3101 -and $_.LocalPort -le 3199 })
+    Where-Object { $_.LocalPort -ge 3100 -and $_.LocalPort -le 3199 })
 }
 
 # ── Source ──────────────────────────────────────────────────────────────────

@@ -103,6 +103,7 @@ Tell people before you run it.
 | SE6 | 3106 | Mandy | `http://10.20.30.208:3106` |
 | SE7 | 3107 | Pratha | `http://10.20.30.208:3107` |
 | SE8 | 3108 | Luigi | `http://10.20.30.208:3108` |
+| _status page_ | 3100 | — | `http://10.20.30.208:3100` |
 
 The owner column is `QA_OWNER_SE*` in `deploy.env`, served by `GET /api/instance` and
 used as the default name in the header badge, so nobody types their name into every
@@ -117,6 +118,37 @@ history filter.
 would break `npm run dev` on the same machine.
 
 PostgreSQL listens on 127.0.0.1:5432 and gets no firewall rule.
+
+## Is it up? — the status page
+
+**`http://10.20.30.208:3100`** — one bookmark for the whole fleet.
+
+A dependency-free Node service (`deploy/monitor/monitor.js`) polls every instance's
+`/api/health` every 30 seconds and records the result. The page shows, per instance:
+current state, how long it has held that state, availability over 24h and 7d, the
+number of down→up transitions in the last 24h, a 24-hour strip, and the last
+error-looking line from that instance's log.
+
+Why it exists: a spot check only tells you about the instant you looked. SE4 once
+spent a day dying about a minute after every start and being revived by its
+5-minute trigger — every individual check found it either up or down depending on
+timing, and nothing recorded the pattern. **Restarts in 24h** is the column that
+makes that visible: a healthy instance shows none.
+
+It is **read-only on purpose** — no restart buttons, no control endpoints. The
+network in front of this has no authentication, so anything actionable on the page
+would be actionable by anyone who can route to the box. Control stays on SSH.
+
+It polls server-side rather than from the browser because the app's CORS is pinned
+to `CLIENT_URL`; a page on another port cannot read those endpoints from JavaScript.
+That is the better shape anyway — it keeps recording when nobody has it open.
+
+History lives in `C:\ProgramData\qa-shopify-tool\monitor\history.jsonl`, one line per
+poll, pruned to 7 days (about 2 MB). It is registered like an instance, so it comes
+back on boot and restarts itself.
+
+There is **no alerting**. The page tells you when you look at it; nothing reaches out.
+Adding that needs a channel out of the box (a Slack webhook is the least intrusive).
 
 ## Operating
 
