@@ -55,6 +55,7 @@ import { errorHandler, requestId } from './middleware/errorHandler';
 import { getActionLog, normalizeActor } from './services/actionLog.service';
 import { purgeExpiredPii } from './services/retention.service';
 import { sweepRunningCleanups } from './services/cleanupRun.service';
+import { sweepRunningImports } from './services/importSweep.service';
 import { HttpError } from './errors';
 
 dotenv.config();
@@ -306,6 +307,20 @@ if (require.main === module) {
     };
     reconcileCleanups();
     setInterval(reconcileCleanups, 60 * 1000).unref();
+
+    // Imports finalize on POLL, so one whose watcher walked away sits RUNNING with
+    // Shopify long since finished -- misreporting in the shared history and holding
+    // that store's busy-lock until the 30-min TTL. Observed: a real 14,229-row
+    // import sat RUNNING for two hours and finalized in 3s the moment anything
+    // polled it. sweepRunningCleanups already does this for cleanups; imports never
+    // got the equivalent. Covers customers and products. See sweepRunningImports.
+    const reconcileImports = (): void => {
+      void sweepRunningImports().catch((err: Error) => {
+        console.error('[import-sweep] failed:', err.message);
+      });
+    };
+    reconcileImports();
+    setInterval(reconcileImports, 60 * 1000).unref();
   });
 
   // ── Graceful shutdown ─────────────────────────────────────────────────────
