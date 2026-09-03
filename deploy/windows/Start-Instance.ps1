@@ -187,6 +187,19 @@ Set-Location $serverDir
 
 function Write-Log { param($m) "[$(Get-Date -Format o)] $m" | Out-File -FilePath $logFile -Append -Encoding utf8 }
 
+function Test-PortHeld {
+  param([int]$Port)
+  [bool](Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue)
+}
+
+# Another launcher already owns this port -- the task's repeating trigger fired while
+# a healthy instance was running. Exit quietly instead of looping forever against a
+# port we can never bind.
+if (Test-PortHeld -Port $port) {
+  Write-Log "$Instance already served on port $port by another process; this launcher is exiting"
+  exit 0
+}
+
 # ── Supervisor loop ─────────────────────────────────────────────────────────
 #
 # Task Scheduler's own RestartOnFailure is NOT relied on: this box registers tasks
@@ -207,11 +220,39 @@ while ($true) {
   Write-Log "starting $Instance on port $port (bind $($env:BIND_ADDR))"
   $started = Get-Date
 
-  & $nodeExe $entry *>&1 | ForEach-Object { Write-Log $_ }
-  $code = $LASTEXITCODE
+  # node's stderr MUST NOT be fatal.
+  #
+  # PowerShell wraps every stderr line from a native executable in an ErrorRecord, and
+  # under $ErrorActionPreference = 'Stop' the FIRST one terminates this script. That
+  # closes node's stdout pipe, so node dies with it -- and the script is already gone,
+  # so nothing records why.
+  #
+  # The app writes to stderr for entirely survivable things: a failed hourly sweep, any
+  # 500 passing through errorHandler, an audit-log hiccup. One benign line was killing
+  # the instance. SE4 died within a minute of every start for exactly this reason, and
+  # was only ever revived by the 5-minute trigger -- so it was down far more than it
+  # was up, with an empty log.
+  #
+  # 'Continue' + 2>&1 keeps those lines as ordinary output, timestamped into the log,
+  # where they belong.
+  $previousEap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    & $nodeExe $entry 2>&1 | ForEach-Object { Write-Log $_ }
+    $code = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousEap
+  }
 
   $ranFor = (Get-Date) - $started
   Write-Log "node exited with $code after $([int]$ranFor.TotalSeconds)s"
+
+  # Somebody else grabbed the port while we were down -- most likely the repeating
+  # trigger started a replacement. Stand down rather than fight it for the port.
+  if (Test-PortHeld -Port $port) {
+    Write-Log "port $port is now held by another process; this launcher is exiting"
+    exit 0
+  }
 
   # A process that stayed up is a crash, not a misconfiguration: reset the backoff
   # so a one-off crash restarts immediately rather than inheriting an old penalty.
