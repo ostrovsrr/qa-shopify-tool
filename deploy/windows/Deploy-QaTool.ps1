@@ -105,6 +105,24 @@ if ($tasks.Count -gt 0) {
   $deadline = (Get-Date).AddSeconds(10)
   while ((Get-Date) -lt $deadline -and (Get-InstancePorts).Count -gt 0) { Start-Sleep -Seconds 2 }
 
+  # Kill the LAUNCHERS first, then node.
+  #
+  # Order is the whole point. Stop-ScheduledTask does not reliably terminate the
+  # launcher either, and a surviving launcher is a supervisor: it notices its node
+  # died and starts a new one within two seconds. Killing node first therefore does
+  # nothing -- the launcher helpfully puts it back, mid-build, holding the Prisma
+  # engine DLL again, and `npm ci` fails EPERM exactly as if nothing had been
+  # stopped. Worse, npm ci deletes node_modules BEFORE it fails, so the tree is left
+  # half-removed and every instance that restarts afterwards dies with
+  # MODULE_NOT_FOUND. That is a real outage produced by a failed deploy, observed.
+  $launchers = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+                 Where-Object { $_.CommandLine -like '*Start-Instance.ps1*' -or $_.CommandLine -like '*Start-Monitor.ps1*' })
+  foreach ($l in $launchers) {
+    Write-Host "killing supervisor PID $($l.ProcessId) so it cannot restart node mid-build"
+    Stop-Process -Id $l.ProcessId -Force -ErrorAction SilentlyContinue
+  }
+  if ($launchers.Count -gt 0) { Start-Sleep -Seconds 2 }
+
   foreach ($c in Get-InstancePorts) {
     $proc = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
     if ($proc -and $proc.ProcessName -eq 'node') {
