@@ -26,6 +26,10 @@ import { AxiosInstance } from 'axios';
 
 const STORAGE_KEY = 'qa-tool-user';
 
+// Bumped when stored names need discarding. See migrateActorStorage().
+const SCHEMA_KEY = 'qa-tool-user-schema';
+const SCHEMA_VERSION = '2';
+
 // The name this INSTANCE belongs to, from GET /api/instance.
 //
 // Each instance is one Solution Engineer's (that is the isolation model), so it can
@@ -36,7 +40,7 @@ const STORAGE_KEY = 'qa-tool-user';
 //
 // Deliberately not written to localStorage. Persisting it would make a default
 // indistinguishable from a deliberate choice, and it would then survive even after
-// the instance's owner changed.
+// the instance's owner changed -- which is exactly what went wrong once already.
 let instanceDefault = '';
 
 /** An opaque slug — a first name or handle. Deliberately NOT an email: this lands in
@@ -55,19 +59,66 @@ export function setInstanceDefault(name: string | null | undefined): void {
   instanceDefault = normalizeActor(name ?? '');
 }
 
+/** Read a key without letting a locked-down browser take the whole app down.
+ *  localStorage THROWS (not returns null) in some privacy modes. */
+function read(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+/** The name this browser explicitly chose, or '' when it is riding the instance
+ *  default. Distinct from getActor(), and the difference matters: seeding the edit
+ *  box from getActor() is what silently turned a default into a stored choice. */
+export function getStoredActor(): string {
+  return read(STORAGE_KEY) ?? '';
+}
+
+/**
+ * Discard names stored before the instance served its own.
+ *
+ * ActorBadge used to seed its input from the DISPLAYED name and save on blur, so
+ * merely clicking the badge to look at it wrote the instance default into
+ * localStorage as though the person had typed it. Those values then outlived the
+ * default they came from: an instance renamed "joshua" -> "Josh" kept showing
+ * "joshua", and there was no way for the browser to tell that apart from a
+ * deliberate choice.
+ *
+ * The leak itself is fixed (the input now seeds from getStoredActor()), but that
+ * does nothing for values already written. So: one-time clear, once per browser.
+ * Anyone who genuinely wants a name other than their instance's types it again,
+ * once, and it sticks — this bump does not repeat.
+ */
+export function migrateActorStorage(): void {
+  try {
+    if (read(SCHEMA_KEY) === SCHEMA_VERSION) return;
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.setItem(SCHEMA_KEY, SCHEMA_VERSION);
+  } catch {
+    // Storage unavailable. Nothing stored means nothing stale; the default applies.
+  }
+}
+
 /** True when the current actor is this instance's default rather than a chosen name. */
 export function isUsingInstanceDefault(): boolean {
-  return !localStorage.getItem(STORAGE_KEY) && Boolean(instanceDefault);
+  return !getStoredActor() && Boolean(instanceDefault);
 }
 
 export function getActor(): string {
-  return localStorage.getItem(STORAGE_KEY) ?? instanceDefault;
+  // `||` not `??`: an empty stored value means "no choice", not "chosen empty".
+  return getStoredActor() || instanceDefault;
 }
 
 export function setActor(name: string): void {
   const slug = normalizeActor(name);
-  if (slug) localStorage.setItem(STORAGE_KEY, slug);
-  else localStorage.removeItem(STORAGE_KEY);
+  try {
+    if (slug) localStorage.setItem(STORAGE_KEY, slug);
+    else localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // Storage unavailable: the name applies to this page view and no further.
+  }
 }
 
 /** Attach the actor to every request the given client makes. */

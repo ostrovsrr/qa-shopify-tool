@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { getActor, isUsingInstanceDefault, setActor } from '../api/actor';
+import { getActor, getStoredActor, isUsingInstanceDefault, setActor } from '../api/actor';
 
 // The tool is a shared workspace — everyone sees every run, and any colleague can
 // clean up any store. So runs say who uploaded them and destructive actions are
@@ -26,7 +26,13 @@ export function ActorBadge(): JSX.Element {
   };
 
   const open = (): void => {
-    setDraft(name);
+    // Seed from the STORED name, not the displayed one. The displayed name may be
+    // this instance's default, and because the input saves on blur, seeding from it
+    // meant that merely clicking the badge to look at it wrote the default into
+    // localStorage as a deliberate choice -- which then survived the instance being
+    // renamed. Empty here means "riding the default", and blurring an empty box
+    // correctly keeps it that way.
+    setDraft(getStoredActor());
     setEditing(true);
   };
 
@@ -42,7 +48,7 @@ export function ActorBadge(): JSX.Element {
             if (e.key === 'Escape') setEditing(false);
           }}
           onBlur={save}
-          placeholder="your name"
+          placeholder={isDefault && name ? name : 'your name'}
           aria-label="Your name, shown on runs you upload"
           autoFocus
         />

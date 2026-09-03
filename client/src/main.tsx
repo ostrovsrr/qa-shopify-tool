@@ -1,7 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
-import { setInstanceDefault } from './api/actor';
+import { migrateActorStorage, setInstanceDefault } from './api/actor';
 import './index.css';
 
 // Ask the instance whose it is BEFORE the first render.
@@ -27,6 +27,10 @@ async function loadInstanceDefault(): Promise<void> {
     // Deliberately silent: no default is a supported state, not an error.
   }
 }
+
+// Runs before anything reads a name: clears values stored back when clicking the
+// badge silently persisted the instance default. One-time, per browser.
+migrateActorStorage();
 
 void loadInstanceDefault().then(() => {
   ReactDOM.createRoot(document.getElementById('root')!).render(
