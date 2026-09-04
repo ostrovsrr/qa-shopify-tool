@@ -403,6 +403,23 @@ body {
   box-shadow: var(--shadow);
 }
 
+/* The title keeps its own bottom margin for the loading / error / empty states,
+   which render it without a list under them. */
+.history-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.history-header .history-title { margin-bottom: 0; }
+.history-scope { display: flex; gap: 4px; }
+.history-scope .btn.active {
+  background: var(--info-bg);
+  color: var(--primary);
+  font-weight: 600;
+}
+
 .history-title { font-size: 17px; font-weight: 700; margin-bottom: 16px; }
 .history-list { display: flex; flex-direction: column; gap: 8px; }
 

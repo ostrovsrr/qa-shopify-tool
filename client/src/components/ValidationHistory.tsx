@@ -133,22 +133,26 @@ export function ValidationHistory({ onOpen, refreshTrigger }: Props) {
   const [error, setError] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
 
-  // YOUR runs, always. The database is shared across every colleague's instance,
-  // so an unfiltered list is the whole team's work — and the query is capped, so
-  // one busy colleague pushes everyone else off their own page.
+  // YOUR runs by default. The database is shared across every colleague's
+  // instance, so an unfiltered list is the whole team's work — and the query is
+  // capped, so one busy colleague pushes everyone else off their own page.
   //
-  // The server still supports the general filter (?createdBy=<name>, or omitted
-  // for everyone); it is simply not offered here. See utils/historyQuery.ts.
+  // "Everyone" is offered as well, because mine-only alone stranded every run
+  // the tool recorded before it started stamping an owner: those rows have a
+  // null createdBy, no name ever matches null, and they were unreachable from
+  // this page for anybody. See utils/historyQuery.ts.
+  const [scope, setScope] = useState<'mine' | 'all'>('mine');
+
   const load = () => {
     setLoading(true);
     setError('');
-    fetchHistory(true)
+    fetchHistory(scope === 'mine')
       .then(setHistory)
       .catch(() => setError('Failed to load history.'))
       .finally(() => setLoading(false));
   };
 
-  useEffect(load, [refreshTrigger]);
+  useEffect(load, [refreshTrigger, scope]);
 
   const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -176,20 +180,66 @@ export function ValidationHistory({ onOpen, refreshTrigger }: Props) {
     }
   };
 
-  if (loading) return <p className="history-loading">Loading history…</p>;
-  if (error) return <p className="history-error">{error}</p>;
+  // The scope switch renders even while loading and on the empty list: a run
+  // you cannot see is exactly when you need to widen the search, and returning
+  // early here used to strand you on a page with no way out of "mine".
+  const scopeSwitch = (
+    <div className="history-scope">
+      <button
+        className={`btn btn-ghost btn-sm ${scope === 'mine' ? 'active' : ''}`}
+        onClick={() => setScope('mine')}
+        type="button"
+      >
+        Mine
+      </button>
+      <button
+        className={`btn btn-ghost btn-sm ${scope === 'all' ? 'active' : ''}`}
+        onClick={() => setScope('all')}
+        type="button"
+      >
+        Everyone
+      </button>
+    </div>
+  );
+
+  const header = (
+    <div className="history-header">
+      <h3 className="history-title">Validation History</h3>
+      {scopeSwitch}
+    </div>
+  );
+
+  if (loading)
+    return (
+      <div className="history-section">
+        {header}
+        <p className="history-loading">Loading history…</p>
+      </div>
+    );
+  if (error)
+    return (
+      <div className="history-section">
+        {header}
+        <p className="history-error">{error}</p>
+      </div>
+    );
   if (history.length === 0)
     return (
-      <p className="history-empty">
-        {getActor()
-          ? 'No validation runs from you yet.'
-          : 'No validation runs from this browser yet — set your name, top right, so your runs are recorded under it.'}
-      </p>
+      <div className="history-section">
+        {header}
+        <p className="history-empty">
+          {scope === 'all'
+            ? 'No validation runs yet.'
+            : getActor()
+              ? 'No validation runs from you yet — switch to Everyone to see the team’s.'
+              : 'No validation runs from this browser yet — set your name, top right, so your runs are recorded under it, or switch to Everyone.'}
+        </p>
+      </div>
     );
 
   return (
     <div className="history-section">
-      <h3 className="history-title">Validation History</h3>
+      {header}
       <div className="history-list">
         {history.map((item) => (
           <div key={item.id} className="history-item-wrapper">

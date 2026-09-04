@@ -129,17 +129,21 @@ export function ProductHistory({ onOpen, refreshTrigger }: Props) {
   const [error, setError] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
 
-  // Twin of ValidationHistory: your uploads only. Same reason, same shape.
+  // Twin of ValidationHistory: your uploads by default, with the same escape
+  // hatch. Same reason, same shape — including the null-createdBy uploads that
+  // mine-only left unreachable for everybody.
+  const [scope, setScope] = useState<'mine' | 'all'>('mine');
+
   const load = () => {
     setLoading(true);
     setError('');
-    fetchHistory(true)
+    fetchHistory(scope === 'mine')
       .then(setHistory)
       .catch(() => setError('Failed to load history.'))
       .finally(() => setLoading(false));
   };
 
-  useEffect(load, [refreshTrigger]);
+  useEffect(load, [refreshTrigger, scope]);
 
   const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -167,20 +171,65 @@ export function ProductHistory({ onOpen, refreshTrigger }: Props) {
     }
   };
 
-  if (loading) return <p className="history-loading">Loading history…</p>;
-  if (error) return <p className="history-error">{error}</p>;
+  // Renders while loading and on the empty list too — an upload you cannot see
+  // is exactly when you need to widen the search.
+  const scopeSwitch = (
+    <div className="history-scope">
+      <button
+        className={`btn btn-ghost btn-sm ${scope === 'mine' ? 'active' : ''}`}
+        onClick={() => setScope('mine')}
+        type="button"
+      >
+        Mine
+      </button>
+      <button
+        className={`btn btn-ghost btn-sm ${scope === 'all' ? 'active' : ''}`}
+        onClick={() => setScope('all')}
+        type="button"
+      >
+        Everyone
+      </button>
+    </div>
+  );
+
+  const header = (
+    <div className="history-header">
+      <h3 className="history-title">Upload History</h3>
+      {scopeSwitch}
+    </div>
+  );
+
+  if (loading)
+    return (
+      <div className="history-section">
+        {header}
+        <p className="history-loading">Loading history…</p>
+      </div>
+    );
+  if (error)
+    return (
+      <div className="history-section">
+        {header}
+        <p className="history-error">{error}</p>
+      </div>
+    );
   if (history.length === 0)
     return (
-      <p className="history-empty">
-        {getActor()
-          ? 'No uploads from you yet.'
-          : 'No uploads from this browser yet — set your name, top right, so your uploads are recorded under it.'}
-      </p>
+      <div className="history-section">
+        {header}
+        <p className="history-empty">
+          {scope === 'all'
+            ? 'No uploads yet.'
+            : getActor()
+              ? 'No uploads from you yet — switch to Everyone to see the team’s.'
+              : 'No uploads from this browser yet — set your name, top right, so your uploads are recorded under it, or switch to Everyone.'}
+        </p>
+      </div>
     );
 
   return (
     <div className="history-section">
-      <h3 className="history-title">Upload History</h3>
+      {header}
       <div className="history-list">
         {history.map((item) => (
           <div key={item.id} className="history-item-wrapper">
