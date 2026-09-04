@@ -414,7 +414,12 @@ body {
 }
 .history-header .history-title { margin-bottom: 0; }
 .history-scope { display: flex; gap: 4px; }
-.history-scope .btn.active {
+/* btn-ghost turns red on hover because it is the delete/dismiss button
+   everywhere else in this app. A filter toggle is not destructive, so take the
+   red back rather than have "Everyone" flash the error colour under the cursor. */
+.history-scope .btn:hover { color: var(--text); }
+.history-scope .btn.active,
+.history-scope .btn.active:hover {
   background: var(--info-bg);
   color: var(--primary);
   font-weight: 600;
