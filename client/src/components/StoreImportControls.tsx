@@ -77,7 +77,6 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
       : inParallelReview
         ? selectedStoreIds
         : [];
-  const displayKey = displayedStoreIds.join(',');
   const displayedRef = useRef<string[]>(displayedStoreIds);
   displayedRef.current = displayedStoreIds;
 
@@ -101,11 +100,18 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
     };
   }, []);
 
-  // ── health + stats for the displayed stores ──────────────────────────────────
+  // ── health + stats for every store, up front ─────────────────────────────────
+  //
+  // Fetched for ALL stores, not just the selected one, so the picker can show
+  // which store is already dirty BEFORE you commit an import to it — the same
+  // reason the customer panel does it. Products can afford this far more easily
+  // than customers can: productsCount honours the tag: filter, so a store costs
+  // one ~300ms query, where customersCount ignores it and has to page the whole
+  // store (~3s, and capped).
   useEffect(() => {
-    if (displayedStoreIds.length === 0) return;
+    if (stores.length === 0) return;
     let active = true;
-    for (const id of displayedStoreIds) {
+    for (const { id } of stores) {
       checkShopifyHealth(id)
         .then((h) => active && setStoreHealth((m) => ({ ...m, [id]: h })))
         .catch(
@@ -124,7 +130,7 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
       active = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [displayKey]);
+  }, [stores]);
 
   // ── restore the latest import when (re)opening an upload ──────────────────────
   useEffect(() => {
@@ -510,6 +516,16 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
                   >
                     <span>{store.label}</span>
                     <small>{store.shop}</small>
+                    {/* The whole point of the picker: see which store is dirty
+                        BEFORE you commit an import to it. */}
+                    <small className="store-chip-stats">
+                      {storeStats[store.id]
+                        ? `${storeStats[store.id].totalProducts.toLocaleString()} products · ` +
+                          `${storeStats[store.id].qaImportProducts.toLocaleString()} QA`
+                        : storeHealth[store.id]?.ok === false
+                          ? 'unreachable'
+                          : 'counting…'}
+                    </small>
                   </button>
                 ))}
               </div>
