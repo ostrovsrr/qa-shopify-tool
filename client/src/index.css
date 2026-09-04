@@ -1182,3 +1182,14 @@ body {
   color: #8b93a3;
 }
 .store-chip.active .store-chip-stats { color: #5b6dfa; }
+
+/* An explanation of ours under a Shopify rejection message, where Shopify's own
+   wording points at the wrong column. Sits under the message it corrects. */
+.rejection-hint {
+  margin-top: 6px;
+  padding-left: 8px;
+  border-left: 2px solid var(--info-border);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}

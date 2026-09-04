@@ -12,6 +12,9 @@ export interface RejectionGroup {
   // Up to 3 distinct Shopify messages and up to 10 example Handles for this group.
   sampleMessages: string[];
   sampleHandles: string[];
+  // Our own explanation, for the Shopify codes whose wording sends people to
+  // the wrong place. Null when the message speaks for itself.
+  hint: string | null;
 }
 
 export interface PerStoreResult {
@@ -45,6 +48,25 @@ export interface ProductImportFeedback {
   perStore: PerStoreResult[];
 }
 
+// Shopify reports a missing metafield DEFINITION as field "type", code
+// INVALID_METAFIELD, message "Type can't be blank" — which reads exactly like a
+// complaint about the product's Type column. It is not: we send metafields
+// without a type on purpose and let Shopify resolve it from the definition on
+// the store (see productImport.service.ts), so a store with no matching
+// definition rejects the product while its Type column is plainly filled in.
+// Anyone reading the raw message goes and checks the wrong column.
+export function hintFor(field: string | null, code: string | null): string | null {
+  if (code !== 'INVALID_METAFIELD') return null;
+  if (field !== null && field.toLowerCase() !== 'type') return null;
+  return (
+    'This is about a metafield definition, not the product\'s Type column. ' +
+    'The import sends metafield values without a type and lets Shopify read it ' +
+    'from the definition on the store, so a metafield column in the CSV with no ' +
+    'matching definition fails this way. Create the definitions on the store ' +
+    '(Settings → Custom data), then re-import.'
+  );
+}
+
 function aggregateRejections(
   rows: {
     handle: string;
@@ -64,6 +86,7 @@ function aggregateRejections(
         count: 0,
         sampleMessages: [],
         sampleHandles: [],
+        hint: hintFor(r.shopifyField, r.shopifyCode),
       };
       groups.set(key, g);
     }

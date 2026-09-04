@@ -245,6 +245,8 @@ export interface RejectionGroup {
   count: number;
   sampleMessages: string[];
   sampleHandles: string[];
+  // Our own explanation, where Shopify's own wording points at the wrong thing.
+  hint: string | null;
 }
 
 export interface ProductImportFeedback {

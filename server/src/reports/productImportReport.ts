@@ -4,6 +4,7 @@ import prisma from '../db/prisma';
 import { HttpError } from '../errors';
 import { purgedMessage } from '../services/retention.service';
 import { excelSafeRecord, excelSafeText } from './excelCell';
+import { hintFor } from '../services/productFeedback.service';
 
 // Product import report (no validator columns; results keyed by Handle):
 //   • Products With Shopify Result — one row per product, in CSV order
@@ -154,12 +155,18 @@ function addProductsSheet(
     'Shopify Field',
     'Shopify Code',
     'Shopify Message',
+    'What it means',
     'Store',
   ];
   sheet.columns = columns.map((col) => ({
     header: col,
     key: col,
-    width: col === 'Shopify Message' ? 50 : col === 'Shopify Product ID' ? 30 : 22,
+    width:
+      col === 'Shopify Message' || col === 'What it means'
+        ? 50
+        : col === 'Shopify Product ID'
+          ? 30
+          : 22,
   }));
   sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(columns.length)}1` };
   styleHeader(sheet.getRow(1), HEADER_COLOURS.Products);
@@ -174,6 +181,10 @@ function addProductsSheet(
       'Shopify Field': result?.shopifyField ?? '',
       'Shopify Code': result?.shopifyCode ?? '',
       'Shopify Message': result?.message ?? '',
+      // Shopify's own wording for a missing metafield definition points at the
+      // product's Type column. Say what it actually means, in the file people
+      // forward to whoever owns the data.
+      'What it means': hintFor(result?.shopifyField ?? null, result?.shopifyCode ?? null) ?? '',
       Store: result ? shopLabel(result.storeId) : '',
     }));
     if (result) {

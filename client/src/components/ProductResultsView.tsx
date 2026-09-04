@@ -134,7 +134,10 @@ export function ProductResultsView({
                 <td>{g.shopifyCode ?? '—'}</td>
                 <td>{g.count}</td>
                 <td className="cell-message">{g.sampleHandles.join(', ') || '—'}</td>
-                <td className="cell-message">{g.sampleMessages[0] ?? '—'}</td>
+                <td className="cell-message">
+                  {g.sampleMessages[0] ?? '—'}
+                  {g.hint && <div className="rejection-hint">{g.hint}</div>}
+                </td>
               </tr>
             ))}
           </tbody>
