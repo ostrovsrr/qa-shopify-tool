@@ -96,3 +96,64 @@ export async function parseCsvFile(filePath: string): Promise<ParsedCsv> {
 export async function parseCsvBuffer(buffer: Buffer): Promise<ParsedCsv> {
   return parseCsvStream(Readable.from(buffer));
 }
+
+// ── Wrong-section guard ──────────────────────────────────────────────────────
+//
+// The two sections look identical and the switcher is one click away, so
+// dropping a product CSV on /customers is the easiest mistake a first-time
+// colleague can make. Without this the file parses fine, maps almost nothing,
+// and every row comes back "MissingContact — add at least a First Name": the
+// tool confidently reports that a perfectly good product file is broken. The
+// products side already refuses a customer CSV ("must contain a Handle
+// column"); this is the same guard pointing the other way.
+//
+// Deliberately conservative — a false reject blocks real work, while a false
+// accept only costs the user the trip back here. All three must hold:
+//   1. a Handle column (never a Shopify customer field), AND
+//   2. two or more product-only columns, so a customer export whose "Handle"
+//      means a social handle still gets through, AND
+//   3. no customer identity field at all — if the file has an Email or a First
+//      Name it belongs here whatever else it carries.
+// Tags and Note are shared by both templates and so prove nothing either way.
+const PRODUCT_ONLY_COLUMNS = [
+  'body (html)',
+  'vendor',
+  'type',
+  'published',
+  'option1 name',
+  'option1 value',
+  'variant sku',
+  'variant price',
+  'variant compare at price',
+  'variant taxable',
+  'variant inventory qty',
+  'image src',
+];
+
+const CUSTOMER_IDENTITY_COLUMNS = [
+  'first name',
+  'last name',
+  'email',
+  'phone',
+  'accepts email marketing',
+  'accepts sms marketing',
+  'default address address1',
+  'default address city',
+  'default address zip',
+];
+
+/**
+ * Throws when `headers` look like a Shopify PRODUCT template rather than a
+ * customer one. Called from every customer entry point that parses an upload.
+ */
+export function assertNotProductCsv(headers: string[]): void {
+  const seen = new Set(headers.map((h) => h.trim().toLowerCase()));
+  if (!seen.has('handle')) return;
+  const productHits = PRODUCT_ONLY_COLUMNS.filter((c) => seen.has(c)).length;
+  if (productHits < 2) return;
+  if (CUSTOMER_IDENTITY_COLUMNS.some((c) => seen.has(c))) return;
+  throw new CsvParseError(
+    'This looks like a Shopify product CSV: it has a "Handle" column and product ' +
+      'fields, but no customer fields. Upload it in the Products section instead.',
+  );
+}

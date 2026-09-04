@@ -10,7 +10,7 @@ import {
   validateCustomerCsv,
   validateFromPreview,
 } from '../services/customerValidation.service';
-import { parseCsvFile } from '../services/csvParser.service';
+import { assertNotProductCsv, parseCsvFile } from '../services/csvParser.service';
 import { removeUploadFile } from '../services/uploadFile';
 import { actorFrom, recordAction } from '../services/actionLog.service';
 import { storePreview } from '../services/previewStore';
@@ -49,6 +49,7 @@ export async function previewHandler(
     if (rows.length === 0) {
       throw new CsvParseError('The file contains a header row but no customer data rows.');
     }
+    assertNotProductCsv(headers);
     const sampleRows = rows.slice(0, 5).map((r) => r.original);
     const suggestedMapping = suggestMapping(headers);
     // The preview entry now OWNS the temp file — /validate reads it again later, so

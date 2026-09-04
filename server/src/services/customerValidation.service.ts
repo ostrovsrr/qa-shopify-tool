@@ -13,7 +13,7 @@ import { customerValidationRules } from '../validators/customer';
 import prisma from '../db/prisma';
 import { CsvParseError } from '../errors';
 import { applyMappingToRecord, assertValidColumnMapping } from './columnMapping.service';
-import { parseCsvFile } from './csvParser.service';
+import { assertNotProductCsv, parseCsvFile } from './csvParser.service';
 import { deletePreview, getPreview } from './previewStore';
 
 function applyColumnMapping(
@@ -42,6 +42,7 @@ export async function validateCustomerCsv(
   if (rawRows.length === 0) {
     throw new CsvParseError('The file contains a header row but no customer data rows.');
   }
+  assertNotProductCsv(headers);
 
   // Apply mapping only to the rows fed into validators; raw data is preserved separately
   const rows = applyColumnMapping(rawRows, columnMapping);
