@@ -58,8 +58,6 @@ export async function validateCustomerCsv(
   }
 
   const errors = allIssues.filter((i) => i.severity === 'Error').length;
-  const warnings = allIssues.filter((i) => i.severity === 'Warning').length;
-  const info = allIssues.filter((i) => i.severity === 'Info').length;
 
   const affectedRowNumbers = new Set(allIssues.map((i) => i.rowNumber));
   const affectedRows: AffectedRow[] = rows
@@ -83,8 +81,6 @@ export async function validateCustomerCsv(
           fileType: 'CUSTOMER',
           totalRows: rawRows.length,
           errors,
-          warnings,
-          info,
           affectedRows: affectedRows as unknown as object[],
           originalColumns: headers,
           columnMapping: Object.keys(columnMapping).length > 0
@@ -132,8 +128,6 @@ export async function validateCustomerCsv(
     fileName,
     totalRows: rawRows.length,
     errors,
-    warnings,
-    info,
     issues: allIssues,
   };
 }
@@ -170,7 +164,11 @@ export async function getValidationResult(
 ): Promise<CustomerValidationResult | null> {
   const run = await prisma.validationRun.findUnique({
     where: { id: validationId },
-    include: { issues: { orderBy: { rowNumber: 'asc' } } },
+    include: {
+      // Runs validated before warnings were dropped still carry Warning rows.
+      // Filter them out here so an old run reads the same as a new one.
+      issues: { where: { severity: 'Error' }, orderBy: { rowNumber: 'asc' } },
+    },
   });
 
   if (!run) return null;
@@ -180,8 +178,6 @@ export async function getValidationResult(
     fileName: run.fileName,
     totalRows: run.totalRows,
     errors: run.errors,
-    warnings: run.warnings,
-    info: run.info,
     issues: run.issues.map((issue) => ({
       rowNumber: issue.rowNumber,
       column: issue.columnName,
@@ -241,8 +237,6 @@ export async function getValidationHistory(
       fileType: true,
       totalRows: true,
       errors: true,
-      warnings: true,
-      info: true,
       ticketNumber: true,
       ticketName: true,
       comments: true,
@@ -290,8 +284,6 @@ export async function updateValidationMetadata(
         fileType: true,
         totalRows: true,
         errors: true,
-        warnings: true,
-        info: true,
         ticketNumber: true,
         ticketName: true,
         comments: true,

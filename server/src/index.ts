@@ -28,10 +28,8 @@ import {
   getImportHandler,
   getImportReportHandler,
   getLatestImportForValidationHandler,
-  getValidatorFeedbackReportHandler,
   runBatchImportHandler,
   runImportHandler,
-  ruleGapBacklogHandler,
 } from './controllers/customerImport.controller';
 import {
   deleteUploadHandler as deleteProductUploadHandler,
@@ -185,14 +183,12 @@ app.post('/api/shopify/stores/:storeId/cleanup-qa', cleanupQaCustomersHandler);
 // advances it one step per call. A bulk teardown can take minutes; the old code
 // blocked the request for up to 300s, which no hosting proxy will tolerate.
 app.get('/api/cleanup/:id', getCleanupRunHandler);
-// Order matters: literal segments (/feedback, /by-validation) must precede /:id
-// so they aren't captured as an id.
+// Order matters: the literal /by-validation segment must precede /:id so it
+// isn't captured as an id.
 app.post('/api/customer-import/:validationId/run', runImportHandler);
 app.post('/api/customer-import/:validationId/run-batch', runBatchImportHandler);
-app.get('/api/customer-import/feedback', ruleGapBacklogHandler);
 app.get('/api/customer-import/by-validation/:validationId', getLatestImportForValidationHandler);
 app.get('/api/customer-import/:id/report', getImportReportHandler);
-app.get('/api/customer-import/:id/feedback-report', getValidatorFeedbackReportHandler);
 app.post('/api/customer-import/:id/cleanup', cleanupImportRunHandler);
 app.get('/api/customer-import/:id', getImportHandler);
 

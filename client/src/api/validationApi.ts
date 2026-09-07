@@ -78,19 +78,6 @@ export function getImportReportDownloadUrl(importRunId: string): string {
   return `/api/customer-import/${importRunId}/report`;
 }
 
-export function getValidatorFeedbackReportUrl(importRunId: string): string {
-  return `/api/customer-import/${importRunId}/feedback-report`;
-}
-
-// Markdown body of the validator-fix report, for copying to the clipboard.
-export async function fetchValidatorFeedbackMarkdown(importRunId: string): Promise<string> {
-  const { data } = await api.get<string>(
-    `/customer-import/${importRunId}/feedback-report`,
-    { responseType: 'text', transformResponse: (d) => d },
-  );
-  return data;
-}
-
 /** `mineOnly` narrows the list to this browser's actor. A VIEW preference, not a
  *  permission — everything is still readable without it (see api/actor.ts). The
  *  server resolves "me" from the X-QA-User header, so the name is never repeated

@@ -9,8 +9,9 @@ interface Props {
 }
 
 // Presentational results: total / accepted / rejected, rejections grouped by
-// (field, code), and the per-store breakdown for parallel runs. No four buckets,
-// rule gaps, or Copy-for-Claude — the import is the truth.
+// (field, code), and the per-store breakdown for parallel runs. The import is the
+// truth — this reports what Shopify did, and nothing about how a pre-check scored.
+// (Customers followed suit on 2026-09-07; the two flows now show the same shape.)
 export function ProductResultsView({
   feedback,
   stores,

@@ -6,7 +6,7 @@ interface Props {
 }
 
 export function SummaryCards({ result, onDownload }: Props) {
-  const allClear = result.errors === 0 && result.warnings === 0 && result.info === 0;
+  const allClear = result.errors === 0;
 
   return (
     <div className="summary-section">
@@ -42,14 +42,6 @@ export function SummaryCards({ result, onDownload }: Props) {
         <div className="card card-error">
           <span className="card-label">Errors</span>
           <span className="card-value">{result.errors}</span>
-        </div>
-        <div className="card card-warning">
-          <span className="card-label">Warnings</span>
-          <span className="card-value">{result.warnings}</span>
-        </div>
-        <div className="card card-info">
-          <span className="card-label">Info</span>
-          <span className="card-value">{result.info}</span>
         </div>
       </div>
     </div>

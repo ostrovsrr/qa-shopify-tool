@@ -372,30 +372,6 @@ function lineToRowFromRun(run: ImportSourceRun): number[] {
   return buildImportRows(run).map((r) => r.rowNumber);
 }
 
-/** Row numbers the validator flagged, for the four-bucket comparison. When
- *  move-duplicates-to-Notes was on, the duplicated emails/phones were stripped
- *  before the import, so DuplicateEmail/DuplicatePhone flags are resolved and
- *  must not count — otherwise every handled duplicate shows up as a "false
- *  positive" (flagged but accepted). Merge-only runs keep the flags: unmerged
- *  duplicates still hit Shopify raw, same as before. */
-function flaggedRowsForRun(run: {
-  moveDuplicatesToNotes?: boolean;
-  issues: { rowNumber: number; issueType: string }[];
-}): Set<number> {
-  const duplicatesResolved = run.moveDuplicatesToNotes ?? false;
-  const rows = new Set<number>();
-  for (const issue of run.issues) {
-    if (
-      duplicatesResolved &&
-      (issue.issueType === 'DuplicateEmail' || issue.issueType === 'DuplicatePhone')
-    ) {
-      continue;
-    }
-    rows.add(issue.rowNumber);
-  }
-  return rows;
-}
-
 // Called by the GET poll. If the run is already terminal it just returns current
 // feedback; otherwise it pokes Shopify once and, when the op is done, finalizes
 // the run. Finalization is guarded so concurrent polls can't double-write.
@@ -511,7 +487,6 @@ async function finalizeCompletedRun(
       validationRun: {
         include: {
           originalRows: { orderBy: { rowNumber: 'asc' } },
-          issues: { select: { rowNumber: true, issueType: true } },
         },
       },
     },
@@ -523,7 +498,6 @@ async function finalizeCompletedRun(
     ? await fetchAndParseBulkResults(resultUrl, lineRefs, { kind: 'complete' }, parseCustomerCreateLine)
     : [];
 
-  const flaggedRows = flaggedRowsForRun(run.validationRun);
   const successCount = outcomes.filter((o) => o.accepted).length;
   const errorCount = outcomes.length - successCount;
 
@@ -546,7 +520,6 @@ async function finalizeCompletedRun(
         shopifyCode: o.shopifyCode,
         shopifyField: o.shopifyField,
         message: o.message,
-        wasFlaggedByValidator: flaggedRows.has(o.rowNumber),
       }));
 
       // Chunk the insert so a single multi-row INSERT doesn't dominate the
@@ -868,7 +841,6 @@ async function finalizeCompletedJob(
       validationRun: {
         include: {
           originalRows: { orderBy: { rowNumber: 'asc' } },
-          issues: { select: { rowNumber: true, issueType: true } },
         },
       },
     },
@@ -883,7 +855,6 @@ async function finalizeCompletedJob(
     ? await fetchAndParseBulkResults(resultUrl, lineRefs, { kind: 'complete' }, parseCustomerCreateLine)
     : [];
 
-  const flaggedRows = flaggedRowsForRun(parent.validationRun);
   const successCount = outcomes.filter((o) => o.accepted).length;
   const errorCount = outcomes.length - successCount;
 
@@ -904,7 +875,6 @@ async function finalizeCompletedJob(
         shopifyCode: o.shopifyCode,
         shopifyField: o.shopifyField,
         message: o.message,
-        wasFlaggedByValidator: flaggedRows.has(o.rowNumber),
       })),
     });
   });

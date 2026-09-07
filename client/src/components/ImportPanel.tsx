@@ -48,12 +48,6 @@ function batchSizeFor(index: number, total: number, n: number): number {
   return base + (index < remainder ? 1 : 0);
 }
 
-// RuleGapList renders the per-run rule-gap backlog. Hidden from the UI for now
-// (see the commented section in the results panel); restore the `RuleGap` import
-// and the JSX below if we bring the backlog table back.
-//
-// function RuleGapList({ gaps }: { gaps: RuleGap[] }) { ... }
-
 export function ImportPanel({ result }: Props) {
   const [stores, setStores] = useState<ShopifyStore[]>([]);
   // Two explicit flows. Parallel has a lock-in step: 'select' (pick stores) →
@@ -212,7 +206,6 @@ export function ImportPanel({ result }: Props) {
   }, [feedbackStoreId, feedbackShopDomain, stores]);
 
   // ── derived flags ─────────────────────────────────────────────────────────────
-  const s = feedback?.summary;
   const polling = !!feedback && !isTerminal(feedback.status);
   const completed = feedback?.status === 'COMPLETED';
   const failed = !!feedback && isTerminal(feedback.status) && !completed;
@@ -278,28 +271,6 @@ export function ImportPanel({ result }: Props) {
     if (!feedback) return;
     window.open(getImportReportDownloadUrl(feedback.importRunId), '_blank');
   };
-
-  // Validator-feedback exports are hidden from the UI for now. Restore these
-  // (and the toolbar buttons) along with the getValidatorFeedbackReportUrl /
-  // fetchValidatorFeedbackMarkdown imports to bring them back.
-  //
-  // const handleDownloadFeedbackReport = () => {
-  //   if (!feedback) return;
-  //   window.open(getValidatorFeedbackReportUrl(feedback.importRunId), '_blank');
-  // };
-  //
-  // const handleCopyForClaude = async () => {
-  //   if (!feedback) return;
-  //   setError('');
-  //   setNotice('');
-  //   try {
-  //     const markdown = await fetchValidatorFeedbackMarkdown(feedback.importRunId);
-  //     await navigator.clipboard.writeText(markdown);
-  //     setNotice('Copied — paste into Claude to fix the validators.');
-  //   } catch (err) {
-  //     setError(errMessage(err, 'Could not copy the validator report.'));
-  //   }
-  // };
 
   const refreshStoreStats = async (storeId: string) => {
     const st = await fetchStoreCustomerStats(storeId).catch(() => null);
@@ -487,8 +458,8 @@ export function ImportPanel({ result }: Props) {
         <div>
           <h2 className="summary-title">Test-store import</h2>
           <p className="muted">
-            Imports these rows into the Shopify test store and diffs Shopify&apos;s per-row
-            result against our validator to surface missing / over-strict rules.
+            Imports these rows into a Shopify test store and reports, row by row, what
+            Shopify accepted and what it rejected (with Shopify&apos;s own reason).
           </p>
         </div>
         {inParallelSelect ? (
@@ -611,8 +582,8 @@ export function ImportPanel({ result }: Props) {
 
       {result.errors > 0 && !feedback && (
         <div className="warning-banner">
-          ⚠ This run has {result.errors} error(s). Importing anyway will test whether
-          Shopify actually rejects them (catches over-strict rules).
+          ⚠ This run has {result.errors} error(s). You can import anyway to see what
+          Shopify does with those rows.
         </div>
       )}
 
@@ -653,7 +624,7 @@ export function ImportPanel({ result }: Props) {
         </div>
       )}
 
-      {showResults && s && (
+      {showResults && (
         <div className="import-results">
           <div className="import-toolbar">
             <span className="muted">
@@ -662,15 +633,6 @@ export function ImportPanel({ result }: Props) {
               {feedback.totalRows}
             </span>
             <div className="toolbar-actions">
-              {/* Validator-feedback exports hidden for now — restore the buttons
-                  plus handleCopyForClaude/handleDownloadFeedbackReport if needed.
-              <button className="btn btn-primary btn-sm" onClick={handleCopyForClaude}>
-                Copy for Claude
-              </button>
-              <button className="btn btn-outline btn-sm" onClick={handleDownloadFeedbackReport}>
-                Download .md
-              </button>
-              */}
               <button className="btn btn-outline" onClick={handleDownloadReport}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -712,65 +674,23 @@ export function ImportPanel({ result }: Props) {
             </div>
           </div>
 
-          {/* Buckets are gray at 0 (color only when > 0) so a clean run doesn't
-              read as alarming, and grouped so the meaning is obvious. */}
-          <h3 className="subsection-title">Rejections</h3>
+          {/* Total / accepted / rejected — the same three numbers the products
+              side shows. The rejected card is gray at 0 (colour only when > 0)
+              so a clean run doesn't read as alarming. */}
           <div className="cards-grid">
-            <div className={`card ${s.missingRule.count > 0 ? 'card-error' : 'card-zero'}`}>
-              <span className="card-label">Missing rule (rejected, not flagged)</span>
-              <span className="card-value">{s.missingRule.count}</span>
+            <div className="card card-neutral">
+              <span className="card-label">Total rows</span>
+              <span className="card-value">{feedback.totalRows}</span>
             </div>
-            <div className={`card ${s.confirmedReject.count > 0 ? 'card-neutral' : 'card-zero'}`}>
-              <span className="card-label">Confirmed reject (rejected &amp; flagged)</span>
-              <span className="card-value">{s.confirmedReject.count}</span>
+            <div className="card card-info">
+              <span className="card-label">Accepted</span>
+              <span className="card-value">{feedback.successCount}</span>
+            </div>
+            <div className={`card ${feedback.errorCount > 0 ? 'card-error' : 'card-zero'}`}>
+              <span className="card-label">Rejected</span>
+              <span className="card-value">{feedback.errorCount}</span>
             </div>
           </div>
-
-          <h3 className="subsection-title">Validator accuracy</h3>
-          <div className="cards-grid">
-            <div className={`card ${s.falsePositive.count > 0 ? 'card-warning' : 'card-zero'}`}>
-              <span className="card-label">False positive (flagged, accepted)</span>
-              <span className="card-value">{s.falsePositive.count}</span>
-            </div>
-            <div className={`card ${s.confirmedClean.count > 0 ? 'card-info' : 'card-zero'}`}>
-              <span className="card-label">Confirmed clean (accepted, not flagged)</span>
-              <span className="card-value">{s.confirmedClean.count}</span>
-            </div>
-          </div>
-
-          {/* Detail path for the false-positive (over-strict) count, so the
-              number isn't a dead end. Collapsed by default. */}
-          {s.falsePositive.count > 0 && (
-            <details className="bucket-details">
-              <summary>
-                Show {s.falsePositive.count} over-strict row(s) — we flagged, Shopify
-                accepted
-              </summary>
-              <table className="issues-table">
-                <thead>
-                  <tr>
-                    <th>Row</th>
-                    <th>Field</th>
-                    <th>Our flag</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {s.falsePositive.rows.map((r) => (
-                    <tr key={r.rowNumber}>
-                      <td>{r.rowNumber}</td>
-                      <td>{r.shopifyField ?? '—'}</td>
-                      <td className="cell-message">{r.message ?? 'flagged by validator'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {s.falsePositive.count > s.falsePositive.rows.length && (
-                <p className="muted">
-                  Showing first {s.falsePositive.rows.length} of {s.falsePositive.count}.
-                </p>
-              )}
-            </details>
-          )}
 
           {feedback.perStore.length > 1 && (
             <>
@@ -813,7 +733,6 @@ export function ImportPanel({ result }: Props) {
                     <th>Field</th>
                     <th>Code</th>
                     <th>Why Shopify rejected it</th>
-                    <th>Caught by our rules?</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -829,13 +748,6 @@ export function ImportPanel({ result }: Props) {
                         )}
                       </td>
                       <td className="cell-message">{r.message ?? 'Rejected by Shopify.'}</td>
-                      <td>
-                        {r.flaggedByValidator ? (
-                          <span className="reject-flagged-yes">✓ flagged</span>
-                        ) : (
-                          <span className="reject-flagged-no">✗ rule gap</span>
-                        )}
-                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -851,12 +763,6 @@ export function ImportPanel({ result }: Props) {
               ✓ No rejections — Shopify accepted every imported row.
             </p>
           )}
-
-          {/* Rule-gap backlog hidden for now — restore the RuleGap import and the
-              RuleGapList helper to bring it back.
-          <h3 className="subsection-title">Rule-gap backlog (this run)</h3>
-          <RuleGapList gaps={feedback.ruleGaps} />
-          */}
         </div>
       )}
     </div>

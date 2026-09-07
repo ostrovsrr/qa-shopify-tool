@@ -1,4 +1,4 @@
-export type Severity = 'Error' | 'Warning' | 'Info';
+export type Severity = 'Error';
 
 export interface CustomerCsvRow {
   rowNumber: number;
@@ -21,8 +21,6 @@ export interface CustomerValidationResult {
   fileName: string;
   totalRows: number;
   errors: number;
-  warnings: number;
-  info: number;
   issues: CustomerValidationIssue[];
 }
 
@@ -48,8 +46,6 @@ export interface ValidationHistoryItem {
   fileType: string;
   totalRows: number;
   errors: number;
-  warnings: number;
-  info: number;
   ticketNumber: string | null;
   ticketName: string | null;
   comments: string | null;

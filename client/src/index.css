@@ -365,25 +365,11 @@ body {
 .issues-table tr:hover td { background: #f8fafc; }
 
 .row-error td { background: #fff5f5; }
-.row-warning td { background: #fffcf0; }
-.row-info td { background: #f0f9ff; }
 
 .cell-center { text-align: center; font-weight: 600; }
 .cell-mono { font-family: monospace; word-break: break-all; color: var(--text-muted); }
 .cell-fix { color: var(--success); font-size: 12px; }
 .cell-empty { text-align: center; color: var(--text-muted); padding: 24px; }
-
-.severity-badge {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 12px;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: .4px;
-}
-.severity-error { background: var(--error-bg); color: var(--error); }
-.severity-warning { background: var(--warning-bg); color: var(--warning); }
-.severity-info { background: var(--info-bg); color: var(--info); }
 
 .column-badge {
   display: inline-block;
@@ -456,8 +442,6 @@ body {
 }
 .badge-neutral { background: #f1f5f9; color: var(--text-muted); }
 .badge-error { background: var(--error-bg); color: var(--error); }
-.badge-warning { background: var(--warning-bg); color: var(--warning); }
-.badge-info { background: var(--info-bg); color: var(--info); }
 .badge-success { background: var(--success-bg); color: var(--success); }
 /* Imported-to-Shopify badges. A solid fill makes "this run was imported" pop in
    the History list versus the outline validation badges. */
@@ -1068,22 +1052,7 @@ body {
   border-radius: 4px;
   padding: 1px 6px;
 }
-.reject-flagged-yes { color: var(--success); font-weight: 600; white-space: nowrap; }
-.reject-flagged-no { color: var(--error); font-weight: 600; white-space: nowrap; }
 .import-no-rejects { color: var(--success); font-weight: 600; }
-
-/* Collapsible bucket detail (e.g. the over-strict false-positive rows). */
-.bucket-details { margin: 4px 0 8px; }
-.bucket-details > summary {
-  cursor: pointer;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--primary);
-  padding: 6px 0;
-  list-style-position: inside;
-}
-.bucket-details > summary:hover { color: var(--primary-hover); }
-.bucket-details > table { margin-top: 8px; }
 
 /* Lightweight, dismissible status line — deliberately quieter than
    .success-banner so it doesn't rival the accepted/rejected headline. */

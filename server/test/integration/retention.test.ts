@@ -40,8 +40,6 @@ async function seedValidation(createdAt: Date, importStatus?: string): Promise<s
       fileType: 'CUSTOMER',
       totalRows: 2,
       errors: 1,
-      warnings: 0,
-      info: 0,
       affectedRows: [{ rowNumber: 2, data: { Email: 'jane@acme.com' } }],
       originalRows: {
         create: [

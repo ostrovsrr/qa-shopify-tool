@@ -7,11 +7,10 @@ import {
   resolveMappingTarget,
   SHOPIFY_COLUMNS,
 } from '../services/columnMapping.service';
-import { CustomerValidationIssue, Severity } from '../types';
 import { excelSafeRecord, excelSafeText } from './excelCell';
 
 // Written with ExcelJS's *streaming* workbook writer: every row is committed
-// (flushed to the output stream and freed) as it's built. This report has five
+// (flushed to the output stream and freed) as it's built. This report has four
 // sheets, three of which repeat every uploaded row (Rows With Shopify Result,
 // Full Uploaded File, Shopify Template), so on a large import the in-memory
 // workbook plus the writeBuffer copy would exhaust the V8 heap. Streaming keeps
@@ -20,9 +19,6 @@ import { excelSafeRecord, excelSafeText } from './excelCell';
 const HEADER_COLOURS: Record<string, string> = {
   Summary: 'FF1E3A5F',
   Errors: 'FFB91C1C',
-  Warnings: 'FFB45309',
-  Info: 'FF0369A1',
-  'Rule Gaps': 'FF7C3AED',
   'Rows With Shopify Result': 'FF065F46',
   'Full Uploaded File': 'FF065F46',
   'Shopify Template': 'FF004C3F',
@@ -31,8 +27,6 @@ const HEADER_COLOURS: Record<string, string> = {
 const RESULT_COLOURS = {
   accepted: 'FFD1FAE5',
   rejected: 'FFFEE2E2',
-  falsePositive: 'FFFEF3C7',
-  missingRule: 'FFFFE4E6',
 };
 
 interface OriginalRow {
@@ -47,7 +41,6 @@ interface ReportRowResult {
   shopifyCode: string | null;
   shopifyField: string | null;
   message: string | null;
-  wasFlaggedByValidator: boolean;
 }
 
 // Streams the workbook to `stream`. `onReady(sourceFileName)` fires once, after
@@ -63,10 +56,7 @@ export async function streamShopifyVerificationReport(
     include: {
       rowResults: { orderBy: { rowNumber: 'asc' } },
       validationRun: {
-        include: {
-          issues: { orderBy: { rowNumber: 'asc' } },
-          originalRows: { orderBy: { rowNumber: 'asc' } },
-        },
+        include: { originalRows: { orderBy: { rowNumber: 'asc' } } },
       },
     },
   });
@@ -89,18 +79,7 @@ export async function streamShopifyVerificationReport(
       ? (validationRun.columnMapping as Record<string, string>)
       : {};
 
-  const issues: CustomerValidationIssue[] = validationRun.issues.map((issue) => ({
-    rowNumber: issue.rowNumber,
-    column: issue.columnName,
-    severity: issue.severity as Severity,
-    issueType: issue.issueType,
-    currentValue: issue.currentValue ?? '',
-    message: issue.message,
-    suggestedFix: issue.suggestedFix ?? '',
-  }));
-
   const rowResults = importRun.rowResults as ReportRowResult[];
-  const issuesByRow = groupIssuesByRow(issues);
   const originalByRow = new Map(
     validationRun.originalRows.map((row) => [row.rowNumber, row.data as Record<string, string>]),
   );
@@ -117,29 +96,17 @@ export async function streamShopifyVerificationReport(
   workbook.creator = 'Shopify CSV QA Tool';
   workbook.created = new Date();
 
-  addResultSheet(
+  addRejectedSheet(
     workbook,
-    'Errors',
     rowResults.filter((r) => !r.accepted),
     originalColumns,
     originalByRow,
-    issuesByRow,
   );
-  addResultSheet(
-    workbook,
-    'Warnings',
-    rowResults.filter((r) => r.accepted && r.wasFlaggedByValidator),
-    originalColumns,
-    originalByRow,
-    issuesByRow,
-  );
-  addRuleGapsSheet(workbook, rowResults);
   addRowsWithShopifyResultSheet(
     workbook,
     originalColumns,
     validationRun.originalRows,
     rowResults,
-    issuesByRow,
   );
   addFullUploadedFileSheet(workbook, originalColumns, validationRun.originalRows);
   addShopifyTemplateSheet(workbook, columnMapping, validationRun.originalRows, rowResults);
@@ -156,60 +123,33 @@ function styleHeader(row: ExcelJS.Row, bgArgb: string) {
   row.height = 20;
 }
 
-function groupIssuesByRow(issues: CustomerValidationIssue[]): Map<number, CustomerValidationIssue[]> {
-  const map = new Map<number, CustomerValidationIssue[]>();
-  for (const issue of issues) {
-    if (!map.has(issue.rowNumber)) map.set(issue.rowNumber, []);
-    map.get(issue.rowNumber)!.push(issue);
-  }
-  return map;
-}
-
-function summarizeIssues(issues: CustomerValidationIssue[] | undefined) {
-  const list = issues ?? [];
-  return {
-    errorCount: list.filter((i) => i.severity === 'Error').length,
-    warningCount: list.filter((i) => i.severity === 'Warning').length,
-    issueTypes: [...new Set(list.map((i) => i.issueType))].join(', '),
-    messages: list.map((i) => i.message).join(' | '),
-    suggestedFixes: list.map((i) => i.suggestedFix).filter(Boolean).join(' | '),
-  };
-}
-
-function addResultSheet(
+// Every row Shopify rejected, with Shopify's own field/code/message next to the
+// original CSV row, so the fix is visible without cross-referencing anything.
+function addRejectedSheet(
   workbook: ExcelJS.stream.xlsx.WorkbookWriter,
-  sheetName: 'Errors' | 'Warnings',
   results: ReportRowResult[],
   originalColumns: string[],
   originalByRow: Map<number, Record<string, string>>,
-  issuesByRow: Map<number, CustomerValidationIssue[]>,
 ) {
-  const sheet = workbook.addWorksheet(sheetName);
+  const sheet = workbook.addWorksheet('Errors');
   const columns = [
     'Row Number',
     'Shopify Result',
     'Shopify Field',
     'Shopify Code',
     'Shopify Message',
-    'Was Flagged By Pre-check',
-    'Pre-check Error Count',
-    'Pre-check Warning Count',
-    'Pre-check Issue Types',
-    'Pre-check Messages',
-    'Pre-check Suggested Fixes',
     ...originalColumns,
   ];
 
   sheet.columns = columns.map((col) => ({
     header: excelSafeText(col),
     key: col,
-    width: col === 'Shopify Message' || col.startsWith('Pre-check') ? 42 : 22,
+    width: col === 'Shopify Message' ? 42 : 22,
   }));
   sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(columns.length)}1` };
-  styleHeader(sheet.getRow(1), HEADER_COLOURS[sheetName]);
+  styleHeader(sheet.getRow(1), HEADER_COLOURS.Errors);
 
   for (const result of results) {
-    const issueSummary = summarizeIssues(issuesByRow.get(result.rowNumber));
     const original = originalByRow.get(result.rowNumber) ?? {};
     const rowData: Record<string, string | number | boolean> = {
       'Row Number': result.rowNumber,
@@ -217,69 +157,13 @@ function addResultSheet(
       'Shopify Field': result.shopifyField ?? '',
       'Shopify Code': result.shopifyCode ?? '',
       'Shopify Message': result.message ?? '',
-      'Was Flagged By Pre-check': result.wasFlaggedByValidator,
-      'Pre-check Error Count': issueSummary.errorCount,
-      'Pre-check Warning Count': issueSummary.warningCount,
-      'Pre-check Issue Types': issueSummary.issueTypes,
-      'Pre-check Messages': issueSummary.messages,
-      'Pre-check Suggested Fixes': issueSummary.suggestedFixes,
     };
     for (const col of originalColumns) rowData[col] = original[col] ?? '';
     const row = sheet.addRow(excelSafeRecord(rowData));
     row.eachCell((cell) => {
-      cell.fill = {
-        type: 'pattern',
-        pattern: 'solid',
-        fgColor: {
-          argb: !result.accepted && !result.wasFlaggedByValidator
-            ? RESULT_COLOURS.missingRule
-            : result.accepted
-              ? RESULT_COLOURS.falsePositive
-              : RESULT_COLOURS.rejected,
-        },
-      };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: RESULT_COLOURS.rejected } };
     });
     row.commit();
-  }
-
-  sheet.commit();
-}
-
-function addRuleGapsSheet(workbook: ExcelJS.stream.xlsx.WorkbookWriter, rowResults: ReportRowResult[]) {
-  const sheet = workbook.addWorksheet('Rule Gaps');
-  sheet.columns = [
-    { header: 'Shopify Field', key: 'field', width: 24 },
-    { header: 'Shopify Code', key: 'code', width: 18 },
-    { header: 'Count', key: 'count', width: 12 },
-    { header: 'Rows', key: 'rows', width: 48 },
-    { header: 'Sample Message', key: 'message', width: 64 },
-  ];
-  styleHeader(sheet.getRow(1), HEADER_COLOURS['Rule Gaps']);
-
-  const groups = new Map<string, { field: string; code: string; rows: number[]; messages: string[] }>();
-  for (const result of rowResults.filter((r) => !r.accepted && !r.wasFlaggedByValidator)) {
-    const key = `${result.shopifyField ?? ''}|${result.shopifyCode ?? ''}`;
-    if (!groups.has(key)) {
-      groups.set(key, {
-        field: result.shopifyField ?? '',
-        code: result.shopifyCode ?? '',
-        rows: [],
-        messages: [],
-      });
-    }
-    const group = groups.get(key)!;
-    group.rows.push(result.rowNumber);
-    if (result.message && !group.messages.includes(result.message)) group.messages.push(result.message);
-  }
-
-  for (const group of [...groups.values()].sort((a, b) => b.rows.length - a.rows.length)) {
-    sheet.addRow(excelSafeRecord({
-      field: group.field,
-      code: group.code,
-      count: group.rows.length,
-      rows: group.rows.join(', '),
-      message: group.messages[0] ?? '',
-    }));
   }
 
   sheet.commit();
@@ -290,7 +174,6 @@ function addRowsWithShopifyResultSheet(
   originalColumns: string[],
   originalRows: OriginalRow[],
   rowResults: ReportRowResult[],
-  issuesByRow: Map<number, CustomerValidationIssue[]>,
 ) {
   const sheet = workbook.addWorksheet('Rows With Shopify Result');
   const resultByRow = new Map(rowResults.map((r) => [r.rowNumber, r]));
@@ -301,17 +184,13 @@ function addRowsWithShopifyResultSheet(
     'Shopify Field',
     'Shopify Code',
     'Shopify Message',
-    'Was Flagged By Pre-check',
-    'Pre-check Error Count',
-    'Pre-check Warning Count',
-    'Pre-check Issue Types',
     ...originalColumns,
   ];
 
   sheet.columns = columns.map((col) => ({
     header: excelSafeText(col),
     key: col,
-    width: col === 'Shopify Message' || col.startsWith('Pre-check') ? 42 : 22,
+    width: col === 'Shopify Message' ? 42 : 22,
   }));
   sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(columns.length)}1` };
   styleHeader(sheet.getRow(1), HEADER_COLOURS['Rows With Shopify Result']);
@@ -319,7 +198,6 @@ function addRowsWithShopifyResultSheet(
   for (const origRow of originalRows) {
     const data = origRow.data as Record<string, string>;
     const result = resultByRow.get(origRow.rowNumber);
-    const issueSummary = summarizeIssues(issuesByRow.get(origRow.rowNumber));
     const rowData: Record<string, string | number | boolean> = {
       'Row Number': origRow.rowNumber,
       'Shopify Result': result ? (result.accepted ? 'Accepted' : 'Rejected') : 'Not imported',
@@ -327,10 +205,6 @@ function addRowsWithShopifyResultSheet(
       'Shopify Field': result?.shopifyField ?? '',
       'Shopify Code': result?.shopifyCode ?? '',
       'Shopify Message': result?.message ?? '',
-      'Was Flagged By Pre-check': result?.wasFlaggedByValidator ?? issuesByRow.has(origRow.rowNumber),
-      'Pre-check Error Count': issueSummary.errorCount,
-      'Pre-check Warning Count': issueSummary.warningCount,
-      'Pre-check Issue Types': issueSummary.issueTypes,
     };
     for (const col of originalColumns) rowData[col] = data[col] ?? '';
     const row = sheet.addRow(excelSafeRecord(rowData));
