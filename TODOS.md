@@ -128,13 +128,15 @@ delete. Self-corrects on the next refresh and no longer blocks anything (the
 count-based disable on Clean QA was removed in `9e411d8`). Fix would be a
 re-check after a short delay.
 
-**d. Reload loses the open run, and the loading window shows the default store.**
-The opened run lives in React state, not the URL: refreshing drops you on the
-upload screen and runs are not linkable. Worse, while the import feedback is still
-loading the panel sits in single-store mode with the **default** store selected and
-a live Clean QA — the transient version of the bug fixed in `28e2034`. Observed
-once during the sweep when Shopify was slow. **Depends on:** putting the run id in
-the route, which is the real fix for both halves.
+**d. Reload loses the open run, and the loading window shows the default store —
+✅ DONE (2026-09-07, `7dc3267`).** The open run is now the URL
+(`/customers/:validationId`, `/products/:uploadId`), so reload, back/forward and
+pasted links all land on the same run; the SPA fallback in `server/src/index.ts`
+already covered the new paths. The panel also holds its picker, cards and import
+button until the "has this already been imported?" probe answers, so the window
+that showed a live Clean QA against the default store is closed. Mapping and
+review stay ephemeral: a mapping preview is a server-side temp file that validate
+consumes, so there is nothing durable to link to.
 
 **e. Mobile.** At 375×812 the header wraps to three lines and the page scrolls
 horizontally (535px wide in a 375px viewport), driven by the per-store results
