@@ -168,11 +168,12 @@ export function ImportPanel({ result }: Props) {
         if (!active) return;
         setFeedback(next);
         if (isTerminal(next.status)) {
-          for (const id of displayedRef.current) {
-            fetchStoreCustomerStats(id)
-              .then((st) => active && setStoreStats((m) => ({ ...m, [id]: st })))
-              .catch(() => undefined);
-          }
+          // Deliberately NOT gated on `active`: setFeedback above flips pollStatus
+          // to a terminal value, React tears this effect down, and `active` is
+          // already false by the time the stats request resolves. Gating here
+          // silently dropped the refresh, so the card kept the pre-import counts
+          // and the count-driven Clean QA button stayed disabled.
+          for (const id of displayedRef.current) void refreshStoreStats(id);
         } else {
           // Schedule only after this request finishes. setInterval could overlap
           // slow Shopify reconciliations and advance the same run concurrently.
