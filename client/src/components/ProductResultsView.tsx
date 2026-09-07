@@ -125,7 +125,7 @@ export function ProductResultsView({
               <th>Code</th>
               <th>Count</th>
               <th>Sample handles</th>
-              <th>Sample message</th>
+              <th>Shopify's reason</th>
             </tr>
           </thead>
           <tbody>
@@ -135,8 +135,15 @@ export function ProductResultsView({
                 <td>{g.shopifyCode ?? '—'}</td>
                 <td>{g.count}</td>
                 <td className="cell-message">{g.sampleHandles.join(', ') || '—'}</td>
+                {/* One (field, code) can cover genuinely different reasons — a blank
+                    title and a 300-character title are both (title,
+                    INVALID_PRODUCT). Showing only the first message told you to
+                    fix blanks, you re-ran, and the long ones failed again. The
+                    server already collects up to 3 distinct messages per group. */}
                 <td className="cell-message">
-                  {g.sampleMessages[0] ?? '—'}
+                  {g.sampleMessages.length > 0
+                    ? g.sampleMessages.map((m) => <div key={m}>{m}</div>)
+                    : '—'}
                   {g.hint && <div className="rejection-hint">{g.hint}</div>}
                 </td>
               </tr>
