@@ -192,19 +192,40 @@ export function ImportPanel({ result }: Props) {
     };
   }, [pollRunId, pollStatus]);
 
-  // ── point selection at a single-store run reopened from History ───────────────
+  // ── point selection at the run reopened from History ──────────────────────────
   const feedbackStoreId = feedback?.storeId ?? null;
   const feedbackShopDomain = feedback?.shopDomain;
+  const feedbackStoreKey = (feedback?.perStore ?? [])
+    .map((ps) => ps.storeId ?? ps.shopDomain)
+    .join(',');
   useEffect(() => {
+    const resolve = (storeId: string | null, shopDomain?: string) =>
+      storeId ?? stores.find((s) => s.shop === shopDomain)?.id;
+
+    // A parallel run spans several stores, and feedback.shopDomain is their
+    // domains joined with ", " — it matches no single store, so the single-store
+    // branch below silently left the DEFAULT store selected next to results for
+    // stores the run never touched, with a live Clean QA aimed at it. Restore
+    // the real selection from perStore instead.
+    const parallel = (feedback?.perStore ?? [])
+      .map((ps) => resolve(ps.storeId, ps.shopDomain))
+      .filter((id): id is string => !!id);
+    if (parallel.length > 1) {
+      setSelectedStoreIds(parallel);
+      setImportMode('parallel');
+      setParallelPhase('review');
+      return;
+    }
+
     if (!feedbackStoreId && !feedbackShopDomain) return;
-    const target =
-      feedbackStoreId ?? stores.find((s) => s.shop === feedbackShopDomain)?.id;
+    const target = resolve(feedbackStoreId, feedbackShopDomain);
     if (target) {
       setSelectedStoreIds([target]);
       setImportMode('single');
       setParallelPhase('select');
     }
-  }, [feedbackStoreId, feedbackShopDomain, stores]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [feedbackStoreId, feedbackShopDomain, feedbackStoreKey, stores]);
 
   // ── derived flags ─────────────────────────────────────────────────────────────
   const polling = !!feedback && !isTerminal(feedback.status);
