@@ -1,16 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Severity, ValidationIssue } from '../types';
+import { ValidationIssue } from '../types';
 
 interface Props {
   issues: ValidationIssue[];
 }
 
-type SortKey = 'rowNumber' | 'severity' | 'column' | 'issueType';
+type SortKey = 'rowNumber' | 'column' | 'issueType';
 type SortDir = 'asc' | 'desc';
 // collapsed → loading (spinner paints) → open (heavy table mounts)
 type View = 'collapsed' | 'loading' | 'open';
-
-const SEVERITY_ORDER: Record<Severity, number> = { Error: 0, Warning: 1, Info: 2 };
 
 export function IssuesTable({ issues }: Props) {
   // The Excel validation report is the primary artifact; this table is opt-in.
@@ -18,7 +16,6 @@ export function IssuesTable({ issues }: Props) {
   // when a run has tens of thousands of issues.
   const [view, setView] = useState<View>('collapsed');
   const [search, setSearch] = useState('');
-  const [filterSeverity, setFilterSeverity] = useState<string>('All');
   const [filterColumn, setFilterColumn] = useState<string>('All');
   const [filterIssueType, setFilterIssueType] = useState<string>('All');
   const [sortKey, setSortKey] = useState<SortKey>('rowNumber');
@@ -64,7 +61,6 @@ export function IssuesTable({ issues }: Props) {
     const q = search.toLowerCase();
     return issues
       .filter((i) => {
-        if (filterSeverity !== 'All' && i.severity !== filterSeverity) return false;
         if (filterColumn !== 'All' && i.column !== filterColumn) return false;
         if (filterIssueType !== 'All' && i.issueType !== filterIssueType) return false;
         if (
@@ -81,13 +77,11 @@ export function IssuesTable({ issues }: Props) {
       .sort((a, b) => {
         let cmp = 0;
         if (sortKey === 'rowNumber') cmp = a.rowNumber - b.rowNumber;
-        else if (sortKey === 'severity')
-          cmp = SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity];
         else if (sortKey === 'column') cmp = a.column.localeCompare(b.column);
         else if (sortKey === 'issueType') cmp = a.issueType.localeCompare(b.issueType);
         return sortDir === 'asc' ? cmp : -cmp;
       });
-  }, [open, issues, search, filterSeverity, filterColumn, filterIssueType, sortKey, sortDir]);
+  }, [open, issues, search, filterColumn, filterIssueType, sortKey, sortDir]);
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -140,15 +134,6 @@ export function IssuesTable({ issues }: Props) {
         />
         <select
           className="filter-select"
-          value={filterSeverity}
-          onChange={(e) => setFilterSeverity(e.target.value)}
-        >
-          {['All', 'Error', 'Warning', 'Info'].map((s) => (
-            <option key={s}>{s}</option>
-          ))}
-        </select>
-        <select
-          className="filter-select"
           value={filterColumn}
           onChange={(e) => setFilterColumn(e.target.value)}
         >
@@ -177,9 +162,6 @@ export function IssuesTable({ issues }: Props) {
               <th onClick={() => handleSort('column')} className="sortable">
                 Column{sortIcon('column')}
               </th>
-              <th onClick={() => handleSort('severity')} className="sortable">
-                Severity{sortIcon('severity')}
-              </th>
               <th onClick={() => handleSort('issueType')} className="sortable">
                 Issue Type{sortIcon('issueType')}
               </th>
@@ -190,15 +172,10 @@ export function IssuesTable({ issues }: Props) {
           </thead>
           <tbody>
             {filtered.map((issue, idx) => (
-              <tr key={idx} className={`row-${issue.severity.toLowerCase()}`}>
+              <tr key={idx} className="row-error">
                 <td className="cell-center">{issue.rowNumber}</td>
                 <td>
                   <span className="column-badge">{issue.column}</span>
-                </td>
-                <td>
-                  <span className={`severity-badge severity-${issue.severity.toLowerCase()}`}>
-                    {issue.severity}
-                  </span>
                 </td>
                 <td>{issue.issueType}</td>
                 <td className="cell-mono">{issue.currentValue || '—'}</td>
@@ -208,7 +185,7 @@ export function IssuesTable({ issues }: Props) {
             ))}
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={7} className="cell-empty">No issues match the current filters.</td>
+                <td colSpan={6} className="cell-empty">No issues match the current filters.</td>
               </tr>
             )}
           </tbody>

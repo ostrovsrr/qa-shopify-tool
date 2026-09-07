@@ -62,29 +62,22 @@ describe('full validation pipeline (golden)', () => {
       rule.validate(rows),
     );
 
-    // sanity: there are errors and warnings, and every issue points at a real data row
+    // sanity: there are errors, and every issue points at a real data row
     expect(issues.length).toBeGreaterThan(0);
     expect(issues.some((i) => i.severity === 'Error')).toBe(true);
-    expect(issues.some((i) => i.severity === 'Warning')).toBe(true);
     expect(issues.every((i) => i.rowNumber >= 2)).toBe(true);
 
     expect(countByType(issues)).toMatchInlineSnapshot(`
       {
-        "DuplicateCommasInTags": 1,
         "DuplicateEmail": 2,
         "DuplicatePhone": 2,
-        "EmptyTagValues": 1,
         "HtmlInjection": 1,
-        "InvalidCanadianPostalCode": 1,
         "InvalidEmail": 1,
         "InvalidMarketingConsent": 1,
         "InvalidPhone": 1,
         "InvalidProvinceCode": 1,
         "InvalidTaxExempt": 1,
-        "LongNote": 1,
         "MissingContact": 1,
-        "NonNumericField": 1,
-        "TagsStartsOrEndsWithComma": 1,
       }
     `);
   });

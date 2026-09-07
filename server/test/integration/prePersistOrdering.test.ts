@@ -97,8 +97,6 @@ runIf('pre-persist ordering — the row lands before the bulk op is submitted', 
         fileType: 'CUSTOMER',
         totalRows: 1,
         errors: 0,
-        warnings: 0,
-        info: 0,
         originalRows: {
           create: [
             {

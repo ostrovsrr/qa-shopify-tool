@@ -37,8 +37,6 @@ model ValidationRun {
   fileType        String                @default("CUSTOMER")
   totalRows       Int
   errors          Int
-  warnings        Int
-  info            Int
   affectedRows    Json?
   originalColumns Json?
   columnMapping      Json?
@@ -147,14 +145,11 @@ model ImportRowResult {
   // Which store imported this row — null for legacy rows; for a batch it's the
   // job's store, enabling the per-store accepted/rejected breakdown.
   storeId               String?
-  // Set at join time so the four-bucket query is a single lookup.
-  wasFlaggedByValidator Boolean  @default(false)
   createdAt             DateTime @default(now())
 
   importRun ImportRun @relation(fields: [importRunId], references: [id], onDelete: Cascade)
 
   @@index([importRunId])
-  @@index([accepted, wasFlaggedByValidator])
   @@map("import_row_results")
 }
 

@@ -90,8 +90,6 @@ async function seedValidation(): Promise<string> {
       fileType: 'CUSTOMER',
       totalRows: 1,
       errors: 0,
-      warnings: 0,
-      info: 0,
       originalRows: {
         create: [
           {

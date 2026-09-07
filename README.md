@@ -1,6 +1,6 @@
 # Shopify CSV QA Tool
 
-An internal tool for validating Shopify Customer CSV files before import. Upload a CSV, map its columns to Shopify fields, run 15 validation rules, and download an Excel report with an import-ready Shopify Template sheet.
+An internal tool for validating Shopify Customer CSV files before import. Upload a CSV, map its columns to Shopify fields, run 11 validation rules, and download an Excel report with an import-ready Shopify Template sheet.
 
 ---
 
@@ -11,13 +11,13 @@ An internal tool for validating Shopify Customer CSV files before import. Upload
   - **Add to Tags** — appends the column's value to Tags (comma-separated); multiple columns can be appended
   - **Add to Note** — appends the column's value to Note (`" | "`-separated); multiple columns can be appended
   - **Keep (as-is)** — carries the column into the Shopify Template sheet unchanged, under its original name
-- **15 validation rules** covering contacts, emails, phones, addresses, postal/province codes, tags, consent fields, HTML injection, and more
+- **11 validation rules** covering contacts, emails, phones, addresses, province codes, tags, consent fields, and HTML injection. Every rule is Error severity — the pre-check flags only what Shopify actually rejects
 - **Merge matching duplicates** (optional, per run) — duplicate rows whose names also match (exactly, case-insensitive, non-empty) are merged into one customer in the Shopify Template: most-filled row wins, empty fields fill from the others, tags union, notes concatenate, and consent/tax-exempt are never escalated to TRUE by a merge; a "Merged From Rows" column keeps the audit trail
 - **Move duplicates to Note** (optional, per run) — for each *remaining* duplicate email/phone group (runs after merging), the most-filled row keeps the value; the others get it cleared, appended to their Note, and tagged `DuplicateEmailNotes` / `DuplicatePhoneNotes` so Shopify accepts them on import and they stay filterable in admin
 - **HeliosMigrated tag** (optional, per run) — appends a `HeliosMigrated` tag to every row in the template
-- **Excel report** — Summary, Errors, Warnings, Full Uploaded File, and a **Shopify Template** sheet (mapped columns in Shopify order, duplicate-group markers, auto-fix highlights)
+- **Excel report** — Errors, Full Uploaded File, and a **Shopify Template** sheet (mapped columns in Shopify order, duplicate-group markers, auto-fix highlights)
 - **Validation history** — recent runs with editable ticket number/name and comments
-- **Test-store import & feedback loop** (optional) — bulk-import a validated run into one or more Shopify test stores via the Bulk Operations API, diff Shopify's real accept/reject results against the validators, and download a validator-gap feedback report. Includes parallel multi-store batches and one-click cleanup of imported QA customers.
+- **Test-store import** (optional) — bulk-import a validated run into one or more Shopify test stores via the Bulk Operations API and see exactly what Shopify accepted and what it rejected, with Shopify's own field/code/message per rejected row. Includes parallel multi-store batches and one-click cleanup of imported QA customers.
 
 ---
 
@@ -184,31 +184,29 @@ customers already in the store are out of scope for a CSV-only tool.
 | `POST` | `/api/customer-import/:validationId/run-batch` | Import in parallel across multiple stores |
 | `GET` | `/api/customer-import/:id` | Poll import status / results |
 | `GET` | `/api/customer-import/:id/report` | Excel verification report (Shopify results vs CSV) |
-| `GET` | `/api/customer-import/:id/feedback-report` | Markdown validator-gap report |
-| `GET` | `/api/customer-import/feedback` | Aggregated rule-gap backlog |
 | `POST` | `/api/customer-import/:id/cleanup` | Delete the customers created by one import run |
 
 ---
 
 ## Validation Rules
 
-| Rule | Severity | Description |
-|------|----------|-------------|
-| MissingContactRule | Error | Both Email and Phone are missing |
-| InvalidEmailRule | Error | Email exists but is not a valid format |
-| DuplicateEmailRule | Error | Same email appears more than once (case-insensitive) |
-| InvalidPhoneRule | Error / Warning | Too few digits or suspicious characters |
-| DuplicatePhoneRule | Error | Same normalized phone appears more than once (NANP country code normalized) |
-| MarketingConsentRule | Error | Invalid value for Accepts Email/SMS Marketing |
-| TaxExemptRule | Error | Invalid value for Tax Exempt |
-| AddressCompletenessRule | Error / Warning | Missing Country, City, or Province for address rows |
-| PostalCodeRule | Warning | Invalid Canadian or US postal code format |
-| ProvinceCodeRule | Error | Invalid province/state code for the row's country |
-| TagsRule | Error / Warning | Duplicate commas, leading/trailing commas, empty tags, duplicate tags |
-| NumericFieldsRule | Warning | Non-numeric or negative Total Spent / Total Orders |
-| WhitespaceRule | Warning | Leading or trailing spaces in important fields |
-| HtmlInjectionRule | Error | HTML markup in text fields |
-| LongNoteRule | Warning | Note field exceeds 500 characters |
+Every rule is **Error** severity: it fires only for things Shopify actually rejects on
+import. Warning- and Info-level pre-validation was removed on 2026-09-07 — it flagged
+things Shopify imports without complaint, so it was noise nobody acted on.
+
+| Rule | Description |
+|------|-------------|
+| MissingContactRule | Both Email and Phone are missing |
+| InvalidEmailRule | Email exists but is not a valid format |
+| DuplicateEmailRule | Same email appears more than once (case-insensitive) |
+| InvalidPhoneRule | Excel scientific notation, or outside the E.164 range of 10–15 digits |
+| DuplicatePhoneRule | Same normalized phone appears more than once (NANP country code normalized) |
+| MarketingConsentRule | Invalid value for Accepts Email/SMS Marketing |
+| TaxExemptRule | Invalid value for Tax Exempt |
+| AddressCompletenessRule | Province Code is present but Country Code is missing |
+| ProvinceCodeRule | Invalid province/state code for the row's country |
+| TagsRule | More than 250 tags, or a single tag over 255 characters |
+| HtmlInjectionRule | HTML markup in text fields |
 
 ---
 
@@ -255,11 +253,15 @@ shopify-csv-qa/
    ```
 3. Import and add it to the array in `server/src/validators/customer/index.ts`
 
+The only severity is `'Error'`. Warning and Info were removed on 2026-09-07 — a rule that
+fires for something Shopify imports without complaint is noise, so if a check would not
+predict a real import rejection, do not add it.
+
 ---
 
 ## Sample CSV
 
-A sample file with intentional issues is provided at `sample/shopify-customers-sample.csv` for testing all validation rules.
+A sample file with intentional issues is provided at `sample/shopify-customers-sample.csv` for testing the validation rules.
 
 ---
 
@@ -306,7 +308,6 @@ cd ../client && npm run build
 ## Roadmap / Ideas
 
 - Cross-reference against existing store customers: export customers from Shopify, upload to the tool, and detect collisions with the incoming CSV
-- Keep aligning validation rules with Shopify's real acceptance behavior (driven by the test-store import feedback loop)
 - Image tool in the same app
 - Product variants extraction from the Title
 - Products: generate handles

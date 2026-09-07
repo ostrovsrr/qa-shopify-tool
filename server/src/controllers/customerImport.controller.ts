@@ -1,11 +1,7 @@
 import { NextFunction, Request, Response } from 'express';
 import { z } from 'zod';
-import {
-  getImportFeedback,
-  getRuleGapBacklog,
-} from '../services/importFeedback.service';
+import { getImportFeedback } from '../services/importFeedback.service';
 import { streamShopifyVerificationReport } from '../reports/shopifyVerificationReport';
-import { generateValidatorFeedbackMarkdown } from '../reports/validatorFeedbackReport';
 import { reportFileName } from '../utils/reportFileName';
 import {
   cleanupImportRunStores,
@@ -143,21 +139,6 @@ export async function runBatchImportHandler(
   }
 }
 
-// GET /api/customer-import/feedback — cross-run rule-gap backlog.
-// Declared before /:id so "feedback" isn't captured as an id param.
-export async function ruleGapBacklogHandler(
-  _req: Request,
-  res: Response,
-  next: NextFunction,
-): Promise<void> {
-  try {
-    const backlog = await getRuleGapBacklog();
-    res.json(backlog);
-  } catch (err) {
-    next(err);
-  }
-}
-
 // GET /api/customer-import/by-validation/:validationId — latest import for a run.
 // Lets History reopen a run's import (status, report, cleanup) and resume a
 // still-RUNNING one. Declared before /:id so "by-validation" isn't an id param.
@@ -216,37 +197,6 @@ export async function getImportReportHandler(
       res.destroy();
       return;
     }
-    next(err);
-  }
-}
-
-// GET /api/customer-import/:id/feedback-report — paste-ready Markdown for fixing
-// validator logic from the Shopify-vs-validator discrepancy.
-export async function getValidatorFeedbackReportHandler(
-  req: Request,
-  res: Response,
-  next: NextFunction,
-): Promise<void> {
-  try {
-    const parsed = uuidSchema.safeParse(req.params.id);
-    if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.errors[0].message });
-      return;
-    }
-
-    const report = await generateValidatorFeedbackMarkdown(parsed.data);
-    if (report === null) {
-      res.status(404).json({ error: 'Import run not found.' });
-      return;
-    }
-    res.type('text/markdown; charset=utf-8');
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="${reportFileName('validator-feedback', report.sourceFileName, 'md')}"`,
-    );
-    res.send(report.markdown);
-  } catch (err) {
-    if (handleShopifyError(err, res)) return;
     next(err);
   }
 }

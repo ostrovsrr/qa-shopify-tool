@@ -1,4 +1,4 @@
-export type Severity = 'Error' | 'Warning' | 'Info';
+export type Severity = 'Error';
 
 export interface ValidationIssue {
   rowNumber: number;
@@ -15,8 +15,6 @@ export interface ValidationResult {
   fileName: string;
   totalRows: number;
   errors: number;
-  warnings: number;
-  info: number;
   issues: ValidationIssue[];
 }
 
@@ -38,8 +36,6 @@ export interface ValidationHistoryItem {
   fileType: string;
   totalRows: number;
   errors: number;
-  warnings: number;
-  info: number;
   ticketNumber: string | null;
   ticketName: string | null;
   comments: string | null;
@@ -117,35 +113,11 @@ export interface CleanupResult {
   errors: { id: string; message: string }[];
 }
 
-export interface BucketRow {
-  rowNumber: number;
-  shopifyField: string | null;
-  shopifyCode: string | null;
-  message: string | null;
-}
-
 export interface RejectedRow {
   rowNumber: number;
   shopifyField: string | null;
   shopifyCode: string | null;
   message: string | null;
-  flaggedByValidator: boolean;
-}
-
-export interface FourBucketSummary {
-  missingRule: { count: number; rows: BucketRow[] };
-  falsePositive: { count: number; rows: BucketRow[] };
-  confirmedReject: { count: number };
-  confirmedClean: { count: number };
-}
-
-export interface RuleGap {
-  shopifyField: string | null;
-  shopifyCode: string | null;
-  count: number;
-  sampleMessages: string[];
-  sampleRowNumbers: number[];
-  existingValidator: string | null;
 }
 
 export interface PerStoreResult {
@@ -167,8 +139,6 @@ export interface ImportFeedback {
   errorCount: number;
   totalRows: number;
   createdAt: string;
-  summary: FourBucketSummary;
-  ruleGaps: RuleGap[];
   rejectedRows: RejectedRow[];
   perStore: PerStoreResult[];
 }

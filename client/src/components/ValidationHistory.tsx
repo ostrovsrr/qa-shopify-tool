@@ -303,13 +303,7 @@ export function ValidationHistory({ onOpen, refreshTrigger }: Props) {
                 {item.errors > 0 && (
                   <span className="badge badge-error">{item.errors} errors</span>
                 )}
-                {item.warnings > 0 && (
-                  <span className="badge badge-warning">{item.warnings} warnings</span>
-                )}
-                {item.info > 0 && (
-                  <span className="badge badge-info">{item.info} info</span>
-                )}
-                {item.errors === 0 && item.warnings === 0 && item.info === 0 && (
+                {item.errors === 0 && (
                   <span className="badge badge-success">Clean</span>
                 )}
                 <ImportBadge lastImport={item.lastImport} />

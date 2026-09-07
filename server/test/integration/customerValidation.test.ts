@@ -62,7 +62,6 @@ runIf('customer-validation API (integration)', () => {
     expect(validate.status).toBe(200);
     expect(validate.body.totalRows).toBe(4);
     expect(validate.body.errors).toBe(3); // 1 invalid email + 2 duplicate-email rows
-    expect(validate.body.warnings).toBe(0);
     expect(validate.body.issues).toHaveLength(3);
     const validationId = validate.body.validationId;
 

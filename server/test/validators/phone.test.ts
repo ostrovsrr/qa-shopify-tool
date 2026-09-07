@@ -19,11 +19,11 @@ describe('InvalidPhoneRule', () => {
     expect(issues[0].message).toContain('scientific notation');
   });
 
-  it('warns on unexpected characters', () => {
-    const issues = rule.validate(makeRows([{ Phone: '555-CALL-NOW' }]));
-    expect(issues).toHaveLength(1);
-    expect(issues[0].severity).toBe('Warning');
-    expect(issues[0].issueType).toBe('SuspiciousPhoneCharacters');
+  // Used to be a warning. Letting it fall through to the digit count instead
+  // would raise a "too few digits" Error the pre-check never used to raise, so
+  // it is skipped entirely and Shopify rejects it at import.
+  it('stays quiet on unexpected characters', () => {
+    expect(rule.validate(makeRows([{ Phone: '555-CALL-NOW' }]))).toHaveLength(0);
   });
 
   it('errors when there are too few or too many digits', () => {

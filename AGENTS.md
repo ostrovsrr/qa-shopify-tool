@@ -4,7 +4,14 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Project
 
-Internal tool for validating Shopify Customer CSV files before import. Upload a CSV, map columns, run 13 validation rules, store results in PostgreSQL, and download an Excel report.
+Internal tool for validating Shopify Customer CSV files before import. Upload a CSV, map columns, run 11 validation rules, store results in PostgreSQL, and download an Excel report.
+
+**What this tool is for.** One question: *will Shopify accept this file?* Everything it
+shows answers that — what Shopify took, what it rejected, and Shopify's own reason. It
+deliberately does NOT report on how the pre-check scored: no "false positive", no "rule
+gap", no over-strict/missing-rule buckets. Whether a validator is too strict is a question
+for whoever maintains the validators, not for the person running a migration, and the
+apparatus for it was removed on 2026-09-07. Do not add it back to a user-facing surface.
 
 ## Commands
 
@@ -48,7 +55,7 @@ is currently no linter configuration.
 ### Data flow
 1. Client uploads CSV → `POST /api/customer-validation/preview` (returns parsed headers for column mapping)
 2. User maps CSV columns to Shopify fields on the `ColumnMappingScreen`
-3. Client submits mapping → `POST /api/customer-validation/validate` → runs all 15 rules, persists `ValidationRun`, `ValidationIssue`, and `OriginalCustomerRow` records to Postgres
+3. Client submits mapping → `POST /api/customer-validation/validate` → runs all 11 rules, persists `ValidationRun`, `ValidationIssue`, and `OriginalCustomerRow` records to Postgres
 4. Client displays results; user can download `GET /api/customer-validation/report/:id` as Excel
 
 ### Backend (`server/src/`)
@@ -57,7 +64,7 @@ is currently no linter configuration.
 - `services/csvParser.service.ts` — CSV parsing and normalization
 - `services/columnMapping.service.ts` — applies user-supplied column mapping
 - `services/previewStore.ts` — in-memory temp store between preview and validate calls
-- `reports/excelReport.ts` — generates multi-sheet Excel (Summary, Errors, Warnings, Info, Original Rows With Issues)
+- `reports/excelReport.ts` — generates multi-sheet Excel (Errors, Full Uploaded File, Shopify Template)
 - `db/prisma.ts` — singleton Prisma client
 - `validators/customer/` — one file per rule (see below)
 
@@ -84,6 +91,10 @@ Three models: `ValidationRun` (metadata, column mapping, counts), `ValidationIss
    ```
 2. Import and add the class to the array in `server/src/validators/customer/index.ts`.
 
+The only severity is `'Error'`. Warning and Info were removed on 2026-09-07 — a rule that
+fires for something Shopify imports without complaint is noise, so if a check would not
+predict a real import rejection, do not add it.
+
 ## Sample Data
 
-`sample/shopify-customers-sample.csv` contains intentional errors covering all 13 rules — use it for manual testing.
+`sample/shopify-customers-sample.csv` contains intentional errors covering the 11 rules — use it for manual testing.

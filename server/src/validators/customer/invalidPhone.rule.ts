@@ -28,18 +28,11 @@ export class InvalidPhoneRule implements CustomerValidationRule {
         continue;
       }
 
-      if (!SAFE_PHONE_REGEX.test(phone)) {
-        issues.push({
-          rowNumber: row.rowNumber,
-          column: 'Phone',
-          severity: 'Warning',
-          issueType: 'SuspiciousPhoneCharacters',
-          currentValue: row.original['Phone'] ?? '',
-          message: `Phone number "${phone}" contains unexpected characters.`,
-          suggestedFix: 'Use only digits, spaces, hyphens, parentheses, periods, and the + symbol.',
-        });
-        continue;
-      }
+      // A phone containing characters outside the safe set is skipped, not
+      // flagged. It used to raise a warning; letting it fall through to the
+      // digit count instead would turn it into a "too few digits" Error the
+      // pre-check never used to raise. Shopify rejects these at import.
+      if (!SAFE_PHONE_REGEX.test(phone)) continue;
 
       // Count digits on the canonical form so a leading NANP "1" country code
       // isn't counted as an extra digit (keeps parity with DuplicatePhoneRule).

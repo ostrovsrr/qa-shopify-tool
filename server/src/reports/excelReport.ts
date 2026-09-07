@@ -13,17 +13,11 @@ import { AutoFixEntry, computeAutoFixes } from './autoFix';
 import { excelSafeRecord, excelSafeText } from './excelCell';
 import { buildTemplateDataset } from './templateDataset';
 
-const SEVERITY_COLOURS: Record<Severity, string> = {
-  Error: 'FFFEE2E2',
-  Warning: 'FFFEF3C7',
-  Info: 'FFE0F2FE',
-};
+const ERROR_ROW_COLOUR = 'FFFEE2E2';
 
 const HEADER_COLOURS: Record<string, string> = {
   Summary: 'FF1E3A5F',
   Errors: 'FFB91C1C',
-  Warnings: 'FFB45309',
-  Info: 'FF0369A1',
   'Full Uploaded File': 'FF065F46',
   'Shopify Template': 'FF004C3F',
 };
@@ -42,7 +36,9 @@ export async function streamExcelReport(
   const run = await prisma.validationRun.findUnique({
     where: { id: validationId },
     include: {
-      issues: { orderBy: { rowNumber: 'asc' } },
+      // Pre-existing runs still carry Warning rows; keep them out of the report
+      // so an old run's Excel matches what a new run would produce.
+      issues: { where: { severity: 'Error' }, orderBy: { rowNumber: 'asc' } },
       originalRows: { orderBy: { rowNumber: 'asc' } },
     },
   });
@@ -104,7 +100,6 @@ export async function streamExcelReport(
   workbook.created = new Date();
 
   addIssuesSheet(workbook, 'Errors', issues.filter((i) => i.severity === 'Error'));
-  addIssuesSheet(workbook, 'Warnings', issues.filter((i) => i.severity === 'Warning'));
   addFullUploadedFileSheet(workbook, originalColumns, runData.originalRows);
   addShopifyTemplateSheet(
     workbook,
@@ -133,7 +128,7 @@ function styleHeader(row: ExcelJS.Row, bgArgb: string) {
 
 function addIssuesSheet(
   workbook: ExcelJS.stream.xlsx.WorkbookWriter,
-  sheetName: 'Errors' | 'Warnings' | 'Info',
+  sheetName: 'Errors',
   issues: CustomerValidationIssue[],
 ) {
   const sheet = workbook.addWorksheet(sheetName);
@@ -141,7 +136,6 @@ function addIssuesSheet(
   sheet.columns = [
     { header: 'Row Number', key: 'rowNumber', width: 12 },
     { header: 'Column', key: 'column', width: 26 },
-    { header: 'Severity', key: 'severity', width: 12 },
     { header: 'Issue Type', key: 'issueType', width: 30 },
     { header: 'Current Value', key: 'currentValue', width: 32 },
     { header: 'Message', key: 'message', width: 55 },
@@ -149,15 +143,14 @@ function addIssuesSheet(
   ];
 
   // autoFilter is serialized when the sheet is committed, so it can be set up front.
-  sheet.autoFilter = { from: 'A1', to: 'G1' };
+  sheet.autoFilter = { from: 'A1', to: 'F1' };
   styleHeader(sheet.getRow(1), HEADER_COLOURS[sheetName]);
 
-  const colour = SEVERITY_COLOURS[sheetName === 'Errors' ? 'Error' : sheetName === 'Warnings' ? 'Warning' : 'Info'];
+  const colour = ERROR_ROW_COLOUR;
   for (const issue of issues) {
     const row = sheet.addRow(excelSafeRecord({
       rowNumber: issue.rowNumber,
       column: issue.column,
-      severity: issue.severity,
       issueType: issue.issueType,
       currentValue: issue.currentValue,
       message: issue.message,

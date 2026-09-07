@@ -6,8 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Internal QA tool for Shopify CSV migrations, with two sections served by one server, one client, and one PostgreSQL database:
 
-- **Customers** (`/customers`): validate a Customer CSV before import — upload, map columns, run the validation rules, store results, download an Excel report. Optionally import into Shopify test stores and compare validator predictions against real import results.
+- **Customers** (`/customers`): validate a Customer CSV before import — upload, map columns, run the validation rules, store results, download an Excel report. Optionally import into Shopify test stores and report what Shopify accepted and what it rejected.
 - **Products** (`/products`): QA a Shopify product template CSV by importing it into one or more test stores (in parallel) and reporting which products imported and which Shopify rejected, grouped by `(field, code)`. **No validators/precheck and no column mapping** — the product CSV is already in Shopify template format, and the import unit is a **product** (one per CSV `Handle`, spanning multiple rows for variants/images), not a row. See `docs/products/` for the original design docs.
+
+**What this tool is for.** One question: *will Shopify accept this file?* Everything it
+shows answers that — what Shopify took, what it rejected, and Shopify's own reason. It
+deliberately does NOT report on how the pre-check scored: no "false positive", no "rule
+gap", no over-strict/missing-rule buckets. Whether a validator is too strict is a question
+for whoever maintains the validators, not for the person running a migration, and the
+apparatus for it was removed on 2026-09-07. Do not add it back to a user-facing surface.
 
 ## Commands
 
@@ -47,7 +54,7 @@ The server has vitest tests (`npm run test`, `npm run test:integration`, `npm ru
 ### Data flow — Customers
 1. Client uploads CSV → `POST /api/customer-validation/preview` (returns parsed headers for column mapping)
 2. User maps CSV columns to Shopify fields on the `ColumnMappingScreen`
-3. Client submits mapping → `POST /api/customer-validation/validate` → runs all 13 rules, persists `ValidationRun`, `ValidationIssue`, and `OriginalCustomerRow` records to Postgres
+3. Client submits mapping → `POST /api/customer-validation/validate` → runs all 11 rules, persists `ValidationRun`, `ValidationIssue`, and `OriginalCustomerRow` records to Postgres
 4. Client displays results; user can download `GET /api/customer-validation/report/:id` as Excel
 5. Optional: import into Shopify test stores via `/api/customer-import/*`. The import sends the **final template dataset** (`reports/templateDataset.ts`: column mapping + merge-matching-duplicates + move-duplicates-to-Notes, same transformation as the Excel "Shopify Template" sheet — not the raw rows). The reconcile rebuilds this dataset deterministically to map bulk-result lines back to CSV rows, so the transformation must stay a pure function of (originalRows, mapping, flags).
 
@@ -63,7 +70,7 @@ The server has vitest tests (`npm run test`, `npm run test:integration`, `npm ru
 - `services/columnMapping.service.ts` — applies user-supplied column mapping
 - `services/uploadFile.ts` — multer disk storage: uploads stream to a temp file, never into the heap. Whoever consumes the file deletes it (`removeUploadFile`); `sweepOrphanUploads` catches what a crash leaves behind. Raw CSVs are merchant PII — do not add a path that keeps one.
 - `services/previewStore.ts` — bridges the preview and validate calls. Holds the temp file's **path** (not its bytes) and owns that file: deleting the entry unlinks it.
-- `reports/excelReport.ts` — generates multi-sheet Excel (Summary, Errors, Warnings, Info, Original Rows With Issues)
+- `reports/excelReport.ts` — generates multi-sheet Excel (Errors, Full Uploaded File, Shopify Template)
 - `db/prisma.ts` — singleton Prisma client
 - `validators/customer/` — one file per rule (see below)
 - `services/shopifyBulk.ts`, `services/shopifyClient.ts`, `config/shopify.ts` — shared Shopify bulk-import engine used by both the customer and product flows (client requires customer + product scopes)
@@ -95,7 +102,11 @@ One database (`shopify_csv_qa`). Customer models: `ValidationRun`, `ValidationIs
    ```
 2. Import and add the class to the array in `server/src/validators/customer/index.ts`.
 
+The only severity is `'Error'`. Warning and Info were removed on 2026-09-07 — a rule that
+fires for something Shopify imports without complaint is noise, so if a check would not
+predict a real import rejection, do not add it.
+
 ## Sample Data
 
-- `sample/shopify-customers-sample.csv` contains intentional errors covering all 13 rules — use it for manual customer-flow testing.
+- `sample/shopify-customers-sample.csv` contains intentional errors covering the 11 rules — use it for manual customer-flow testing.
 - `sample/sample_products.csv` is a Shopify product template CSV for manual product-flow testing.
