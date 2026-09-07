@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ActorBadge } from '../components/ActorBadge';
-import { NavLink } from 'react-router-dom';
+import { NavLink, useNavigate, useParams } from 'react-router-dom';
 import {
   fetchValidationResult,
   getReportDownloadUrl,
@@ -18,6 +18,12 @@ import { ColumnMapping, CsvPreview, ValidationResult } from '../types';
 type UploadPhase = 'upload' | 'mapping' | 'results';
 
 export function CustomerDashboard() {
+  // The open run is the URL, not component state: /customers/:validationId. A
+  // reload used to drop you back on the upload screen, and a run could not be
+  // linked to. The mapping step stays ephemeral — its preview is a server-side
+  // temp file that validate consumes, so there is nothing durable to link to.
+  const { validationId } = useParams<{ validationId: string }>();
+  const navigate = useNavigate();
   const [uploadPhase, setUploadPhase] = useState<UploadPhase>('upload');
   const [preview, setPreview] = useState<CsvPreview | null>(null);
   const [result, setResult] = useState<ValidationResult | null>(null);
@@ -25,6 +31,40 @@ export function CustomerDashboard() {
   const [error, setError] = useState('');
   const [historyRefresh, setHistoryRefresh] = useState(0);
   const [activeTab, setActiveTab] = useState<'upload' | 'history'>('upload');
+
+  // URL → state. Runs on first paint and on every change of the route param, so
+  // a pasted link, a reload, and back/forward all land on the same run.
+  useEffect(() => {
+    if (!validationId) {
+      setResult(null);
+      setError('');
+      setUploadPhase((phase) => (phase === 'results' ? 'upload' : phase));
+      return;
+    }
+    // Already showing it (we just validated, or navigated within the app).
+    if (result?.validationId === validationId) {
+      setUploadPhase('results');
+      return;
+    }
+
+    let active = true;
+    setLoading(true);
+    setError('');
+    fetchValidationResult(validationId)
+      .then((data) => {
+        if (!active) return;
+        setResult(data);
+        setPreview(null);
+        setUploadPhase('results');
+        setActiveTab('upload');
+      })
+      .catch(() => active && setError('Failed to load validation run.'))
+      .finally(() => active && setLoading(false));
+    return () => {
+      active = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [validationId]);
 
   const handleUpload = async (file: File) => {
     setLoading(true);
@@ -62,6 +102,7 @@ export function CustomerDashboard() {
       setResult(data);
       setUploadPhase('results');
       setHistoryRefresh((n) => n + 1);
+      navigate(`/customers/${data.validationId}`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Validation failed.';
       setError(msg);
@@ -76,21 +117,14 @@ export function CustomerDashboard() {
     setError('');
   };
 
-  const handleOpenHistoryRun = async (id: string) => {
-    setLoading(true);
+  // Switch tabs here rather than in the route effect: reopening the run that is
+  // already loaded does not change the param, so the effect would not re-run and
+  // you would be left sitting on the History tab.
+  const handleOpenHistoryRun = (id: string) => {
+    setActiveTab('upload');
     setError('');
-    try {
-      const data = await fetchValidationResult(id);
-      setResult(data);
-      setPreview(null);
-      setUploadPhase('results');
-      setActiveTab('upload');
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    } catch {
-      setError('Failed to load validation run.');
-    } finally {
-      setLoading(false);
-    }
+    navigate(`/customers/${id}`);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handleDownload = () => {
@@ -103,6 +137,7 @@ export function CustomerDashboard() {
     setPreview(null);
     setUploadPhase('upload');
     setError('');
+    if (validationId) navigate('/customers');
   };
 
   return (

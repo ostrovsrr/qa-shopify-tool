@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ActorBadge } from '../components/ActorBadge';
-import { NavLink } from 'react-router-dom';
+import { NavLink, useNavigate, useParams } from 'react-router-dom';
 import { fetchUpload, uploadProductCsv } from '../api/productApi';
 import { ProductHistory } from '../components/ProductHistory';
 import { StoreImportControls } from '../components/StoreImportControls';
@@ -11,12 +11,57 @@ import { UploadSummary } from '../types';
 type UploadPhase = 'upload' | 'review' | 'import';
 
 export function ProductDashboard() {
+  // The open upload is the URL, not component state: /products/:uploadId. A
+  // reload used to drop you back on the upload screen, and an upload could not
+  // be linked to. The review step stays ephemeral — it is a confirmation of the
+  // file you just picked, and the URL appears when you commit to importing.
+  const { uploadId } = useParams<{ uploadId: string }>();
+  const navigate = useNavigate();
   const [uploadPhase, setUploadPhase] = useState<UploadPhase>('upload');
   const [upload, setUpload] = useState<UploadSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [historyRefresh, setHistoryRefresh] = useState(0);
   const [activeTab, setActiveTab] = useState<'upload' | 'history'>('upload');
+
+  // URL → state. Runs on first paint and on every change of the route param, so
+  // a pasted link, a reload, and back/forward all land on the same upload.
+  useEffect(() => {
+    if (!uploadId) {
+      setUpload(null);
+      setError('');
+      setUploadPhase((phase) => (phase === 'import' ? 'upload' : phase));
+      return;
+    }
+    // Already showing it (we just clicked through from review).
+    if (upload?.uploadId === uploadId) {
+      setUploadPhase('import');
+      return;
+    }
+
+    let active = true;
+    setLoading(true);
+    setError('');
+    fetchUpload(uploadId)
+      .then((detail) => {
+        if (!active) return;
+        setUpload({
+          uploadId: detail.id,
+          fileName: detail.fileName,
+          productCount: detail.productCount,
+          rowCount: detail.rowCount,
+          headers: [],
+        });
+        setUploadPhase('import');
+        setActiveTab('upload');
+      })
+      .catch(() => active && setError('Failed to load upload.'))
+      .finally(() => active && setLoading(false));
+    return () => {
+      active = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uploadId]);
 
   const handleUpload = async (file: File) => {
     setLoading(true);
@@ -34,32 +79,21 @@ export function ProductDashboard() {
     }
   };
 
-  const handleOpenHistoryRun = async (id: string) => {
-    setLoading(true);
+  // Switch tabs here rather than in the route effect: reopening the upload that
+  // is already loaded does not change the param, so the effect would not re-run
+  // and you would be left sitting on the History tab.
+  const handleOpenHistoryRun = (id: string) => {
+    setActiveTab('upload');
     setError('');
-    try {
-      const detail = await fetchUpload(id);
-      setUpload({
-        uploadId: detail.id,
-        fileName: detail.fileName,
-        productCount: detail.productCount,
-        rowCount: detail.rowCount,
-        headers: [],
-      });
-      setUploadPhase('import');
-      setActiveTab('upload');
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    } catch {
-      setError('Failed to load upload.');
-    } finally {
-      setLoading(false);
-    }
+    navigate(`/products/${id}`);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handleNewUpload = () => {
     setUpload(null);
     setUploadPhase('upload');
     setError('');
+    if (uploadId) navigate('/products');
   };
 
   return (
@@ -127,7 +161,10 @@ export function ProductDashboard() {
                   <button className="btn btn-outline btn-sm" onClick={handleNewUpload}>
                     ← Choose another file
                   </button>
-                  <button className="btn btn-primary" onClick={() => setUploadPhase('import')}>
+                  <button
+                    className="btn btn-primary"
+                    onClick={() => navigate(`/products/${upload.uploadId}`)}
+                  >
                     Continue to import →
                   </button>
                 </div>

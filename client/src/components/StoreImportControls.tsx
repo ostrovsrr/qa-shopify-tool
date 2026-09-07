@@ -62,6 +62,7 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
   const [cleaningRun, setCleaningRun] = useState(false);
   const [feedback, setFeedback] = useState<ProductImportFeedback | null>(null);
   const [running, setRunning] = useState(false);
+  const [restoring, setRestoring] = useState(true);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
@@ -137,9 +138,11 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
     let active = true;
     setFeedback(null);
     setError('');
+    setRestoring(true);
     fetchLatestImportForUpload(uploadId)
       .then((f) => active && f && setFeedback(f))
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => active && setRestoring(false));
     return () => {
       active = false;
     };
@@ -484,12 +487,16 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
           <button
             className="btn btn-primary"
             onClick={confirmSelection}
-            disabled={busy || selectedStoreIds.length < 2}
+            disabled={busy || restoring || selectedStoreIds.length < 2}
           >
             Confirm selection{selectedStoreIds.length >= 2 ? ` (${selectedStoreIds.length})` : ''}
           </button>
         ) : (
-          <button className="btn btn-primary" onClick={handleRun} disabled={busy || !canImportNow}>
+          <button
+            className="btn btn-primary"
+            onClick={handleRun}
+            disabled={busy || restoring || !canImportNow}
+          >
             {busy
               ? 'Importing… (running in Shopify)'
               : importMode === 'parallel'
@@ -499,7 +506,14 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
         )}
       </div>
 
-      {stores.length > 0 && (
+      {/* Until the "has this already been imported?" probe answers, we do not
+          know which store this run belongs to — and selectedStoreIds is still
+          sitting on the DEFAULT store. Rendering the cards during that window
+          put a live Clean QA in front of a store the run may never have
+          touched. Hold the picker until we know. */}
+      {restoring && <p className="muted">Checking for an earlier import of this file&hellip;</p>}
+
+      {!restoring && stores.length > 0 && (
         <>
           {stores.length > 1 && (
             <div className="import-mode-toggle" role="tablist" aria-label="Import mode">

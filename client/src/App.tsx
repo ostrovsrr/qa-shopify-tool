@@ -7,8 +7,12 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Navigate to="/customers" replace />} />
+        {/* The open run lives in the URL, so a reload keeps it and a run can be
+            linked to. The bare paths are the upload screen. */}
         <Route path="/customers" element={<CustomerDashboard />} />
+        <Route path="/customers/:validationId" element={<CustomerDashboard />} />
         <Route path="/products" element={<ProductDashboard />} />
+        <Route path="/products/:uploadId" element={<ProductDashboard />} />
         <Route path="*" element={<Navigate to="/customers" replace />} />
       </Routes>
     </BrowserRouter>
