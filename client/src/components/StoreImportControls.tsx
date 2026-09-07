@@ -452,10 +452,16 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
               Open products ↗
             </a>
           )}
+          {/* Not disabled on a zero count. Shopify's tag-filtered count lags a
+              few seconds behind creation, so right after an import — exactly when
+              you want to clean up — the count still reads 0 and the button was
+              dead for the rest of the session. cleanStore re-reads the store to
+              find what to delete and is confirm-gated, so a no-op click is cheap;
+              a stranded user is not. */}
           <button
             className="btn btn-outline btn-sm"
             onClick={() => cleanStore(storeId)}
-            disabled={cleaning || (st != null && st.qaImportProducts === 0)}
+            disabled={cleaning}
           >
             {cleaning ? 'Cleaning…' : 'Clean QA'}
           </button>
