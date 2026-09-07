@@ -187,7 +187,17 @@ export function buildTemplateDataset(options: TemplateDatasetOptions): TemplateD
 
     if (heliosMigratedTag) {
       const existing = record['Tags'] ?? '';
-      record['Tags'] = existing ? `${existing},${HELIOS_TAG}` : HELIOS_TAG;
+      // Re-running a file that was already migrated is the normal case, so the
+      // tag is usually already in the CSV. Appending it blindly wrote
+      // "Individual,HeliosMigrated,HeliosMigrated" into the Shopify Template
+      // sheet — the file the operator hands over. Shopify tags are
+      // case-insensitive, so compare that way.
+      const alreadyTagged = existing
+        .split(',')
+        .some((t) => t.trim().toLowerCase() === HELIOS_TAG.toLowerCase());
+      if (!alreadyTagged) {
+        record['Tags'] = existing ? `${existing},${HELIOS_TAG}` : HELIOS_TAG;
+      }
     }
   }
 
