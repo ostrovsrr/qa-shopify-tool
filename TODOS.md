@@ -100,3 +100,42 @@ completed result or provide the true 0/1 base for partial data. Completed files
 that do not start at line 0 or 1, invalid line numbers, and out-of-range refs fail
 closed instead of producing a plausible-looking report for the wrong source rows.
 The former characterization test now asserts correct partial mapping.
+
+---
+
+## 4. Deferred /qa findings (2026-09-07)
+
+Four Low-severity findings from an end-to-end /qa sweep on `main`. The five
+High/Medium findings from that sweep were fixed in commits `180d253`, `28e2034`,
+`3cb923c`, `cfa4dc4`, `9e411d8`. Full report:
+`.gstack/qa-reports/qa-report-localhost-3101-2026-09-07.md`.
+
+**a. "No import yet" is a 404, so every clean results page logs console errors.**
+`GET /api/customer-import/by-validation/:id` and `/api/product-import/by-upload/:id`
+404 when nothing has been imported. The client handles it correctly, but the
+browser logs a red error anyway — twice per load under StrictMode. An empty 200
+body would be quieter. **Cons:** it is a defensible REST shape; changing it
+touches both API clients.
+
+**b. Wrong file type uses a blocking `alert()`.** Six `alert()` calls across
+`UploadArea`, `ProductUploadArea`, `ValidationHistory`, `ProductHistory`. The app
+already has an inline error style. Cosmetic, but `alert()` also blocks the whole
+tab, which matters for a tool that runs long imports.
+
+**c. Counts read impossibly for a few seconds after a cleanup.** The card can show
+`Total products: 0 · QA imports: 5` — Shopify's tag-filtered count lagging its own
+delete. Self-corrects on the next refresh and no longer blocks anything (the
+count-based disable on Clean QA was removed in `9e411d8`). Fix would be a
+re-check after a short delay.
+
+**d. Reload loses the open run, and the loading window shows the default store.**
+The opened run lives in React state, not the URL: refreshing drops you on the
+upload screen and runs are not linkable. Worse, while the import feedback is still
+loading the panel sits in single-store mode with the **default** store selected and
+a live Clean QA — the transient version of the bug fixed in `28e2034`. Observed
+once during the sweep when Shopify was slow. **Depends on:** putting the run id in
+the route, which is the real fix for both halves.
+
+**e. Mobile.** At 375×812 the header wraps to three lines and the page scrolls
+horizontally (535px wide in a 375px viewport), driven by the per-store results
+table. Internal desktop tool, so this is a scope call rather than a bug.
