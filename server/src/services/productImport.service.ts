@@ -14,6 +14,13 @@ import {
 } from './shopifyBulk';
 import { col, extractMetafields, groupByHandle } from './productCsvParser';
 import {
+  isTruthy,
+  OPTION_VALUE_COLS,
+  productOptionNames,
+  variantOptionValues,
+  variantRowIndexes,
+} from './productVariants';
+import {
   getShopifyClient,
   ShopifyAuthError,
   ShopifyConfigError,
@@ -62,10 +69,6 @@ export function qaImportTagForRun(importRunId: string): string {
 
 // ── value helpers ─────────────────────────────────────────────────────────────
 
-function isTruthy(v: string): boolean {
-  return ['true', 'yes', '1', 'y', 't'].includes(v.trim().toLowerCase());
-}
-
 // Drop undefined/empty entries so we don't send empty strings Shopify may reject.
 function compact<T extends Record<string, unknown>>(obj: T): Partial<T> {
   const out: Record<string, unknown> = {};
@@ -85,19 +88,7 @@ function lastFieldSegment(field: unknown): string | null {
 }
 
 // ── ProductSetInput building ──────────────────────────────────────────────────
-
-const OPTION_NAME_COLS = ['Option1 Name', 'Option2 Name', 'Option3 Name'];
-const OPTION_VALUE_COLS = ['Option1 Value', 'Option2 Value', 'Option3 Value'];
-
-// A row contributes a variant if it carries any variant-distinguishing data.
-// (Trailing image-only rows — only Image Src populated — are not variants.)
-function hasVariantData(row: Record<string, string>): boolean {
-  return (
-    col(row, ...OPTION_VALUE_COLS) !== '' ||
-    col(row, 'Variant SKU') !== '' ||
-    col(row, 'Variant Price') !== ''
-  );
-}
+// Option/variant row logic lives in productVariants.ts, shared with the pre-check.
 
 // The CSV's "Variant Grams" is ALWAYS grams regardless of "Variant Weight Unit"
 // (the unit column only sets the display unit), so convert grams into that unit.
@@ -138,7 +129,7 @@ function buildVariantFields(
   if (taxable !== '') fields.taxable = isTruthy(taxable);
   // Variant image: FileSetInput on the variant. Shopify matches it against the
   // product-level `files` entry with the same originalSource instead of
-  // re-uploading, so a URL repeated from Image Src is not duplicated.
+  // re-uploading; buildProductFiles guarantees that entry exists.
   const image = col(row, 'Variant Image');
   if (image !== '') fields.file = { originalSource: image, contentType: 'IMAGE' };
 
@@ -177,7 +168,13 @@ function buildVariantFields(
 // (variant rows and trailing image-only rows alike): ordered by Image Position
 // when given, de-duplicated by URL. Shopify fetches each external URL itself
 // (FileSetInput.originalSource), so no staged upload is needed for images.
-function buildProductFiles(rows: Record<string, string>[]): Record<string, unknown>[] {
+//
+// Every Variant Image URL must ALSO be a product file: productSet rejects a variant
+// `file` with no matching `files` entry ("File original source missing from the
+// product files input"). Shopify's own CSV import has no such rule — Variant Image
+// alone adds a variant image — so variant-only URLs are appended after the Image
+// Src images. Before this, 37 products in one real migration file were rejected for it.
+export function buildProductFiles(rows: Record<string, string>[]): Record<string, unknown>[] {
   const seen = new Map<string, { alt: string; position: number }>();
   for (const row of rows) {
     const src = col(row, 'Image Src');
@@ -186,11 +183,18 @@ function buildProductFiles(rows: Record<string, string>[]): Record<string, unkno
     const position = /^\d+$/.test(posRaw) ? Number(posRaw) : Number.MAX_SAFE_INTEGER;
     seen.set(src, { alt: col(row, 'Image Alt Text'), position });
   }
-  return [...seen.entries()]
+  const files = [...seen.entries()]
     .sort((a, b) => a[1].position - b[1].position) // stable → ties keep row order
     .map(([src, { alt }]) =>
       compact({ originalSource: src, alt, contentType: 'IMAGE' }),
     );
+  for (const row of rows) {
+    const src = col(row, 'Variant Image');
+    if (src === '' || seen.has(src)) continue;
+    seen.set(src, { alt: '', position: Number.MAX_SAFE_INTEGER });
+    files.push({ originalSource: src, contentType: 'IMAGE' });
+  }
+  return files;
 }
 
 /** Build one ProductSetInput from a Handle group. Product-level fields come from
@@ -206,9 +210,9 @@ export function buildProductSetInput(
 
   // Variant rows: the first row is always the product's first variant; later rows
   // are variants only if they carry variant data (skips trailing image rows).
-  const variantRows = rows.filter((row, i) => i === 0 || hasVariantData(row));
+  const variantRows = variantRowIndexes(rows).map((i) => rows[i]);
 
-  const optionNames = OPTION_NAME_COLS.map((c) => col(first, c)).filter(Boolean);
+  const optionNames = productOptionNames(first);
 
   let productOptions: Record<string, unknown>[];
   let variants: Record<string, unknown>[];
@@ -243,9 +247,9 @@ export function buildProductSetInput(
     }));
 
     variants = variantRows.map((row) => ({
-      optionValues: optionNames.map((name, i) => ({
-        optionName: name,
-        name: col(row, OPTION_VALUE_COLS[i]),
+      optionValues: variantOptionValues(row, optionNames).map((value, i) => ({
+        optionName: optionNames[i],
+        name: value,
       })),
       ...buildVariantFields(row, locationId),
     }));
