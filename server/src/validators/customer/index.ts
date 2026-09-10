@@ -10,6 +10,8 @@ import { AddressCompletenessRule } from './addressCompleteness.rule';
 import { ProvinceCodeRule } from './provinceCode.rule';
 import { TagsRule } from './tags.rule';
 import { HtmlInjectionRule } from './htmlInjection.rule';
+import { CountryCodeRule } from './countryCode.rule';
+import { FieldLengthRule } from './fieldLength.rule';
 
 export const customerValidationRules: CustomerValidationRule[] = [
   new MissingContactRule(),
@@ -23,4 +25,6 @@ export const customerValidationRules: CustomerValidationRule[] = [
   new ProvinceCodeRule(),
   new TagsRule(),
   new HtmlInjectionRule(),
+  new CountryCodeRule(),
+  new FieldLengthRule(),
 ];

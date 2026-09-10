@@ -14,6 +14,8 @@ import prisma from '../db/prisma';
 import { CsvParseError } from '../errors';
 import { applyMappingToRecord, assertValidColumnMapping } from './columnMapping.service';
 import { assertNotProductCsv, parseCsvFile } from './csvParser.service';
+import { buildTemplateDataset } from '../reports/templateDataset';
+import { normalizeRecord } from '../utils/normalize';
 import { deletePreview, getPreview } from './previewStore';
 
 function applyColumnMapping(
@@ -26,6 +28,44 @@ function applyColumnMapping(
     original: applyMappingToRecord(row.original, mapping),
     normalized: applyMappingToRecord(row.normalized, mapping),
   }));
+}
+
+/**
+ * Run every customer rule against the rows as they will be SENT: the same template
+ * dataset the import and the Excel "Shopify Template" sheet build from (mapping,
+ * same-person merge, move-duplicates-to-Notes, HeliosMigrated tag). With those
+ * options off it is the mapped file itself. With them on, a duplicate whose phone
+ * is moved to Note is no longer a rejected phone, a merged-away row is not imported
+ * at all, and a Note that grows past Shopify's limit is caught. Pure — no I/O.
+ */
+export function runCustomerValidation(
+  rawRows: CustomerCsvRow[],
+  columnMapping: Record<string, string>,
+  options: { heliosMigratedTag?: boolean; moveDuplicatesToNotes?: boolean; mergeMatchingDuplicates?: boolean } = {},
+): CustomerValidationIssue[] {
+  const dataset = buildTemplateDataset({
+    originalRows: rawRows.map((r) => ({ rowNumber: r.rowNumber, data: r.original })),
+    columnMapping,
+    heliosMigratedTag: options.heliosMigratedTag ?? false,
+    moveDuplicatesToNotes: options.moveDuplicatesToNotes ?? false,
+    mergeMatchingDuplicates: options.mergeMatchingDuplicates ?? false,
+  });
+  const sentRows: CustomerCsvRow[] = dataset.rows.map((r) => ({
+    rowNumber: r.rowNumber,
+    original: r.record,
+    normalized: normalizeRecord(r.record),
+  }));
+
+  const issues: CustomerValidationIssue[] = [];
+  for (const rule of customerValidationRules) {
+    // Append per-issue rather than spreading (push(...arr)) — the spread passes
+    // every element as a function argument and overflows the engine's argument
+    // limit ("Maximum call stack size exceeded") when a rule flags many rows.
+    for (const issue of rule.validate(sentRows)) {
+      issues.push(issue);
+    }
+  }
+  return issues;
 }
 
 export async function validateCustomerCsv(
@@ -47,15 +87,11 @@ export async function validateCustomerCsv(
   // Apply mapping only to the rows fed into validators; raw data is preserved separately
   const rows = applyColumnMapping(rawRows, columnMapping);
 
-  const allIssues: CustomerValidationIssue[] = [];
-  for (const rule of customerValidationRules) {
-    // Append per-issue rather than spreading (push(...arr)) — the spread passes
-    // every element as a function argument and overflows the engine's argument
-    // limit ("Maximum call stack size exceeded") when a rule flags many rows.
-    for (const issue of rule.validate(rows)) {
-      allIssues.push(issue);
-    }
-  }
+  const allIssues = runCustomerValidation(rawRows, columnMapping, {
+    heliosMigratedTag,
+    moveDuplicatesToNotes,
+    mergeMatchingDuplicates,
+  });
 
   const errors = allIssues.filter((i) => i.severity === 'Error').length;
 

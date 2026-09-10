@@ -1,0 +1,45 @@
+import { CustomerCsvRow, CustomerValidationIssue, CustomerValidationRule } from '../../types';
+
+// Shopify's CountryCode enum, read from the Admin API schema (2026-01) on 2026-09-10.
+// The column must hold one of these ISO alpha-2 codes; "USA", "United States" and
+// "XX" were all rejected in the 2026-09-10 probe (the value is sent as an enum, so a
+// wrong one fails the whole customer). Case does not matter: the import uppercases.
+// Note the US territories (PR, GU, VI, AS, MP) are NOT here — Shopify files them
+// as US provinces.
+const SHOPIFY_COUNTRY_CODES = new Set(
+  (
+    'AF,AX,AL,DZ,AD,AO,AI,AG,AR,AM,AW,AC,AU,AT,AZ,BS,BH,BD,BB,BY,BE,BZ,BJ,BM,BT,BO,BA,BW,' +
+    'BV,BR,IO,BN,BG,BF,BI,KH,CA,CV,BQ,KY,CF,TD,CL,CN,CX,CC,CO,KM,CG,CD,CK,CR,HR,CU,CW,CY,' +
+    'CZ,CI,DK,DJ,DM,DO,EC,EG,SV,GQ,ER,EE,SZ,ET,FK,FO,FJ,FI,FR,GF,PF,TF,GA,GM,GE,DE,GH,GI,' +
+    'GR,GL,GD,GP,GT,GG,GN,GW,GY,HT,HM,VA,HN,HK,HU,IS,IN,ID,IR,IQ,IE,IM,IL,IT,JM,JP,JE,JO,' +
+    'KZ,KE,KI,KP,XK,KW,KG,LA,LV,LB,LS,LR,LY,LI,LT,LU,MO,MG,MW,MY,MV,ML,MT,MQ,MR,MU,YT,MX,' +
+    'MD,MC,MN,ME,MS,MA,MZ,MM,NA,NR,NP,NL,AN,NC,NZ,NI,NE,NG,NU,NF,MK,NO,OM,PK,PS,PA,PG,PY,' +
+    'PE,PH,PN,PL,PT,QA,CM,RE,RO,RU,RW,BL,SH,KN,LC,MF,PM,WS,SM,ST,SA,SN,RS,SC,SL,SG,SX,SK,' +
+    'SI,SB,SO,ZA,GS,KR,SS,ES,LK,VC,SD,SR,SJ,SE,CH,SY,TW,TJ,TZ,TH,TL,TG,TK,TO,TT,TA,TN,TR,' +
+    'TM,TC,TV,UG,UA,AE,GB,US,UM,UY,UZ,VU,VE,VN,VG,WF,EH,YE,ZM,ZW,ZZ'
+  ).split(','),
+);
+
+export class CountryCodeRule implements CustomerValidationRule {
+  name = 'CountryCodeRule';
+
+  validate(rows: CustomerCsvRow[]): CustomerValidationIssue[] {
+    const issues: CustomerValidationIssue[] = [];
+
+    for (const row of rows) {
+      const value = row.normalized['Default Address Country Code'] ?? '';
+      if (!value || SHOPIFY_COUNTRY_CODES.has(value.toUpperCase())) continue;
+      issues.push({
+        rowNumber: row.rowNumber,
+        column: 'Default Address Country Code',
+        severity: 'Error',
+        issueType: 'InvalidCountryCode',
+        currentValue: row.original['Default Address Country Code'] ?? '',
+        message: `"${value}" is not a country code Shopify accepts. The column needs a two-letter ISO code, e.g. US, CA, GB.`,
+        suggestedFix: 'Replace it with the two-letter ISO code (United States → US, Canada → CA). For Puerto Rico and other US territories use US with the territory as the province.',
+      });
+    }
+
+    return issues;
+  }
+}

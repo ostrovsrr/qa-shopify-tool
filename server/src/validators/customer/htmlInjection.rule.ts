@@ -2,10 +2,11 @@ import { CustomerCsvRow, CustomerValidationIssue, CustomerValidationRule } from 
 
 const HTML_REGEX = /<[a-zA-Z\/!]/;
 
+// Note is NOT checked: Shopify imported "<p>hello</p>" as a note in the 2026-09-10
+// probe, while it rejected HTML in First Name and Company ("cannot contain HTML tags").
 const CHECKED_FIELDS = [
   'First Name',
   'Last Name',
-  'Note',
   'Default Address Address1',
   'Default Address Address2',
   'Default Address City',

@@ -10,7 +10,8 @@ import { resetDb } from './resetDb';
 const runIf = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 
 // A tiny CSV whose headers are already Shopify columns, with a known set of
-// issues: one invalid email and one duplicated email (two rows) => 3 errors.
+// issues: one invalid email and one duplicated email (two rows) => 2 errors.
+// Only the repeat is flagged: Shopify imports the first row of a duplicate group.
 const CSV = [
   'First Name,Last Name,Email,Phone',
   'John,Doe,john@example.com,4165551234',
@@ -61,15 +62,15 @@ runIf('customer-validation API (integration)', () => {
 
     expect(validate.status).toBe(200);
     expect(validate.body.totalRows).toBe(4);
-    expect(validate.body.errors).toBe(3); // 1 invalid email + 2 duplicate-email rows
-    expect(validate.body.issues).toHaveLength(3);
+    expect(validate.body.errors).toBe(2); // 1 invalid email + 1 repeated email
+    expect(validate.body.issues).toHaveLength(2);
     const validationId = validate.body.validationId;
 
     // 3. it was persisted and is fetchable with the same counts
     const fetched = await request(app).get(`/api/customer-validation/${validationId}`);
     expect(fetched.status).toBe(200);
-    expect(fetched.body.errors).toBe(3);
-    expect(fetched.body.issues).toHaveLength(3);
+    expect(fetched.body.errors).toBe(2);
+    expect(fetched.body.issues).toHaveLength(2);
 
     // 4. it shows up in history
     const history = await request(app).get('/api/customer-validation/history');
