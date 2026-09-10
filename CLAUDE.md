@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Internal QA tool for Shopify CSV migrations, with two sections served by one server, one client, and one PostgreSQL database:
 
 - **Customers** (`/customers`): validate a Customer CSV before import — upload, map columns, run the validation rules, store results, download an Excel report. Optionally import into Shopify test stores and report what Shopify accepted and what it rejected.
-- **Products** (`/products`): QA a Shopify product template CSV by importing it into one or more test stores (in parallel) and reporting which products imported and which Shopify rejected, grouped by `(field, code)`. **No validators/precheck and no column mapping** — the product CSV is already in Shopify template format, and the import unit is a **product** (one per CSV `Handle`, spanning multiple rows for variants/images), not a row. See `docs/products/` for the original design docs.
+- **Products** (`/products`): QA a Shopify product template CSV by importing it into one or more test stores (in parallel) and reporting which products imported and which Shopify rejected, grouped by `(field, code)`. **No column mapping** — the product CSV is already in Shopify template format, and the import unit is a **product** (one per CSV `Handle`, spanning multiple rows for variants/images), not a row. Since 2026-09-10 there is a **file-level pre-check** at upload (`validators/product/`: duplicate variants, blank option values, gift cards). It predicts rejections from the CSV alone and never blocks the import. Rejections that depend on the target store (a metafield with no definition there) are deliberately left to the import. See `docs/products/` for the original design docs, which predate the pre-check.
 
 **What this tool is for.** One question: *will Shopify accept this file?* Everything it
 shows answers that — what Shopify took, what it rejected, and Shopify's own reason. It
@@ -59,7 +59,7 @@ The server has vitest tests (`npm run test`, `npm run test:integration`, `npm ru
 5. Optional: import into Shopify test stores via `/api/customer-import/*`. The import sends the **final template dataset** (`reports/templateDataset.ts`: column mapping + merge-matching-duplicates + move-duplicates-to-Notes, same transformation as the Excel "Shopify Template" sheet — not the raw rows). The reconcile rebuilds this dataset deterministically to map bulk-result lines back to CSV rows, so the transformation must stay a pure function of (originalRows, mapping, flags).
 
 ### Data flow — Products
-1. Client uploads product CSV → `POST /api/product-upload` (parse + persist grouped by `Handle`; no mapping/validation)
+1. Client uploads product CSV → `POST /api/product-upload` (parse, run the pre-check, persist rows grouped by `Handle` plus `ProductValidationIssue` records; no mapping). The rules and the productSet builder share `services/productVariants.ts`, so the pre-check judges exactly what the import sends — keep it that way.
 2. Client starts an import → `POST /api/product-import/:uploadId/run` (single store) or `/run-batch` (parallel across stores), then polls `GET /api/product-import/:id` until terminal
 3. Excel report via `GET /api/product-import/:id/report`; per-store product stats and QA cleanup via `/api/shopify/stores/:storeId/product-stats` and `/cleanup-qa-products` (the unsuffixed `/stats` and `/cleanup-qa` routes are the **customer** equivalents — don't mix them up: cleanup deletes qa-tagged customers vs products respectively)
 
@@ -73,6 +73,7 @@ The server has vitest tests (`npm run test`, `npm run test:integration`, `npm ru
 - `reports/excelReport.ts` — generates multi-sheet Excel (Errors, Full Uploaded File, Shopify Template)
 - `db/prisma.ts` — singleton Prisma client
 - `validators/customer/` — one file per rule (see below)
+- `validators/product/` — product pre-check rules, same pattern (`ProductValidationRule` takes `ProductGroup[]`); add new ones to `index.ts`. Only add a rule that predicts a real import rejection from the file alone.
 - `services/shopifyBulk.ts`, `services/shopifyClient.ts`, `config/shopify.ts` — shared Shopify bulk-import engine used by both the customer and product flows (client requires customer + product scopes)
 - `services/productUpload.service.ts`, `productImport.service.ts`, `productCsvParser.ts`, `productCleanup.service.ts`, `productFeedback.service.ts`, `reports/productImportReport.ts` — products flow
 
@@ -83,7 +84,7 @@ The server has vitest tests (`npm run test`, `npm run test:integration`, `npm ru
 - Vite proxies `/api` to `http://localhost:3001` (configured in `vite.config.ts`)
 
 ### Database (Prisma / PostgreSQL)
-One database (`shopify_csv_qa`). Customer models: `ValidationRun`, `ValidationIssue`, `OriginalCustomerRow`, `ImportRun`, `ImportBatchJob`, `ImportRowResult`. Product models: `ProductUploadRun`, `ProductImportRun`, `ProductImportJob`, `ProductImportResult`, `ProductOriginalRow`.
+One database (`shopify_csv_qa`). Customer models: `ValidationRun`, `ValidationIssue`, `OriginalCustomerRow`, `ImportRun`, `ImportBatchJob`, `ImportRowResult`. Product models: `ProductUploadRun`, `ProductImportRun`, `ProductImportJob`, `ProductImportResult`, `ProductOriginalRow`, `ProductValidationIssue`.
 
 **Migration caveat:** the live DB has intentional drift (`validation_runs.crossReferenceData` exists in the DB but not in `schema.prisma`). Never run bare `prisma migrate dev` — its drift check may offer a destructive reset. Create migrations with `--create-only`, review the SQL, and apply with `prisma migrate deploy`.
 

@@ -84,6 +84,17 @@ export interface ProductGroup {
   rows: ProductCsvRow[];
 }
 
+// Product pre-check: the customer issue shape plus the Handle, since the import
+// unit is a product and one product spans several rows.
+export interface ProductValidationIssue extends CustomerValidationIssue {
+  handle: string;
+}
+
+export interface ProductValidationRule {
+  name: string;
+  validate(groups: ProductGroup[]): ProductValidationIssue[];
+}
+
 export interface ParsedProductCsv {
   rows: ProductCsvRow[];
   headers: string[];
@@ -117,6 +128,8 @@ export interface ProductHistoryItem {
   piiPurgedAt: Date | null;
   fileName: string;
   productCount: number;
+  // Pre-check errors at upload; null = uploaded before the product pre-check existed.
+  precheckErrors: number | null;
   ticketNumber: string | null;
   ticketName: string | null;
   comments: string | null;

@@ -29,12 +29,12 @@ const HEADERS = [
 // the test fails so the change gets a deliberate look before the snapshot is updated.
 const ROWS: Record<string, string>[] = [
   // valid baseline row — should produce no issues
-  { 'First Name': 'John', 'Last Name': 'Doe', Email: 'john@example.com', Phone: '5551234567', 'Accepts Email Marketing': 'TRUE', 'Tax Exempt': 'FALSE', 'Default Address Address1': '1 King St', 'Default Address City': 'Toronto', 'Default Address Province Code': 'ON', 'Default Address Country Code': 'CA', 'Default Address Zip': 'M5V 3L9', Tags: 'vip, wholesale', 'Total Spent': '199.99', 'Total Orders': '3', Note: 'Loyal customer' },
+  { 'First Name': 'John', 'Last Name': 'Doe', Email: 'john@example.com', Phone: '6135551234', 'Accepts Email Marketing': 'TRUE', 'Tax Exempt': 'FALSE', 'Default Address Address1': '1 King St', 'Default Address City': 'Toronto', 'Default Address Province Code': 'ON', 'Default Address Country Code': 'CA', 'Default Address Zip': 'M5V 3L9', Tags: 'vip, wholesale', 'Total Spent': '199.99', 'Total Orders': '3', Note: 'Loyal customer' },
   // invalid email + too-few-digit phone
   { 'First Name': 'Amy', Email: 'not-an-email', Phone: '123' },
   // duplicate email + phone with the next row
-  { 'First Name': 'Bob', Email: 'dupe@x.com', Phone: '5550001111' },
-  { 'First Name': 'Bo', Email: 'DUPE@x.com', Phone: '555-000-1111' },
+  { 'First Name': 'Bob', Email: 'dupe@x.com', Phone: '6135550111' },
+  { 'First Name': 'Bo', Email: 'DUPE@x.com', Phone: '613-555-0111' },
   // invalid marketing consent + tax exempt values
   { 'First Name': 'Cara', 'Accepts Email Marketing': 'maybe', 'Tax Exempt': 'nah' },
   // invalid CA province + postal code

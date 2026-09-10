@@ -185,8 +185,9 @@ model ValidationIssue {
 // ── Products ──
 
 // One CSV upload. The product CSV is already in Shopify template format, so there
-// is no validation/mapping step — we just persist what was uploaded, grouped by
-// Handle into products, and let the import be the truth.
+// is no mapping step — we persist what was uploaded, grouped by Handle into
+// products, plus the pre-check's findings. The import stays the truth: the
+// pre-check predicts file-level rejections, it never blocks an import.
 model ProductUploadRun {
   id              String   @id @default(uuid())
   // Display + audit ONLY. See the note above ValidationRun — the same rule applies,
@@ -199,16 +200,41 @@ model ProductUploadRun {
   productCount    Int
   // The CSV header row, in order, so the original file shape is recoverable.
   originalColumns Json?
+  // Pre-check errors found at upload (twin of ValidationRun.errors). NULL = the
+  // upload predates the product pre-check (2026-09-10) and was never checked.
+  precheckErrors  Int?
   ticketNumber    String?
   ticketName      String?
   comments        String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
-  originalRows ProductOriginalRow[]
-  importRuns   ProductImportRun[]
+  originalRows     ProductOriginalRow[]
+  importRuns       ProductImportRun[]
+  validationIssues ProductValidationIssue[]
 
   @@map("product_upload_runs")
+}
+
+// One pre-check finding (twin of ValidationIssue). `handle` names the product,
+// since the import unit is a product and one product spans several rows.
+model ProductValidationIssue {
+  id           String   @id @default(uuid())
+  uploadRunId  String
+  rowNumber    Int
+  handle       String
+  columnName   String
+  severity     String
+  issueType    String
+  currentValue String?
+  message      String
+  suggestedFix String?
+  createdAt    DateTime @default(now())
+
+  uploadRun ProductUploadRun @relation(fields: [uploadRunId], references: [id], onDelete: Cascade)
+
+  @@index([uploadRunId])
+  @@map("product_validation_issues")
 }
 
 // One import attempt of an upload into Shopify. For a single-store run this owns

@@ -2,12 +2,14 @@ import { v4 as uuidv4 } from 'uuid';
 import prisma from '../db/prisma';
 import { CsvParseError } from '../errors';
 import { parseProductCsvFile } from './productCsvParser';
-import { ProductHistoryItem, UpdateUploadMetadata } from '../types';
+import { ProductHistoryItem, ProductValidationIssue, UpdateUploadMetadata } from '../types';
 import { clampHistoryLimit, HistoryQuery } from './customerValidation.service';
+import { runProductValidation } from '../validators/product';
 
-// Thin upload: parse the product CSV, group by Handle for the product count, and
-// persist the run + its raw rows. No validation, no column mapping — the CSV is
-// already in Shopify template format and the import is the truth.
+// Upload: parse the product CSV, group by Handle, run the file-level pre-check
+// (validators/product), and persist the run, its raw rows and its findings. No
+// column mapping — the CSV is already in Shopify template format. The pre-check
+// predicts rejections; it never blocks the import, which stays the truth.
 
 export interface UploadSummary {
   uploadId: string;
@@ -15,6 +17,33 @@ export interface UploadSummary {
   productCount: number;
   rowCount: number;
   headers: string[];
+  precheckErrors: number;
+  issues: ProductValidationIssue[];
+}
+
+type StoredIssue = {
+  rowNumber: number;
+  handle: string;
+  columnName: string;
+  severity: string;
+  issueType: string;
+  currentValue: string | null;
+  message: string;
+  suggestedFix: string | null;
+};
+
+// DB row → API shape (the same `column` naming the customer issues use).
+function toApiIssue(i: StoredIssue): ProductValidationIssue {
+  return {
+    rowNumber: i.rowNumber,
+    handle: i.handle,
+    column: i.columnName,
+    severity: 'Error',
+    issueType: i.issueType,
+    currentValue: i.currentValue ?? '',
+    message: i.message,
+    suggestedFix: i.suggestedFix ?? '',
+  };
 }
 
 export async function createProductUpload(
@@ -34,6 +63,7 @@ export async function createProductUpload(
     throw new CsvParseError('No products were found. At least one row must have a non-empty Handle.');
   }
   const uploadId = uuidv4();
+  const issues = runProductValidation(parsed.groups);
 
   // Chunk the row insert so one createMany doesn't serialize the whole CSV
   // into a single query on large files (same pattern as the customer side).
@@ -47,6 +77,7 @@ export async function createProductUpload(
           fileName,
           productCount: parsed.groups.length,
           originalColumns: parsed.headers,
+          precheckErrors: issues.length,
         },
       });
 
@@ -57,6 +88,23 @@ export async function createProductUpload(
             uploadRunId: uploadId,
             rowNumber: r.rowNumber,
             data: r.original,
+          })),
+        });
+      }
+
+      for (let i = 0; i < issues.length; i += CHUNK) {
+        await tx.productValidationIssue.createMany({
+          data: issues.slice(i, i + CHUNK).map((issue) => ({
+            id: uuidv4(),
+            uploadRunId: uploadId,
+            rowNumber: issue.rowNumber,
+            handle: issue.handle,
+            columnName: issue.column,
+            severity: issue.severity,
+            issueType: issue.issueType,
+            currentValue: issue.currentValue,
+            message: issue.message,
+            suggestedFix: issue.suggestedFix,
           })),
         });
       }
@@ -71,6 +119,8 @@ export async function createProductUpload(
     productCount: parsed.groups.length,
     rowCount: parsed.rows.length,
     headers: parsed.headers,
+    precheckErrors: issues.length,
+    issues,
   };
 }
 
@@ -79,6 +129,9 @@ export interface UploadDetail {
   fileName: string;
   productCount: number;
   rowCount: number;
+  // null = uploaded before the product pre-check existed (never checked).
+  precheckErrors: number | null;
+  issues: ProductValidationIssue[];
   ticketNumber: string | null;
   ticketName: string | null;
   comments: string | null;
@@ -89,7 +142,10 @@ export interface UploadDetail {
 export async function getUploadRun(uploadId: string): Promise<UploadDetail | null> {
   const upload = await prisma.productUploadRun.findUnique({
     where: { id: uploadId },
-    include: { _count: { select: { originalRows: true } } },
+    include: {
+      _count: { select: { originalRows: true } },
+      validationIssues: { orderBy: [{ rowNumber: 'asc' }, { issueType: 'asc' }] },
+    },
   });
   if (!upload) return null;
   return {
@@ -97,6 +153,8 @@ export async function getUploadRun(uploadId: string): Promise<UploadDetail | nul
     fileName: upload.fileName,
     productCount: upload.productCount,
     rowCount: upload._count.originalRows,
+    precheckErrors: upload.precheckErrors,
+    issues: upload.validationIssues.map(toApiIssue),
     ticketNumber: upload.ticketNumber,
     ticketName: upload.ticketName,
     comments: upload.comments,
@@ -137,6 +195,7 @@ export async function getUploadHistory(
       piiPurgedAt: true,
       fileName: true,
       productCount: true,
+      precheckErrors: true,
       ticketNumber: true,
       ticketName: true,
       comments: true,
@@ -166,6 +225,7 @@ export async function updateUploadMetadata(
       piiPurgedAt: true,
       fileName: true,
       productCount: true,
+      precheckErrors: true,
       ticketNumber: true,
       ticketName: true,
       comments: true,
