@@ -6,9 +6,37 @@ import { makeRows } from '../helpers';
 describe('InvalidPhoneRule', () => {
   const rule = new InvalidPhoneRule();
 
-  it('accepts well-formed 10–15 digit numbers', () => {
-    for (const ok of ['5551234567', '+1 (555) 123-4567', '555.123.4567']) {
+  // All fixtures are synthetic. The shapes are real — each mirrors a number Shopify
+  // accepted or rejected in a test-store import — but the digits are not a customer's.
+  it('accepts real numbers in the formats Shopify takes', () => {
+    for (const ok of ['6135551212', '+1 (613) 555-1212', '613.555.1212', '17085550123', '+33 6 12 34 56 78', '+221 77 123 45 67']) {
       expect(rule.validate(makeRows([{ Phone: ok }])), `expected "${ok}" to pass`).toHaveLength(0);
+    }
+  });
+
+  // Shopify imported apostrophe-prefixed numbers of both shapes as written.
+  it("ignores Excel's leading apostrophe text marker", () => {
+    expect(rule.validate(makeRows([{ Phone: "'17085550123" }, { Phone: "'+33 6 12 34 56 78" }]))).toHaveLength(0);
+    expect(rule.validate(makeRows([{ Phone: "'771234567" }]))).toHaveLength(1);
+  });
+
+  // Each shape is one Shopify rejected with "Phone is invalid" in a real test-store
+  // import, and every one had the right digit count for the old rule.
+  it('errors on numbers Shopify rejected despite a plausible digit count', () => {
+    const rejected = [
+      '9872345678', // area code 987 not in service
+      '7102345678', // 710 is reserved
+      '6171550143', // exchange starts with 1
+      '8080550143', // exchange starts with 0
+      '15551234567', // 555 is not an area code
+      '1-555-765-43-21',
+      '59055501437', // 11 digits not starting with 1: an international number missing its +
+      '221771234567', // Senegal number missing its +
+    ];
+    for (const bad of rejected) {
+      const issues = rule.validate(makeRows([{ Phone: bad }]));
+      expect(issues, `expected "${bad}" to be flagged`).toHaveLength(1);
+      expect(issues[0].issueType).toBe('InvalidPhone');
     }
   });
 
@@ -19,11 +47,13 @@ describe('InvalidPhoneRule', () => {
     expect(issues[0].message).toContain('scientific notation');
   });
 
-  // Used to be a warning. Letting it fall through to the digit count instead
-  // would raise a "too few digits" Error the pre-check never used to raise, so
-  // it is skipped entirely and Shopify rejects it at import.
-  it('stays quiet on unexpected characters', () => {
-    expect(rule.validate(makeRows([{ Phone: '555-CALL-NOW' }]))).toHaveLength(0);
+  // Shopify rejected "welcome15" at import; the old rule skipped anything with letters.
+  it('errors on values that are not phone numbers', () => {
+    for (const bad of ['welcome15', '555-CALL-NOW']) {
+      const issues = rule.validate(makeRows([{ Phone: bad }]));
+      expect(issues, `expected "${bad}" to be flagged`).toHaveLength(1);
+      expect(issues[0].message).toContain('not a phone number');
+    }
   });
 
   it('errors when there are too few or too many digits', () => {
