@@ -54,7 +54,7 @@ The server has vitest tests (`npm run test`, `npm run test:integration`, `npm ru
 ### Data flow — Customers
 1. Client uploads CSV → `POST /api/customer-validation/preview` (returns parsed headers for column mapping)
 2. User maps CSV columns to Shopify fields on the `ColumnMappingScreen`
-3. Client submits mapping → `POST /api/customer-validation/validate` → runs all 11 rules, persists `ValidationRun`, `ValidationIssue`, and `OriginalCustomerRow` records to Postgres
+3. Client submits mapping → `POST /api/customer-validation/validate` → runs all 13 rules, persists `ValidationRun`, `ValidationIssue`, and `OriginalCustomerRow` records to Postgres. The rules run on the **template dataset** (`runCustomerValidation`), i.e. the rows as the import sends them after merge / move-duplicates-to-Notes / HeliosMigrated tag — not on the raw file. Every rule's behaviour is pinned to a real test-store verdict; see the rule file comments before changing one.
 4. Client displays results; user can download `GET /api/customer-validation/report/:id` as Excel
 5. Optional: import into Shopify test stores via `/api/customer-import/*`. The import sends the **final template dataset** (`reports/templateDataset.ts`: column mapping + merge-matching-duplicates + move-duplicates-to-Notes, same transformation as the Excel "Shopify Template" sheet — not the raw rows). The reconcile rebuilds this dataset deterministically to map bulk-result lines back to CSV rows, so the transformation must stay a pure function of (originalRows, mapping, flags).
 
@@ -109,5 +109,5 @@ predict a real import rejection, do not add it.
 
 ## Sample Data
 
-- `sample/shopify-customers-sample.csv` contains intentional errors covering the 11 rules — use it for manual customer-flow testing.
+- `sample/shopify-customers-sample.csv` contains intentional errors covering the original 11 rules (not CountryCode/FieldLength) — use it for manual customer-flow testing.
 - `sample/sample_products.csv` is a Shopify product template CSV for manual product-flow testing.
