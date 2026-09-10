@@ -38,8 +38,17 @@ describe('InvalidEmailRule', () => {
   });
 
   it('accepts valid emails', () => {
-    for (const ok of ['user@example.com', 'a.b+tag@sub.example.co.uk']) {
+    // An & in the local part: Shopify imported one; the old regex flagged it.
+    for (const ok of ['user@example.com', 'a.b+tag@sub.example.co.uk', 'shop&co@example.org']) {
       expect(rule.validate(makeRows([{ Email: ok }])), `expected "${ok}" to pass`).toHaveLength(0);
+    }
+  });
+
+  // Synthetic stand-ins for the malformed shapes the pre-check flagged in stored
+  // runs: a bad TLD, a missing @, a non-email value, and a domain with no TLD.
+  it('still flags the stored malformed email shapes', () => {
+    for (const bad of ['someone@example.net.n7', 'someoneghotmail.com', 'they/them', 'someone@yahoo', 'someone@gmail']) {
+      expect(rule.validate(makeRows([{ Email: bad }])), `expected "${bad}" to be flagged`).toHaveLength(1);
     }
   });
 
