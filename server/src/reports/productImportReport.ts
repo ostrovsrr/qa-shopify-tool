@@ -6,8 +6,9 @@ import { purgedMessage } from '../services/retention.service';
 import { excelSafeRecord, excelSafeText } from './excelCell';
 import { hintFor } from '../services/productFeedback.service';
 
-// Product import report (no validator columns; results keyed by Handle):
+// Product import report (results keyed by Handle):
 //   • Products With Shopify Result — one row per product, in CSV order
+//   • Pre-check Errors — what the upload pre-check predicted (validators/product)
 //   • Full Uploaded File — the raw CSV rows, each carrying its product's
 //     verdict (Result / Shopify Code / Shopify Message)
 //
@@ -22,6 +23,7 @@ const BATCH = 5000;
 const HEADER_COLOURS = {
   Summary: 'FF1E3A5F',
   Products: 'FF065F46',
+  Precheck: 'FFB91C1C', // the customer report's Errors colour — same meaning
   Uploaded: 'FF004C3F',
 };
 
@@ -125,6 +127,7 @@ export async function streamProductImportReport(
   workbook.created = new Date();
 
   addProductsSheet(workbook, orderedHandles, resultByHandle, titleByHandle, shopLabel);
+  await addPrecheckSheet(workbook, run.uploadId, run.uploadRun.precheckErrors);
   await addFullUploadedFileSheet(workbook, originalColumns, run.uploadId, resultByHandle);
 
   await workbook.commit();
@@ -197,6 +200,48 @@ function addProductsSheet(
     row.commit();
   }
 
+  sheet.commit();
+}
+
+// Twin of the customer report's Errors sheet. Deliberately no Shopify-verdict
+// column: the report says what the file will do, it does not score the pre-check.
+async function addPrecheckSheet(
+  workbook: ExcelJS.stream.xlsx.WorkbookWriter,
+  uploadRunId: string,
+  precheckErrors: number | null,
+): Promise<void> {
+  const sheet = workbook.addWorksheet('Pre-check Errors');
+  if (precheckErrors === null) {
+    sheet.addRow(['This upload predates the product pre-check, so it was never checked.']).commit();
+    sheet.commit();
+    return;
+  }
+
+  const columns = ['Row Number', 'Handle', 'Column', 'Issue Type', 'Current Value', 'Message', 'Suggested Fix'];
+  sheet.columns = columns.map((col) => ({
+    header: col,
+    key: col,
+    width: col === 'Message' || col === 'Suggested Fix' ? 60 : col === 'Row Number' ? 12 : 26,
+  }));
+  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(columns.length)}1` };
+  styleHeader(sheet.getRow(1), HEADER_COLOURS.Precheck);
+
+  const issues = await prisma.productValidationIssue.findMany({
+    where: { uploadRunId },
+    orderBy: [{ rowNumber: 'asc' }, { issueType: 'asc' }],
+  });
+  if (issues.length === 0) sheet.addRow(['No pre-check errors.']).commit();
+  for (const issue of issues) {
+    sheet.addRow(excelSafeRecord({
+      'Row Number': issue.rowNumber,
+      Handle: issue.handle,
+      Column: issue.columnName,
+      'Issue Type': issue.issueType,
+      'Current Value': issue.currentValue ?? '',
+      Message: issue.message,
+      'Suggested Fix': issue.suggestedFix ?? '',
+    })).commit();
+  }
   sheet.commit();
 }
 

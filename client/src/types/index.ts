@@ -148,12 +148,20 @@ export interface ImportFeedback {
 // shared with the customer flow above.
 
 // Result of uploading a product CSV (parse + persist; no mapping/validate).
+// A product pre-check finding: the customer issue shape plus the product's Handle.
+export interface ProductValidationIssue extends ValidationIssue {
+  handle: string;
+}
+
 export interface UploadSummary {
   uploadId: string;
   fileName: string;
   productCount: number;
   rowCount: number;
   headers: string[];
+  // null = uploaded before the product pre-check existed (never checked).
+  precheckErrors: number | null;
+  issues: ProductValidationIssue[];
 }
 
 export interface UploadDetail {
@@ -161,6 +169,8 @@ export interface UploadDetail {
   fileName: string;
   productCount: number;
   rowCount: number;
+  precheckErrors: number | null;
+  issues: ProductValidationIssue[];
   ticketNumber: string | null;
   ticketName: string | null;
   comments: string | null;
@@ -182,6 +192,8 @@ export interface ProductHistoryItem {
   piiPurgedAt: string | null;
   fileName: string;
   productCount: number;
+  // Pre-check errors at upload; null = uploaded before the product pre-check existed.
+  precheckErrors: number | null;
   ticketNumber: string | null;
   ticketName: string | null;
   comments: string | null;

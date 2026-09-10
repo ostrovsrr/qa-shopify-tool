@@ -282,6 +282,12 @@ export function ProductHistory({ onOpen, refreshTrigger }: Props) {
 
               <div className="history-item-badges">
                 <span className="badge badge-neutral">{item.productCount} products</span>
+                {/* Twin of ValidationHistory's errors/Clean badges. null = uploaded
+                    before the product pre-check existed: no badge, not "Clean". */}
+                {item.precheckErrors !== null && item.precheckErrors > 0 && (
+                  <span className="badge badge-error">{item.precheckErrors} errors</span>
+                )}
+                {item.precheckErrors === 0 && <span className="badge badge-success">Clean</span>}
                 <ImportBadge lastImport={item.lastImport} />
               </div>
 

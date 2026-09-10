@@ -19,7 +19,7 @@ const updateMetadataSchema = z.object({
   comments: z.string().max(2000).nullable().optional(),
 });
 
-// POST /api/product-upload — parse + persist a product CSV (no mapping/validate).
+// POST /api/product-upload — parse, pre-check and persist a product CSV (no mapping).
 export async function uploadHandler(
   req: Request,
   res: Response,

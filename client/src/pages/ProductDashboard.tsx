@@ -5,10 +5,27 @@ import { fetchUpload, uploadProductCsv } from '../api/productApi';
 import { ProductHistory } from '../components/ProductHistory';
 import { StoreImportControls } from '../components/StoreImportControls';
 import { ProductUploadArea } from '../components/ProductUploadArea';
+import { IssuesTable } from '../components/IssuesTable';
 import { UploadSummary } from '../types';
 
-// upload → review (file + product count, no mapping) → import.
+// upload → review (file, product count, pre-check; no mapping) → import.
 type UploadPhase = 'upload' | 'review' | 'import';
+
+// The pre-check never blocks an import; it says which products Shopify will reject.
+function PrecheckNotice({ upload }: { upload: UploadSummary }) {
+  if (upload.precheckErrors === null) {
+    return <p className="muted">Uploaded before the product pre-check existed, so it was not checked.</p>;
+  }
+  if (upload.precheckErrors === 0) return null;
+  const products = new Set(upload.issues.map((i) => i.handle)).size;
+  return (
+    <div className="warning-banner">
+      The pre-check found <strong>{upload.precheckErrors}</strong> error{upload.precheckErrors === 1 ? '' : 's'} in{' '}
+      <strong>{products}</strong> product{products === 1 ? '' : 's'}. Shopify will reject{' '}
+      {products === 1 ? 'that product' : 'those products'}. You can still import to confirm.
+    </div>
+  );
+}
 
 export function ProductDashboard() {
   // The open upload is the URL, not component state: /products/:uploadId. A
@@ -51,6 +68,8 @@ export function ProductDashboard() {
           productCount: detail.productCount,
           rowCount: detail.rowCount,
           headers: [],
+          precheckErrors: detail.precheckErrors,
+          issues: detail.issues,
         });
         setUploadPhase('import');
         setActiveTab('upload');
@@ -156,7 +175,13 @@ export function ProductDashboard() {
                     <span className="card-label">CSV rows</span>
                     <span className="card-value">{upload.rowCount}</span>
                   </div>
+                  <div className={`card ${upload.precheckErrors ? 'card-error' : 'card-neutral'}`}>
+                    <span className="card-label">Pre-check errors</span>
+                    <span className="card-value">{upload.precheckErrors ?? '—'}</span>
+                  </div>
                 </div>
+                <PrecheckNotice upload={upload} />
+                {upload.issues.length > 0 && <IssuesTable issues={upload.issues} />}
                 <div className="results-toolbar">
                   <button className="btn btn-outline btn-sm" onClick={handleNewUpload}>
                     ← Choose another file
@@ -181,6 +206,8 @@ export function ProductDashboard() {
                     {upload.fileName} · <strong>{upload.productCount}</strong> products
                   </span>
                 </div>
+                <PrecheckNotice upload={upload} />
+                {upload.issues.length > 0 && <IssuesTable issues={upload.issues} />}
                 <StoreImportControls uploadId={upload.uploadId} productCount={upload.productCount} />
               </>
             )}
