@@ -40,6 +40,13 @@ describe('InvalidPhoneRule', () => {
     }
   });
 
+  // The probe: "+1 403-555-0123 ext 12" was rejected; libphonenumber alone calls it valid.
+  it('errors on a number with an extension', () => {
+    const issues = rule.validate(makeRows([{ Phone: '+1 403-555-0123 ext 12' }]));
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('extension');
+  });
+
   it('errors on Excel scientific notation', () => {
     const issues = rule.validate(makeRows([{ Phone: '1.23456E+11' }]));
     expect(issues).toHaveLength(1);
@@ -69,11 +76,13 @@ describe('InvalidPhoneRule', () => {
 describe('DuplicatePhoneRule', () => {
   const rule = new DuplicatePhoneRule();
 
-  it('flags duplicates after stripping non-digits', () => {
+  // Shopify keeps one customer per phone (the probe accepted the first row and
+  // rejected the repeat as "already been taken"), so only repeats are flagged.
+  it('flags the repeat after stripping non-digits, not the first row', () => {
     const issues = rule.validate(
       makeRows([{ Phone: '(555) 123-4567' }, { Phone: '5551234567' }, { Phone: '5559999999' }]),
     );
-    expect(issues).toHaveLength(2);
+    expect(issues.map((i) => i.rowNumber)).toEqual([3]);
     expect(issues.every((i) => i.issueType === 'DuplicatePhone')).toBe(true);
   });
 
@@ -85,8 +94,8 @@ describe('DuplicatePhoneRule', () => {
     const issues = rule.validate(
       makeRows([{ Phone: '+12898851714' }, { Phone: '2898851714' }, { Phone: '+1 (289) 885-1714' }]),
     );
-    // all three canonicalize to 2898851714 → every row is a duplicate
-    expect(issues).toHaveLength(3);
+    // all three canonicalize to 2898851714 → the second and third repeat the first
+    expect(issues.map((i) => i.rowNumber)).toEqual([3, 4]);
     expect(issues.every((i) => i.issueType === 'DuplicatePhone')).toBe(true);
   });
 

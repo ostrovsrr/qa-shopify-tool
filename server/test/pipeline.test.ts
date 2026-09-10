@@ -69,8 +69,8 @@ describe('full validation pipeline (golden)', () => {
 
     expect(countByType(issues)).toMatchInlineSnapshot(`
       {
-        "DuplicateEmail": 2,
-        "DuplicatePhone": 2,
+        "DuplicateEmail": 1,
+        "DuplicatePhone": 1,
         "HtmlInjection": 1,
         "InvalidEmail": 1,
         "InvalidMarketingConsent": 1,

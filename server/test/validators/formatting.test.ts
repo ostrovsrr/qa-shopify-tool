@@ -34,11 +34,19 @@ describe('TagsRule', () => {
 describe('HtmlInjectionRule', () => {
   const rule = new HtmlInjectionRule();
 
+  // The 2026-09-10 probe: HTML in First Name and Company was rejected ("cannot contain
+  // HTML tags"); HTML in Note was imported.
   it('errors on HTML tags in checked fields', () => {
-    const issues = rule.validate(makeRows([{ Note: 'Hello <script>alert(1)</script>' }]));
-    expect(issues).toHaveLength(1);
-    expect(issues[0].severity).toBe('Error');
-    expect(issues[0].issueType).toBe('HtmlInjection');
+    for (const field of ['First Name', 'Default Address Company']) {
+      const issues = rule.validate(makeRows([{ [field]: '<b>Bo</b>' }]));
+      expect(issues, field).toHaveLength(1);
+      expect(issues[0].severity).toBe('Error');
+      expect(issues[0].issueType).toBe('HtmlInjection');
+    }
+  });
+
+  it('does not check Note, which Shopify imports with HTML', () => {
+    expect(rule.validate(makeRows([{ Note: 'Hello <p>there</p>' }]))).toHaveLength(0);
   });
 
   it('leaves plain text alone', () => {

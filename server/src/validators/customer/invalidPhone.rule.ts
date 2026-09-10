@@ -1,4 +1,8 @@
-import { isValidPhoneNumber, validatePhoneNumberLength } from 'libphonenumber-js/max';
+import {
+  isValidPhoneNumber,
+  parsePhoneNumberFromString,
+  validatePhoneNumberLength,
+} from 'libphonenumber-js/max';
 import { CustomerCsvRow, CustomerValidationIssue, CustomerValidationRule } from '../../types';
 
 // Matches Excel scientific notation for large numbers, e.g. 1.23456E+11
@@ -47,6 +51,16 @@ export class InvalidPhoneRule implements CustomerValidationRule {
       // (an apostrophe-prefixed 11-digit NANP number imported fine), so it must not
       // decide the verdict here.
       const candidate = phone.replace(/^'+/, '');
+
+      // libphonenumber accepts "613-555-0104 ext 12" as a valid number with an
+      // extension; Shopify rejected exactly that in the 2026-09-10 probe.
+      if (parsePhoneNumberFromString(candidate, DEFAULT_COUNTRY)?.ext) {
+        issue(
+          `Phone number "${phone}" includes an extension. Shopify rejects phone numbers with extensions.`,
+          'Remove the extension (keep it in the Note if it matters), or leave the field blank.',
+        );
+        continue;
+      }
       if (isValidPhoneNumber(candidate, DEFAULT_COUNTRY)) continue;
 
       switch (validatePhoneNumberLength(candidate, DEFAULT_COUNTRY)) {
