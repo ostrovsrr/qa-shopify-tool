@@ -46,7 +46,8 @@ const runBatchSchema = z.object({
 const cleanupImportSchema = z.object({ storeId: z.string().min(1).optional() });
 
 // POST /api/product-import/:uploadId/run — single-store import. Concurrency is
-// bounded by Shopify (one bulk op per shop) and surfaced as a 409.
+// bounded by the store busy-lock (one operation per store — Shopify itself admits
+// up to five bulk mutations per shop from API 2026-01) and surfaced as a 409.
 export async function runImportHandler(
   req: Request,
   res: Response,

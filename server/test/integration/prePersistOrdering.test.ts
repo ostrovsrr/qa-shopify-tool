@@ -86,6 +86,9 @@ runIf('pre-persist ordering — the row lands before the bulk op is submitted', 
     expect(runs[0].status).toBe('FAILED');
     expect(runs[0].bulkOperationId).toBeNull();
     expect(runs[0].error).toContain('staged upload exploded');
+    // The staged upload creates nothing in the store, so it is not a submit attempt.
+    // Marking intent any earlier would turn provably-safe relaunches into failures.
+    expect(runs[0].submitAttemptedAt).toBeNull();
   });
 
   it('customers: the run row exists in FAILED state even though the submit blew up', async () => {
@@ -117,5 +120,6 @@ runIf('pre-persist ordering — the row lands before the bulk op is submitted', 
     expect(runs[0].status).toBe('FAILED');
     expect(runs[0].bulkOperationId).toBeNull();
     expect(runs[0].error).toContain('staged upload exploded');
+    expect(runs[0].submitAttemptedAt).toBeNull();
   });
 });

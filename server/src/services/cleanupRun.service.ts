@@ -20,10 +20,10 @@ import {
 import { customerCleanupAdapter } from './shopifyCleanup.service';
 import { productCleanupAdapter } from './productCleanup.service';
 import {
-  adoptRow,
   claimRow,
   failRow,
   findResumableRows,
+  markSubmitAttempt,
   ResumableStore,
 } from './importResume.service';
 
@@ -111,10 +111,11 @@ export async function startCleanupRun(
   //    This is the route the lock was really built for. An import to this store may
   //    be in flight right now, and cleanup deletes BY TAG across the WHOLE store —
   //    it would delete the very records that import is about to reconcile against,
-  //    and the run would then report nonsense. Shopify's one-bulk-op-per-shop limit
-  //    does NOT cover us here: the small-teardown path below deletes serially, not
-  //    as a bulk operation, so Shopify sees nothing to reject. This lock is the only
-  //    thing in the way.
+  //    and the run would then report nonsense. Shopify's per-shop bulk-op limit
+  //    does NOT cover us here: from API 2026-01 it admits up to five concurrent bulk
+  //    mutations per shop anyway, and the small-teardown path below deletes serially,
+  //    not as a bulk operation, so Shopify sees nothing to reject. This lock is the
+  //    only thing in the way.
   //
   //    Listing the ids first and locking second would leave the list to go stale
   //    under a concurrent import, so the lock comes first and the id list is taken
@@ -196,7 +197,9 @@ export async function startCleanupRun(
 
     // The bulk path outlives this request; the lock is held until the poll that
     // reconciles it to terminal (reconcileCleanupRun) hands it back.
-    const bulkOpId = await submitBulkDelete(client, ids, adapter.deleteSpec);
+    const bulkOpId = await submitBulkDelete(client, ids, adapter.deleteSpec, () =>
+      markSubmitAttempt(prisma.cleanupRun as never, runId),
+    );
     return await prisma.cleanupRun.update({
       where: { id: runId },
       data: { status: 'RUNNING', bulkOperationId: bulkOpId },
@@ -370,7 +373,9 @@ async function relaunchCleanupRun(id: string): Promise<void> {
   }
 
   const client = await getShopifyClient(run.storeId ?? undefined);
-  const bulkOpId = await submitBulkDelete(client, ids, adapter.deleteSpec);
+  const bulkOpId = await submitBulkDelete(client, ids, adapter.deleteSpec, () =>
+    markSubmitAttempt(prisma.cleanupRun as never, id),
+  );
   await prisma.cleanupRun.updateMany({
     where: { id, status: 'PENDING' },
     data: { status: 'RUNNING', bulkOperationId: bulkOpId },
@@ -379,10 +384,11 @@ async function relaunchCleanupRun(id: string): Promise<void> {
 
 /**
  * A cleanup interrupted between "row written" and "delete submitted" is resumed
- * like any other PENDING row: adopt the operation if it actually reached Shopify,
- * re-submit if it did not. Deleting twice is harmless (the records are already
- * gone), but adopting is still right — it recovers the real deleted/failed counts
- * instead of reporting zero.
+ * like any other PENDING row: re-submitted if it provably never called Shopify,
+ * failed if the submit's outcome is unknown. Deleting twice would be harmless here,
+ * but the shop cannot tell us which bulk op is ours, so resume cannot recover the
+ * real deleted/failed counts either — a FAILED run that says "check and re-run" is
+ * honest, where a guessed op could report another operation's counts.
  */
 export function cleanupResumableStores(): ResumableStore[] {
   return [
@@ -390,7 +396,6 @@ export function cleanupResumableStores(): ResumableStore[] {
       label: 'cleanup',
       findResumable: (staleBefore) => findResumableRows(prisma.cleanupRun as never, staleBefore),
       claim: (id, staleBefore) => claimRow(prisma.cleanupRun as never, id, staleBefore),
-      adopt: (id, bulkOperationId) => adoptRow(prisma.cleanupRun as never, id, bulkOperationId),
       relaunch: relaunchCleanupRun,
       fail: (id, error) => failRow(prisma.cleanupRun as never, id, error),
       lockOwner: (row) => ({

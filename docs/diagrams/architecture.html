@@ -453,7 +453,7 @@
         <div class="subgrid" style="margin-top:10px">
           <div class="node shared" style="background:var(--surface)"><h4>shopifyBulk</h4><p>Bulk protocol + terminal-status constants.</p></div>
           <div class="node shared" style="background:var(--surface)"><h4>shopifyClient</h4><p>GraphQL client, throttle, typed auth/api errors.</p></div>
-          <div class="node shared" style="background:var(--surface)"><h4>storeLock</h4><p>One lock per <em>store</em> — Shopify allows one bulk op per shop.</p></div>
+          <div class="node shared" style="background:var(--surface)"><h4>storeLock</h4><p>One lock per <em>store</em> — Shopify admits up to five bulk ops per shop (API 2026-01+), so the lock is what keeps them apart.</p></div>
           <div class="node shared" style="background:var(--surface)"><h4>shopifyCleanup · cleanupRun</h4><p>Async delete-by-tag, advanced per poll.</p></div>
         </div>
         <div class="files" style="margin-top:10px">
@@ -546,7 +546,7 @@
     </div>
     <div class="dcard">
       <h3><span class="mk">boot</span> Resume &amp; sweep on start</h3>
-      <p>On boot, <code>resumePendingImports</code> adopts or relaunches interrupted runs; orphan uploads are swept, expired PII purged, and stuck cleanups reconciled server-side. A <code>claimedAt</code> claim stops overlapping (rolling-deploy) boots from double-working a row.</p>
+      <p>On boot, <code>resumePendingImports</code> relaunches interrupted runs that never reached Shopify and fails those whose submit outcome is unknown; orphan uploads are swept, expired PII purged, and stuck cleanups reconciled server-side. A <code>claimedAt</code> claim stops overlapping (rolling-deploy) boots from double-working a row.</p>
     </div>
     <div class="dcard">
       <h3><span class="mk">pii</span> Uploads are merchant PII</h3>

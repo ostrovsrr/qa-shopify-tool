@@ -155,7 +155,7 @@
     </div>
     <div class="aside boot">
       <h3><span class="mk">boot</span> Resume backstop</h3>
-      <p>A <code>PENDING</code> row means the process died between writing the row and getting a bulk-op id. On the next boot, <code>resumePendingImports</code> either <em>adopts</em> the shop's live operation or <em>relaunches</em> it — deterministically, from the same rows.</p>
+      <p>A <code>PENDING</code> row means the process died between writing the row and getting a bulk-op id. On the next boot, <code>resumePendingImports</code> decides from <code>submitAttemptedAt</code> alone, written just before the bulk mutation is called: unset means it provably never reached Shopify, so it <em>relaunches</em> deterministically from the same rows; set means the outcome is unknown, so it <em>fails</em> the row with a reason rather than guessing which of the shop's operations is its own.</p>
     </div>
     <div class="aside lock">
       <h3><span class="mk">TTL</span> Lock lifetime</h3>

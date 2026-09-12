@@ -1,7 +1,5 @@
 import prisma from '../db/prisma';
 import { getShopifyStoresConfig, resolveStoreId } from '../config/shopify';
-import { getShopifyClient } from './shopifyClient';
-import { CurrentBulkOperation, fetchCurrentBulkOperation } from './shopifyBulk';
 import { acquireStoreLock, StoreLockOwner } from './storeLock.service';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -23,46 +21,47 @@ export const STALE_CLAIM_MS = 10 * 60 * 1000; // 10 minutes
 
 /** What to do with one interrupted row. */
 export type ResumeDecision =
-  | { action: 'adopt'; bulkOperationId: string; opStatus: string }
-  | { action: 'relaunch' };
+  | { action: 'relaunch' }
+  | { action: 'fail'; reason: string };
+
+/** Why a row whose submit outcome is unknown is failed rather than guessed at. The
+ *  user is the only one who can look at the store, so tell them what to look for. */
+export const SUBMIT_OUTCOME_UNKNOWN =
+  'the process stopped while submitting to Shopify, so this operation may or may not ' +
+  'have reached the store. For an import, check the store for its qa-import records ' +
+  'and run QA cleanup if any are there before re-running; a cleanup can simply be re-run.';
 
 /**
- * THE DECISION. Pure, so it can be tested exhaustively without a store.
+ * THE DECISION. Pure, and it deliberately takes nothing from the shop.
  *
- * Shopify allows exactly ONE bulk mutation per shop. So when we find a PENDING row
- * — meaning "the row was written, but we have no operation id for it" — there are
- * exactly two possibilities:
+ * A PENDING row is "written, but we have no bulk operation id for it". The id is
+ * minted by Shopify and only exists once bulkOperationRunMutation's response comes
+ * back, so no transaction can make "submit" and "record the id" atomic — there is
+ * always a window where Shopify has accepted an op we have no id for.
  *
- *   1. We submitted an op and died before persisting its id. That op is then the
- *      shop's CURRENT operation, and Shopify created it AFTER our row was written.
- *      → ADOPT it. Re-submitting instead would either bounce off the per-shop limit
- *        or, if the first op had finished, DUPLICATE a merchant's entire import.
- *        Adopting also recovers the results: the normal reconcile will fetch the
- *        op's result file and finalize the run as if nothing had happened.
+ * What we CAN record before the side effect is intent: submitAttemptedAt is written
+ * immediately before the mutation is called. That splits PENDING rows cleanly:
  *
- *   2. We died before submitting anything. Then the shop either has no operation at
- *      all, or has an older one from some earlier run — either way nothing on the
- *      shop postdates our row.
- *      → RELAUNCH. Provably safe: no records were created for this row.
+ *   1. submitAttemptedAt NULL — we provably never called bulkOperationRunMutation.
+ *      No records exist for this row. → RELAUNCH.
  *
- * The createdAt comparison is the whole idempotency key. Get it backwards and you
- * either duplicate an import or silently drop one.
+ *   2. submitAttemptedAt set — the call may or may not have reached Shopify.
+ *      → FAIL, loudly, with what to check.
+ *
+ * Case 2 used to ADOPT the shop's newest bulk operation if it postdated the row,
+ * on the theory that Shopify runs one bulk mutation per shop. That theory was
+ * never sufficient (any op created AFTER the crash — another run on the store once
+ * its lock expired, another instance, resume's own relaunch of a different row —
+ * also postdates the row), and from API 2026-01 Shopify runs up to FIVE bulk
+ * operations of each type per app per shop concurrently, so "newest" says nothing
+ * about "mine". The shop cannot tell us either: bulkOperationRunMutation accepts a
+ * clientIdentifier, but BulkOperation exposes no way to read it back. Adopting a
+ * stranger's op misattributes every row; relaunching over an op that did land
+ * duplicates the import. Failing is the only answer that is never wrong.
  */
-export function decideResume(
-  rowCreatedAt: Date,
-  current: CurrentBulkOperation | null,
-): ResumeDecision {
-  if (!current) return { action: 'relaunch' };
-
-  const opCreatedAt = new Date(current.createdAt);
-  // Strictly-after would race a same-millisecond submit; >= is the safe side,
-  // because a false ADOPT merely re-reads an op we own, while a false RELAUNCH
-  // duplicates real records in a real store.
-  if (opCreatedAt.getTime() >= rowCreatedAt.getTime()) {
-    return { action: 'adopt', bulkOperationId: current.id, opStatus: current.status };
-  }
-
-  return { action: 'relaunch' };
+export function decideResume(row: { submitAttemptedAt: Date | null }): ResumeDecision {
+  if (row.submitAttemptedAt === null) return { action: 'relaunch' };
+  return { action: 'fail', reason: SUBMIT_OUTCOME_UNKNOWN };
 }
 
 /** One interrupted row, whichever table it came from. */
@@ -70,6 +69,7 @@ export interface ResumableRow {
   id: string;
   storeId: string | null;
   createdAt: Date;
+  submitAttemptedAt: Date | null;
 }
 
 /**
@@ -84,8 +84,6 @@ export interface ResumableStore {
   findResumable(staleBefore: Date): Promise<ResumableRow[]>;
   /** Atomically take ownership. False if another process got there first. */
   claim(id: string, staleBefore: Date): Promise<boolean>;
-  /** Attach the bulk op we found on the shop and let the normal reconcile finish it. */
-  adopt(id: string, bulkOperationId: string): Promise<void>;
   /** Re-run the submit for a row whose op never reached Shopify. */
   relaunch(id: string): Promise<void>;
   /** Give up on this row, with a reason the user can act on. */
@@ -96,7 +94,6 @@ export interface ResumableStore {
 }
 
 export interface ResumeSummary {
-  adopted: number;
   relaunched: number;
   failed: number;
   skipped: number;
@@ -104,7 +101,7 @@ export interface ResumeSummary {
 
 /** Resolve every interrupted row in one store. */
 export async function resumeStore(store: ResumableStore): Promise<ResumeSummary> {
-  const summary: ResumeSummary = { adopted: 0, relaunched: 0, failed: 0, skipped: 0 };
+  const summary: ResumeSummary = { relaunched: 0, failed: 0, skipped: 0 };
   const staleBefore = new Date(Date.now() - STALE_CLAIM_MS);
 
   const rows = await store.findResumable(staleBefore);
@@ -166,16 +163,15 @@ export async function resumeStore(store: ResumableStore): Promise<ResumeSummary>
         await acquireStoreLock(prisma, lockStoreId, store.lockOwner(row));
       }
 
-      const client = await getShopifyClient(row.storeId ?? undefined);
-      const current = await fetchCurrentBulkOperation(client);
-      const decision = decideResume(row.createdAt, current);
+      // Nothing on the shop is consulted: see decideResume for why the shop
+      // cannot tell us which bulk operation is ours.
+      const decision = decideResume(row);
 
-      if (decision.action === 'adopt') {
-        await store.adopt(row.id, decision.bulkOperationId);
-        summary.adopted++;
-        console.log(
-          `[resume] ${store.label} ${row.id}: adopted in-flight bulk op ` +
-            `${decision.bulkOperationId} (${decision.opStatus}) — results will be reconciled`,
+      if (decision.action === 'fail') {
+        await store.fail(row.id, `Interrupted and could not be resumed: ${decision.reason}`);
+        summary.failed++;
+        console.error(
+          `[resume] ${store.label} ${row.id}: submit outcome unknown — failed, not guessed`,
         );
       } else {
         await store.relaunch(row.id);
@@ -201,7 +197,7 @@ export async function resumeStore(store: ResumableStore): Promise<ResumeSummary>
  * them in at module scope here would knot the graph.
  */
 export async function resumePendingImports(): Promise<ResumeSummary> {
-  const total: ResumeSummary = { adopted: 0, relaunched: 0, failed: 0, skipped: 0 };
+  const total: ResumeSummary = { relaunched: 0, failed: 0, skipped: 0 };
 
   const [{ customerResumableStores }, { productResumableStores }, { cleanupResumableStores }] =
     await Promise.all([
@@ -218,17 +214,16 @@ export async function resumePendingImports(): Promise<ResumeSummary> {
 
   for (const store of stores) {
     const s = await resumeStore(store);
-    total.adopted += s.adopted;
     total.relaunched += s.relaunched;
     total.failed += s.failed;
     total.skipped += s.skipped;
   }
 
-  const touched = total.adopted + total.relaunched + total.failed;
+  const touched = total.relaunched + total.failed;
   if (touched > 0) {
     console.log(
-      `[resume] recovered ${touched} interrupted import row(s): ` +
-        `${total.adopted} adopted, ${total.relaunched} relaunched, ${total.failed} failed`,
+      `[resume] resolved ${touched} interrupted import row(s): ` +
+        `${total.relaunched} relaunched, ${total.failed} failed`,
     );
   }
   return total;
@@ -241,7 +236,7 @@ export async function resumePendingImports(): Promise<ResumeSummary> {
 // lets one implementation serve all four rather than four near-copies.
 
 export interface ResumeDelegate {
-  findMany(args: unknown): Promise<{ id: string; storeId: string | null; createdAt: Date }[]>;
+  findMany(args: unknown): Promise<ResumableRow[]>;
   updateMany(args: unknown): Promise<{ count: number }>;
 }
 
@@ -255,7 +250,20 @@ export async function findResumableRows(
       status: 'PENDING',
       OR: [{ claimedAt: null }, { claimedAt: { lt: staleBefore } }],
     },
-    select: { id: true, storeId: true, createdAt: true },
+    select: { id: true, storeId: true, createdAt: true, submitAttemptedAt: true },
+  });
+}
+
+/**
+ * Record intent BEFORE calling bulkOperationRunMutation. Every submit path calls
+ * this immediately before the mutation (after the staged upload, which creates
+ * nothing in the store), so a PENDING row without it provably never reached
+ * Shopify. See decideResume.
+ */
+export async function markSubmitAttempt(delegate: ResumeDelegate, id: string): Promise<void> {
+  await delegate.updateMany({
+    where: { id, status: 'PENDING' },
+    data: { submitAttemptedAt: new Date() },
   });
 }
 
@@ -278,18 +286,6 @@ export async function claimRow(
     data: { claimedAt: new Date() },
   });
   return count === 1;
-}
-
-/** Attach the recovered bulk op; the normal reconcile takes it from here. */
-export async function adoptRow(
-  delegate: ResumeDelegate,
-  id: string,
-  bulkOperationId: string,
-): Promise<void> {
-  await delegate.updateMany({
-    where: { id, status: 'PENDING' },
-    data: { status: 'RUNNING', bulkOperationId },
-  });
 }
 
 export async function failRow(

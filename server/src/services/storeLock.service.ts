@@ -8,11 +8,12 @@ import { TERMINAL_BULK_STATUSES } from './shopifyBulk';
 // One operation per Shopify store at a time. The unit of contention is the STORE,
 // not the import and not the entity:
 //
-//   - Shopify allows exactly ONE bulk mutation per SHOP. Not one per shop per
-//     entity. So a customer import and a product import aimed at the same store
-//     really do collide — Shopify rejects the second with a confusing "already in
-//     progress" rather than queueing it. Keying the lock on (storeId, entity)
-//     would wave that collision straight through. The key is bare storeId.
+//   - Shopify will NOT keep two operations on one store apart for us. From API
+//     2026-01 (what this repo pins) an app may run up to FIVE bulk mutations per
+//     SHOP at once, across entities. So a customer import and a product import
+//     aimed at the same store are both accepted and silently interleave. This lock,
+//     not Shopify, is what serializes them, and keying it on (storeId, entity)
+//     would wave that overlap straight through. The key is bare storeId.
 //
 //   - /cleanup-qa and /cleanup-qa-products delete BY TAG ACROSS AN ENTIRE STORE.
 //     They are the highest-blast-radius routes in the app. A cleanup racing an
