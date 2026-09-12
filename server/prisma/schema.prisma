@@ -88,6 +88,12 @@ model ImportRun {
   // the stale threshold is reclaimable — otherwise a process killed mid-claim
   // would strand the row forever, trading a wrong answer for a permanent hang.
   claimedAt       DateTime?
+  // Written immediately BEFORE bulkOperationRunMutation is called. Shopify mints the
+  // op id, so no transaction can make "submit" and "record the id" atomic — but a
+  // PENDING row with this still NULL provably never reached Shopify and is safe to
+  // relaunch. Set without an op id means the submit's outcome is unknown; resume
+  // fails that row honestly rather than guessing. See importResume.service.ts.
+  submitAttemptedAt DateTime?
   createdAt       DateTime          @default(now())
 
   validationRun ValidationRun     @relation(fields: [validationId], references: [id], onDelete: Cascade)
@@ -125,6 +131,8 @@ model ImportBatchJob {
   pollAttempts    Int      @default(0)
   // See ImportRun.claimedAt.
   claimedAt       DateTime?
+  // See ImportRun.submitAttemptedAt.
+  submitAttemptedAt DateTime?
   createdAt       DateTime @default(now())
 
   importRun ImportRun @relation(fields: [importRunId], references: [id], onDelete: Cascade)
@@ -261,6 +269,8 @@ model ProductImportRun {
   errorCount   Int     @default(0)
   // See ImportRun.claimedAt.
   claimedAt    DateTime?
+  // See ImportRun.submitAttemptedAt.
+  submitAttemptedAt DateTime?
   createdAt    DateTime @default(now())
 
   uploadRun  ProductUploadRun      @relation(fields: [uploadId], references: [id], onDelete: Cascade)
@@ -298,6 +308,8 @@ model ProductImportJob {
   pollAttempts    Int     @default(0)
   // See ImportRun.claimedAt.
   claimedAt       DateTime?
+  // See ImportRun.submitAttemptedAt.
+  submitAttemptedAt DateTime?
   createdAt       DateTime @default(now())
 
   importRun ProductImportRun @relation(fields: [importRunId], references: [id], onDelete: Cascade)
@@ -381,10 +393,11 @@ model ActionLog {
 //
 // The key is the store, not the run and not the entity, for two reasons:
 //
-//   1. Shopify's own limit is ONE bulk mutation per SHOP — not one per shop per
-//      entity. A customer import and a product import aimed at the same store
-//      genuinely collide, so a key of (storeId, entity) would let the collision
-//      through. The key is bare storeId.
+//   1. From API 2026-01 Shopify ACCEPTS up to five concurrent bulk mutations per app
+//      per shop, so it no longer keeps a customer import and a product import on the
+//      same store apart — they would silently interleave. This lock is what does,
+//      and a key of (storeId, entity) would let exactly that through. The key is
+//      bare storeId.
 //   2. The cleanup routes delete BY TAG ACROSS AN ENTIRE STORE. A cleanup racing an
 //      import to the same store deletes the very records that import is about to
 //      reconcile against, and the run then reports garbage. Same store key
@@ -454,6 +467,8 @@ model CleanupRun {
   pollAttempts    Int      @default(0)
   // See ImportRun.claimedAt.
   claimedAt       DateTime?
+  // See ImportRun.submitAttemptedAt.
+  submitAttemptedAt DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 

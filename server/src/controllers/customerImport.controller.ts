@@ -52,8 +52,9 @@ const cleanupImportSchema = z.object({
 
 // POST /api/customer-import/:validationId/run
 // Per decision, runs with Errors are allowed (the feedback loop tests both
-// directions); no zero-error guard. Concurrency is bounded by Shopify itself
-// (one bulk op per shop) and surfaced as a 409.
+// directions); no zero-error guard. Concurrency is bounded by the store busy-lock
+// (one operation per store — Shopify itself admits up to five bulk mutations per
+// shop from API 2026-01) and surfaced as a 409.
 export async function runImportHandler(
   req: Request,
   res: Response,

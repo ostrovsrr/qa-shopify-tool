@@ -35,10 +35,10 @@ import {
   StoreBusyError,
 } from './storeLock.service';
 import {
-  adoptRow,
   claimRow,
   failRow,
   findResumableRows,
+  markSubmitAttempt,
   ResumableStore,
 } from './importResume.service';
 import { getProductImportFeedback, ProductImportFeedback } from './productFeedback.service';
@@ -532,6 +532,8 @@ async function submitSingleStoreRun(
 ): Promise<void> {
   // Queue the op (seconds-scale); do NOT wait for it to finish here.
   const stagedPath = await stagedUpload(client, jsonl, 'bulk_products.jsonl');
+  // Intent before the side effect — see decideResume in importResume.service.ts.
+  await markSubmitAttempt(prisma.productImportRun as never, importRunId);
   const bulkOpId = await runBulkMutation(client, PRODUCT_SET_MUTATION, stagedPath);
 
   await prisma.productImportRun.update({
@@ -710,6 +712,9 @@ export async function startBatchProductImport(
     include: { originalRows: { orderBy: { rowNumber: 'asc' } } },
   });
   if (!upload) return { notFound: true };
+  // One job per store — see the customer twin: a repeated id would put two bulk ops
+  // on one shop under a single lock, and from API 2026-01 Shopify runs both at once.
+  storeIds = [...new Set(storeIds)];
   if (storeIds.length === 0) return { ok: false, error: 'Select at least one store.' };
 
   const groups = groupsFromOriginalRows(upload.originalRows);
@@ -858,13 +863,13 @@ async function launchBatchJob(
     const locationId = await fetchLocationId(client);
     const { jsonl } = buildProductLines(batch, parentId, locationId);
     const stagedPath = await stagedUpload(client, jsonl, 'bulk_products.jsonl');
+    // Intent before the side effect. From here until the update below lands, a
+    // crash leaves an op on Shopify that we may have no id for — and the shop cannot
+    // tell us which op is ours. Resume-on-boot sees submitAttemptedAt and fails the
+    // job honestly instead of guessing (see decideResume in importResume.service.ts).
+    await markSubmitAttempt(prisma.productImportJob as never, jobId);
     const bulkOpId = await runBulkMutation(client, PRODUCT_SET_MUTATION, stagedPath);
 
-    // The gap between runBulkMutation returning and this write landing is the
-    // one window where a crash leaves a bulk op running on Shopify that we have
-    // no id for. resumePendingJobs() closes it by ADOPTING the shop's
-    // currentBulkOperation rather than submitting a second one (Shopify allows
-    // only one per shop, so a naive re-submit would just fail).
     await prisma.productImportJob.update({
       where: { id: jobId },
       data: {
@@ -1049,8 +1054,9 @@ async function finalizeCompletedJob(
 // ── crash recovery (resume-on-boot) ──────────────────────────────────────────
 //
 // A PENDING row means "we wrote the row but have no bulk op id for it" — the
-// process died between the two. importResume decides, per row, whether the op was
-// actually submitted (adopt it) or never reached Shopify (relaunch it). These two
+// process died between the two. importResume decides, per row, from
+// submitAttemptedAt alone: never attempted (relaunch it) or submit outcome unknown
+// (fail it, never guess). These two
 // stores hand it the product-flow plumbing; shopifyImport exports the customer
 // twins.
 
@@ -1119,7 +1125,6 @@ export function productResumableStores(): ResumableStore[] {
       label: 'product-run',
       findResumable: (staleBefore) => findResumableRows(prisma.productImportRun as never, staleBefore),
       claim: (id, staleBefore) => claimRow(prisma.productImportRun as never, id, staleBefore),
-      adopt: (id, bulkOperationId) => adoptRow(prisma.productImportRun as never, id, bulkOperationId),
       relaunch: relaunchProductRun,
       fail: (id, error) => failRow(prisma.productImportRun as never, id, error),
       lockOwner: (row) => ({
@@ -1132,7 +1137,6 @@ export function productResumableStores(): ResumableStore[] {
       label: 'product-job',
       findResumable: (staleBefore) => findResumableRows(prisma.productImportJob as never, staleBefore),
       claim: (id, staleBefore) => claimRow(prisma.productImportJob as never, id, staleBefore),
-      adopt: (id, bulkOperationId) => adoptRow(prisma.productImportJob as never, id, bulkOperationId),
       relaunch: relaunchProductJob,
       fail: (id, error) => failRow(prisma.productImportJob as never, id, error),
       lockOwner: (row) => ({

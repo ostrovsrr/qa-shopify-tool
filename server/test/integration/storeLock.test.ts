@@ -12,11 +12,11 @@ import { v4 as uuidv4 } from 'uuid';
 //
 // The four properties that matter, and what breaks if each one regresses:
 //
-//   1. Same store, twice → refused.        Otherwise Shopify bounces the second
-//                                          bulk op with a confusing error, or worse,
-//                                          the two silently interleave.
-//   2. Cross-entity contends.              Shopify's limit is ONE bulk mutation per
-//                                          SHOP, not per shop per entity. A key of
+//   1. Same store, twice → refused.        Otherwise, from API 2026-01, Shopify
+//                                          accepts the second bulk op (up to five
+//                                          per shop) and the two silently interleave.
+//   2. Cross-entity contends.              Shopify's per-shop limit spans entities
+//                                          and no longer keeps them apart. A key of
 //                                          (storeId, entity) would wave a customer
 //                                          import and a product import straight into
 //                                          each other. The key is bare storeId.
@@ -55,7 +55,9 @@ const { resetDb } = await import('./resetDb');
 const { startProductImport, startBatchProductImport } = await import(
   '../../src/services/productImport.service'
 );
-const { startCustomerImport } = await import('../../src/services/shopifyImport.service');
+const { startCustomerImport, startBatchImport } = await import(
+  '../../src/services/shopifyImport.service'
+);
 const { startCleanupRun } = await import('../../src/services/cleanupRun.service');
 const { acquireStoreLock, releaseStoreLock, StoreBusyError, busyStores } = await import(
   '../../src/services/storeLock.service'
@@ -149,9 +151,9 @@ runIf('store busy-lock', () => {
 
     const customer = await startCustomerImport(await seedValidation(), 'store1');
 
-    // Shopify allows one bulk mutation per SHOP, not one per shop per entity. If
-    // the lock were keyed (storeId, entity) this would sail through and Shopify
-    // would reject it with an error nobody can act on.
+    // From API 2026-01 Shopify accepts up to five bulk mutations per shop, across
+    // entities. If the lock were keyed (storeId, entity) this would sail through
+    // and the two imports would silently interleave on one store.
     expect(customer).toMatchObject({ ok: false, busy: true });
   });
 
@@ -200,6 +202,35 @@ runIf('store busy-lock', () => {
     const locks = await prisma.storeLock.findMany({ orderBy: { storeId: 'asc' } });
     expect(locks.map((l) => l.storeId)).toEqual(['store1', 'store2']);
     expect(locks.every((l) => l.ownerType === 'PRODUCT_IMPORT_JOB')).toBe(true);
+  });
+
+  // A repeated store id used to plan two jobs on ONE shop under ONE lock (the lock
+  // step dedupes, the plan did not). From API 2026-01 Shopify runs both bulk ops at
+  // once, so that was two half-imports interleaving on the same store.
+  it('a batch naming the same store twice plans ONE job for it (products)', async () => {
+    const uploadId = await seedUpload();
+    const batch = await startBatchProductImport(uploadId, ['store1', 'store1']);
+    expect(batch).toMatchObject({ ok: true });
+
+    const parent = await prisma.productImportRun.findUniqueOrThrow({
+      where: { id: (batch as { importRunId: string }).importRunId },
+      include: { batchJobs: true },
+    });
+    expect(parent.batchJobs).toHaveLength(1);
+    expect(parent.batchJobs[0]).toMatchObject({ storeId: 'store1', batchCount: 1, productCount: 2 });
+  });
+
+  it('a batch naming the same store twice plans ONE job for it (customers)', async () => {
+    const validationId = await seedValidation();
+    const batch = await startBatchImport(validationId, ['store1', 'store1']);
+    expect(batch).toMatchObject({ ok: true });
+
+    const parent = await prisma.importRun.findUniqueOrThrow({
+      where: { id: (batch as { importRunId: string }).importRunId },
+      include: { batchJobs: true },
+    });
+    expect(parent.batchJobs).toHaveLength(1);
+    expect(parent.batchJobs[0]).toMatchObject({ storeId: 'store1', batchCount: 1 });
   });
 
   it('an import into a DIFFERENT store is unaffected', async () => {

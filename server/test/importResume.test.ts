@@ -1,109 +1,75 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import {
-  decideResume,
-  resumeStore,
-  STALE_CLAIM_MS,
-} from '../src/services/importResume.service';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// Resume must never ask the shop anything, so any Shopify client it builds is a
+// regression. The store lock needs a database; these are unit tests.
+const shopifyClientCalls: (string | undefined)[] = [];
+vi.mock('../src/services/shopifyClient', () => ({
+  getShopifyClient: async (storeId?: string) => {
+    shopifyClientCalls.push(storeId);
+    throw new Error('resume must not consult the shop');
+  },
+}));
+vi.mock('../src/services/storeLock.service', () => ({
+  acquireStoreLock: async () => undefined,
+}));
+
+const { decideResume, resumeStore, STALE_CLAIM_MS, SUBMIT_OUTCOME_UNKNOWN } = await import(
+  '../src/services/importResume.service'
+);
 import type { ResumableRow, ResumableStore } from '../src/services/importResume.service';
 import { resetShopifyConfigCache } from '../src/config/shopify';
-import type { CurrentBulkOperation } from '../src/services/shopifyBulk';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // THE RESUME DECISION.
 //
 // A PENDING row means: the row is on disk, but we have no bulk-operation id for
-// it. The process died somewhere between writing the row and recording the id.
-// Exactly one of two things is true, and telling them apart is the entire job:
+// it. Shopify mints that id, so there is always a window where an op exists at
+// Shopify and not in our database. What we CAN record before the side effect is
+// intent — submitAttemptedAt, written just before bulkOperationRunMutation:
 //
-//   1. We DID submit an op and died before saving its id. Shopify allows one bulk
-//      mutation per shop, so that op is the shop's CURRENT one and it was created
-//      AFTER our row. → ADOPT. Re-submitting would bounce off the per-shop limit,
-//      or — if the first op had already finished — DUPLICATE a merchant's import.
+//   1. submitAttemptedAt NULL — provably never submitted. → RELAUNCH.
+//   2. submitAttemptedAt set  — outcome unknown.          → FAIL, with a reason.
 //
-//   2. We died BEFORE submitting. Nothing on the shop postdates our row.
-//      → RELAUNCH. Provably safe: no records exist for this row.
-//
-// Get this backwards and you either duplicate an entire import into a store, or
-// silently drop one and report success. Hence the exhaustive table below.
+// Case 2 used to ADOPT the shop's newest bulk op if it postdated the row. From API
+// 2026-01 an app runs up to FIVE bulk mutations per shop at once, and even before
+// that any op created after the crash also postdated the row — so "newest" never
+// meant "mine". Adopting a stranger's op misattributes every row; relaunching over
+// an op that did land duplicates a merchant's import. The shop cannot tell us which
+// op is ours, so the decision takes nothing from it.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const ROW_CREATED = new Date('2026-07-14T12:00:00.000Z');
+const ATTEMPTED = new Date('2026-07-14T12:00:02.000Z');
 
-function op(overrides: Partial<CurrentBulkOperation> = {}): CurrentBulkOperation {
-  return {
-    id: 'gid://shopify/BulkOperation/1',
-    status: 'RUNNING',
-    errorCode: null,
-    objectCount: '10',
-    url: null,
-    partialDataUrl: null,
-    createdAt: '2026-07-14T12:00:05.000Z', // 5s AFTER the row → ours
-    ...overrides,
-  };
+function row(overrides: Partial<ResumableRow> = {}): ResumableRow {
+  return { id: 'run-1', storeId: 'ours-qa', createdAt: ROW_CREATED, submitAttemptedAt: null, ...overrides };
 }
 
 describe('decideResume', () => {
-  it('relaunches when the shop has never run a bulk operation', () => {
-    expect(decideResume(ROW_CREATED, null)).toEqual({ action: 'relaunch' });
+  it('relaunches a row that never attempted its submit', () => {
+    expect(decideResume(row())).toEqual({ action: 'relaunch' });
   });
 
-  it('adopts an operation created after the row (we submitted it, then died)', () => {
-    expect(decideResume(ROW_CREATED, op())).toEqual({
-      action: 'adopt',
-      bulkOperationId: 'gid://shopify/BulkOperation/1',
-      opStatus: 'RUNNING',
+  // THE ONE THAT PREVENTS A DUPLICATE IMPORT. The op may have landed; nothing we
+  // can ask Shopify will say whether it did.
+  it('fails a row whose submit was attempted but never recorded an op id', () => {
+    expect(decideResume(row({ submitAttemptedAt: ATTEMPTED }))).toEqual({
+      action: 'fail',
+      reason: SUBMIT_OUTCOME_UNKNOWN,
     });
   });
 
-  // THE ONE THAT PREVENTS A DUPLICATE IMPORT. The op finished during our downtime.
-  // It is still ours, and its records are already in the store. Adopting recovers
-  // the results; relaunching would import every record a second time.
-  it('adopts an operation that ALREADY COMPLETED after the row was written', () => {
-    const decision = decideResume(
-      ROW_CREATED,
-      op({ status: 'COMPLETED', url: 'https://results/1' }),
-    );
-    expect(decision).toMatchObject({ action: 'adopt', opStatus: 'COMPLETED' });
+  it('tells the user what to check before re-running', () => {
+    expect(SUBMIT_OUTCOME_UNKNOWN).toMatch(/may or may not have reached the store/);
+    expect(SUBMIT_OUTCOME_UNKNOWN).toMatch(/QA cleanup/);
+    expect(SUBMIT_OUTCOME_UNKNOWN).toMatch(/re-run/);
   });
 
-  it('adopts a FAILED operation too — it is still ours, and the reconcile must see it', () => {
-    expect(decideResume(ROW_CREATED, op({ status: 'FAILED' }))).toMatchObject({
-      action: 'adopt',
-      opStatus: 'FAILED',
-    });
-  });
-
-  // THE ONE THAT PREVENTS A SILENTLY DROPPED IMPORT. The shop's current op predates
-  // our row, so it belongs to some earlier run. Ours was never submitted.
-  it('relaunches when the shop op predates the row (it belongs to an earlier run)', () => {
-    const decision = decideResume(
-      ROW_CREATED,
-      op({ createdAt: '2026-07-14T11:59:59.000Z' }), // 1s BEFORE the row
-    );
-    expect(decision).toEqual({ action: 'relaunch' });
-  });
-
-  it('does NOT adopt a long-finished op from a previous import', () => {
-    const decision = decideResume(
-      ROW_CREATED,
-      op({ status: 'COMPLETED', createdAt: '2026-07-01T09:00:00.000Z' }),
-    );
-    expect(decision).toEqual({ action: 'relaunch' });
-  });
-
-  // The boundary. Same millisecond → adopt. A false ADOPT merely re-reads an op we
-  // own; a false RELAUNCH duplicates real records in a real store. So the tie goes
-  // to adopt, deliberately.
-  it('adopts on an exact timestamp tie (the safe side of the boundary)', () => {
-    const decision = decideResume(ROW_CREATED, op({ createdAt: ROW_CREATED.toISOString() }));
-    expect(decision).toMatchObject({ action: 'adopt' });
-  });
-
-  it('relaunches one millisecond before the tie', () => {
-    const justBefore = new Date(ROW_CREATED.getTime() - 1).toISOString();
-    expect(decideResume(ROW_CREATED, op({ createdAt: justBefore }))).toEqual({
-      action: 'relaunch',
-    });
+  // An attempt a split-second after the row, or long after, is the same unknown.
+  it('does not care how the attempt time relates to the row time', () => {
+    for (const at of [ROW_CREATED, ATTEMPTED, new Date('2026-07-15T09:00:00.000Z')]) {
+      expect(decideResume(row({ submitAttemptedAt: at })).action).toBe('fail');
+    }
   });
 });
 
@@ -117,6 +83,114 @@ describe('STALE_CLAIM_MS', () => {
   });
 });
 
+function fakeStore(rows: ResumableRow[]) {
+  const calls = {
+    claimed: [] as string[],
+    relaunched: [] as string[],
+    failed: [] as { id: string; error: string }[],
+  };
+  const store: ResumableStore = {
+    label: 'test',
+    findResumable: async () => rows,
+    claim: async (id) => {
+      calls.claimed.push(id);
+      return true;
+    },
+    relaunch: async (id) => {
+      calls.relaunched.push(id);
+    },
+    fail: async (id, error) => {
+      calls.failed.push({ id, error });
+    },
+    lockOwner: (r) => ({
+      ownerType: 'IMPORT_RUN',
+      ownerId: r.id,
+      operation: 'a customer import',
+    }),
+  };
+  return { store, calls };
+}
+
+const OURS = 'ours-qa';
+const THEIRS = 'theirs-qa';
+
+beforeEach(() => {
+  shopifyClientCalls.length = 0;
+  process.env.SHOPIFY_TEST_STORES = JSON.stringify([
+    { id: OURS, label: 'Ours', shop: 'ours-qa.myshopify.com', adminToken: 'shpat_ours' },
+  ]);
+  resetShopifyConfigCache();
+});
+
+afterEach(() => {
+  delete process.env.SHOPIFY_TEST_STORES;
+  resetShopifyConfigCache();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CONCURRENT OPERATIONS ON ONE SHOP.
+//
+// Up to five bulk mutations per shop can be live at once, and more can land while
+// we are down. None of that may leak into the decision: resume works from our own
+// rows and never builds a Shopify client to look at the shop.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('resumeStore — concurrent bulk operations on one shop', () => {
+  it('never consults the shop, whatever it is running', async () => {
+    const { store } = fakeStore([
+      row({ id: 'never-attempted' }),
+      row({ id: 'attempted', submitAttemptedAt: ATTEMPTED }),
+    ]);
+
+    await resumeStore(store);
+
+    expect(shopifyClientCalls).toEqual([]);
+  });
+
+  // Two PENDING rows on the SAME store — e.g. a crash mid-fan-out after a batch
+  // put two jobs on one shop. Under the old rule both could adopt the shop's newest
+  // op, or the second could adopt the op the first one's relaunch had just created.
+  it('resolves two PENDING rows on one store independently: one relaunch, one fail', async () => {
+    const { store, calls } = fakeStore([
+      row({ id: 'job-a' }),
+      row({ id: 'job-b', submitAttemptedAt: ATTEMPTED }),
+    ]);
+
+    const summary = await resumeStore(store);
+
+    expect(summary).toMatchObject({ relaunched: 1, failed: 1, skipped: 0 });
+    expect(calls.relaunched).toEqual(['job-a']);
+    expect(calls.failed.map((f) => f.id)).toEqual(['job-b']);
+    expect(calls.failed[0].error).toContain(SUBMIT_OUTCOME_UNKNOWN);
+  });
+
+  it("a relaunch earlier in the pass cannot be picked up by a later row", async () => {
+    // Order matters under any shop-lookup design: job-a's relaunch creates the
+    // newest op on the shop just before job-b is examined. job-b must still fail.
+    const { store, calls } = fakeStore([
+      row({ id: 'job-a' }),
+      row({ id: 'job-b', createdAt: new Date(ROW_CREATED.getTime() - 1), submitAttemptedAt: ROW_CREATED }),
+    ]);
+
+    await resumeStore(store);
+
+    expect(calls.relaunched).toEqual(['job-a']);
+    expect(calls.failed.map((f) => f.id)).toEqual(['job-b']);
+  });
+
+  it('relaunches every never-attempted row on a busy shop — none of them reached it', async () => {
+    const { store, calls } = fakeStore(
+      Array.from({ length: 5 }, (_, i) => row({ id: `job-${i}` })),
+    );
+
+    const summary = await resumeStore(store);
+
+    expect(summary.relaunched).toBe(5);
+    expect(calls.relaunched).toHaveLength(5);
+    expect(calls.failed).toEqual([]);
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // WHOSE ROW IS THIS?
 //
@@ -127,53 +201,13 @@ describe('STALE_CLAIM_MS', () => {
 // The danger is not that resume fails on a store it cannot reach — it is that it
 // CLAIMS the row first. A claim followed by a failure marks a colleague's healthy,
 // still-running import FAILED and tells them to re-run it, which duplicates the
-// import or bounces off the per-shop limit. So the guard has to come before the
-// claim, and that is exactly what these tests pin.
+// import. So the guard has to come before the claim, and that is exactly what these
+// tests pin.
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('resumeStore — shared database, per-instance store tokens', () => {
-  const OURS = 'ours-qa';
-  const THEIRS = 'theirs-qa';
-
-  function fakeStore(rows: ResumableRow[]) {
-    const calls = { claimed: [] as string[], failed: [] as string[] };
-    const store: ResumableStore = {
-      label: 'test',
-      findResumable: async () => rows,
-      claim: async (id) => {
-        calls.claimed.push(id);
-        return true;
-      },
-      adopt: async () => undefined,
-      relaunch: async () => undefined,
-      fail: async (id) => {
-        calls.failed.push(id);
-      },
-      lockOwner: (row) => ({
-        ownerType: 'IMPORT_RUN',
-        ownerId: row.id,
-        operation: 'a customer import',
-      }),
-    };
-    return { store, calls };
-  }
-
-  beforeEach(() => {
-    process.env.SHOPIFY_TEST_STORES = JSON.stringify([
-      { id: OURS, label: 'Ours', shop: 'ours-qa.myshopify.com', adminToken: 'shpat_ours' },
-    ]);
-    resetShopifyConfigCache();
-  });
-
-  afterEach(() => {
-    delete process.env.SHOPIFY_TEST_STORES;
-    resetShopifyConfigCache();
-  });
-
   it('never claims a row whose store this instance has no token for', async () => {
-    const { store, calls } = fakeStore([
-      { id: 'run-1', storeId: THEIRS, createdAt: ROW_CREATED },
-    ]);
+    const { store, calls } = fakeStore([row({ storeId: THEIRS })]);
 
     const summary = await resumeStore(store);
 
@@ -182,9 +216,7 @@ describe('resumeStore — shared database, per-instance store tokens', () => {
   });
 
   it("does not mark another instance's healthy run FAILED", async () => {
-    const { store, calls } = fakeStore([
-      { id: 'run-1', storeId: THEIRS, createdAt: ROW_CREATED },
-    ]);
+    const { store, calls } = fakeStore([row({ storeId: THEIRS, submitAttemptedAt: ATTEMPTED })]);
 
     await resumeStore(store);
 
@@ -203,9 +235,7 @@ describe('resumeStore — shared database, per-instance store tokens', () => {
     process.env.SHOPIFY_TEST_STORES = '[]';
     resetShopifyConfigCache();
 
-    const { store, calls } = fakeStore([
-      { id: 'run-1', storeId: THEIRS, createdAt: ROW_CREATED },
-    ]);
+    const { store, calls } = fakeStore([row({ storeId: THEIRS })]);
 
     const summary = await resumeStore(store);
 
@@ -215,8 +245,8 @@ describe('resumeStore — shared database, per-instance store tokens', () => {
 
   it('skips every foreign row without touching any of them', async () => {
     const { store, calls } = fakeStore([
-      { id: 'run-1', storeId: THEIRS, createdAt: ROW_CREATED },
-      { id: 'run-2', storeId: 'third-qa', createdAt: ROW_CREATED },
+      row({ id: 'run-1', storeId: THEIRS }),
+      row({ id: 'run-2', storeId: 'third-qa' }),
     ]);
 
     const summary = await resumeStore(store);

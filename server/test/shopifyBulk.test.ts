@@ -82,9 +82,9 @@ describe('runBulkMutation', () => {
     );
   });
 
-  // THE PER-SHOP CONCURRENCY PATH. Shopify allows one bulk op per shop. The
-  // resume-on-boot logic must key on this: it has to ADOPT the running op
-  // rather than re-submit and land here.
+  // THE PER-SHOP CONCURRENCY PATH. From API 2026-01 an app may run up to five
+  // bulk mutations per shop; the sixth is refused, and the user needs to be told
+  // that plainly rather than shown Shopify's raw userError.
   it('maps an "already in progress" userError to the per-shop concurrency message', async () => {
     const client = fakeClient(async () => ({
       bulkOperationRunMutation: {

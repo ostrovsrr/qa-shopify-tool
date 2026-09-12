@@ -253,8 +253,8 @@ if (require.main === module) {
     // Finish what the last process started. An import that was interrupted
     // mid-flight (a redeploy, a crash, an OOM) left PENDING rows behind: the row
     // is on disk but we have no bulk-operation id for it. resumePendingImports
-    // resolves each one — adopting the operation if it actually reached Shopify,
-    // relaunching it if it never did.
+    // resolves each one — relaunching it if it provably never reached Shopify, and
+    // failing it with a reason if the submit's outcome is unknown.
     //
     // Without this, the pre-persist fix would merely trade a wrong answer for a
     // permanent hang: the run stops lying, but it also never finishes.

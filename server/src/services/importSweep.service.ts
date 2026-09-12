@@ -10,7 +10,7 @@ import { reconcileProductImportRun } from './productImport.service';
 // Imports finalize on POLL: GET /api/customer-import/:id (and the product twin)
 // calls reconcile, which asks Shopify whether the bulk operation is done and
 // finalizes the run if it is. That is the whole mechanism — crash recovery
-// deliberately leaves an adopted row RUNNING for it to finish.
+// deliberately leaves a relaunched row RUNNING for it to finish.
 //
 // Which is fine while somebody is looking. An import whose watcher walked away —
 // closed tab, went to a meeting, browser slept — sits RUNNING with Shopify long
