@@ -1,4 +1,4 @@
-import { ValidationResult } from '../types';
+import { ValidationResult, ValidationSummary } from '../types';
 
 interface Props {
   result: ValidationResult;
@@ -14,25 +14,63 @@ function parts(pairs: [count: number, label: string][]): string {
     .join(' · ');
 }
 
-/** A count of 0 carries no signal, so it stays muted grey however severe the
- *  bucket is — only non-zero buckets take their colour. Same convention as the
- *  existing .card-zero rule. */
-function Card({
+/**
+ * The four buckets are a PARTITION — they sum to the row count — so they are
+ * drawn as one divided bar. Six identical tiles said "six equal facts", which
+ * was wrong three ways: Total Rows is the denominator rather than a peer,
+ * Ready/Fixed/Blocked/Removed add up to it, and Duplicates deliberately cuts
+ * across them (a duplicate is Fixed when moved to Note and Blocked when not).
+ * The bar makes the partition true on screen instead of only in the code.
+ */
+function Bar({ s }: { s: ValidationSummary }) {
+  const total = s.totalRows || 1;
+  const segs = [
+    { key: 'ready', n: s.ready, cls: 'seg-ready', label: 'ready' },
+    { key: 'fixed', n: s.fixed, cls: 'seg-fixed', label: 'fixed' },
+    { key: 'blocked', n: s.blocked, cls: 'seg-blocked', label: '' },
+    { key: 'removed', n: s.removed, cls: 'seg-removed', label: '' },
+  ].filter((seg) => seg.n > 0);
+
+  return (
+    <div className="summary-bar" role="img"
+      aria-label={`${s.ready} ready, ${s.fixed} fixed, ${s.blocked} blocked, ${s.removed} removed of ${s.totalRows} rows`}
+    >
+      {segs.map((seg) => {
+        const pct = (seg.n / total) * 100;
+        return (
+          <div
+            key={seg.key}
+            className={`summary-seg ${seg.cls}`}
+            style={{ width: `${pct}%` }}
+            title={`${seg.n.toLocaleString()} ${seg.key}`}
+          >
+            {/* A sliver cannot hold text; the title attribute carries it. */}
+            {pct > 12 ? `${seg.n.toLocaleString()}${seg.label ? ` ${seg.label}` : ''}` : ''}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function Legend({
   tone,
   label,
   value,
   note,
 }: {
-  tone: 'success' | 'info' | 'error' | 'warning' | 'neutral';
+  tone: string;
   label: string;
   value: number;
   note: string;
 }) {
+  // A count of 0 carries no signal, so it stays muted however severe the bucket
+  // is — same convention as the .card-zero rule.
   return (
-    <div className={`card ${value === 0 ? 'card-zero' : `card-${tone}`}`}>
-      <span className="card-label">{label}</span>
-      <span className="card-value">{value}</span>
-      <span className="card-note">{note}</span>
+    <div className={`summary-legend ${value === 0 ? 'legend-zero' : `legend-${tone}`}`}>
+      <span className="legend-label">{label}</span>
+      <span className="legend-value">{value.toLocaleString()}</span>
+      <span className="legend-note">{note}</span>
     </div>
   );
 }
@@ -71,27 +109,31 @@ export function SummaryCards({ result, onDownload }: Props) {
         </div>
       )}
 
-      <div className="cards-grid">
-        <div className="card card-neutral">
-          <span className="card-label">Total Rows</span>
-          <span className="card-value">{result.totalRows}</span>
-        </div>
-
-        {/* Runs validated before the summary existed carry none, so they keep
-            the plain Total/Errors pair rather than showing invented zeroes. */}
-        {!s && (
+      {/* Runs validated before the summary existed carry none, so they keep the
+          plain Total/Errors pair rather than showing invented zeroes. */}
+      {!s ? (
+        <div className="cards-grid">
+          <div className="card card-neutral">
+            <span className="card-label">Total Rows</span>
+            <span className="card-value">{result.totalRows}</span>
+          </div>
           <div className="card card-error">
             <span className="card-label">Errors</span>
             <span className="card-value">{result.errors}</span>
           </div>
-        )}
+        </div>
+      ) : (
+        <div className="summary-outcome">
+          <p className="summary-rows">
+            <b>{s.totalRows.toLocaleString()} rows</b> in {result.fileName}
+          </p>
 
-        {s && (
-          <>
-            <Card tone="success" label="Ready" value={s.ready} note="import as-is" />
+          <Bar s={s} />
 
-            <Card
-              tone="info"
+          <div className="summary-legends">
+            <Legend tone="ready" label="Ready" value={s.ready} note="import as-is" />
+            <Legend
+              tone="fixed"
               label="Fixed"
               value={s.fixed}
               note={
@@ -102,9 +144,8 @@ export function SummaryCards({ result, onDownload }: Props) {
                 ]) || 'nothing needed fixing'
               }
             />
-
-            <Card
-              tone="error"
+            <Legend
+              tone="blocked"
               label="Blocked"
               value={s.blocked}
               note={
@@ -113,9 +154,8 @@ export function SummaryCards({ result, onDownload }: Props) {
                   : `${s.errorCount} error${s.errorCount === 1 ? '' : 's'} to fix by hand`
               }
             />
-
-            <Card
-              tone="neutral"
+            <Legend
+              tone="removed"
               label="Removed"
               value={s.removed}
               note={
@@ -125,26 +165,29 @@ export function SummaryCards({ result, onDownload }: Props) {
                 ]) || 'every row kept'
               }
             />
+          </div>
 
-            {/* Not one of the four buckets: a duplicate is "fixed" when it was
-                moved to Note and "blocked" when it was not, so it cuts across
-                them. Counts the repeats Shopify would reject, never the keeper. */}
-            <Card
-              tone="warning"
-              label="Duplicates"
-              value={s.duplicateRecords}
-              note={
-                parts([
+          {/* Below the rule on purpose: duplicates are not one of the four
+              buckets, they cut across them. Counts the repeats Shopify would
+              reject, never the keeper, which imports fine. */}
+          <div className="summary-diagnostics">
+            <span className="summary-diag-label">Also worth knowing</span>
+            {s.duplicateRecords > 0 ? (
+              <span className="summary-chip">
+                {s.duplicateRecords} duplicate record{s.duplicateRecords === 1 ? '' : 's'} —{' '}
+                {parts([
                   [s.duplicateEmail, 'email'],
                   [s.duplicatePhone, 'phone'],
                   // Spelled out, or email + phone != total reads as a bug.
                   [s.duplicateBoth, 'both'],
-                ]) || 'no repeated emails or phones'
-              }
-            />
-          </>
-        )}
-      </div>
+                ])}
+              </span>
+            ) : (
+              <span className="summary-diag-none">No repeated emails or phones.</span>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

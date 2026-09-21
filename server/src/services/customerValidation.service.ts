@@ -267,6 +267,56 @@ export async function validateCustomerCsv(
   };
 }
 
+/** The flags whose effect on a file is worth previewing. HeliosMigratedTag is
+ *  left out on purpose: it tags rows, it does not change whether any of them
+ *  import, so a "+0 rows" next to it would be noise. */
+export const PREVIEWABLE_FLAGS = [
+  'moveInvalidContactToNotes',
+  'fillMissingContactName',
+  'mergeMatchingDuplicates',
+  'moveDuplicatesToNotes',
+] as const;
+
+export type PreviewableFlag = (typeof PREVIEWABLE_FLAGS)[number];
+
+export interface EffectsPreview {
+  /** Outcome with the flags exactly as the operator has them now. */
+  current: ValidationSummary;
+  /** Outcome with that one flag flipped, everything else held. The client
+   *  subtracts to show "+N rows would import". */
+  toggled: Record<PreviewableFlag, ValidationSummary>;
+}
+
+/**
+ * What each option would do to THIS file, without committing to anything.
+ *
+ * Reads the previewed CSV and rebuilds the dataset once per flag. Deliberately
+ * persists NOTHING: no ValidationRun, no rows, and the preview entry survives so
+ * the operator can keep toggling and then validate for real. Merchant PII must
+ * not accumulate because somebody flicked a switch.
+ */
+export async function previewFlagEffects(
+  uploadId: string,
+  columnMapping: Record<string, string>,
+  flags: CustomerTemplateFlags = {},
+): Promise<EffectsPreview | null> {
+  const entry = getPreview(uploadId);
+  if (!entry) return null;
+  assertValidColumnMapping(entry.headers, columnMapping);
+
+  // Parse once; the rebuild per flag is cheap next to reading the file again.
+  const { rows: rawRows } = await parseCsvFile(entry.filePath);
+  const summarize = (f: CustomerTemplateFlags) =>
+    buildValidationOutcome(rawRows, columnMapping, f).summary;
+
+  const toggled = {} as Record<PreviewableFlag, ValidationSummary>;
+  for (const flag of PREVIEWABLE_FLAGS) {
+    toggled[flag] = summarize({ ...flags, [flag]: !flags[flag] });
+  }
+
+  return { current: summarize(flags), toggled };
+}
+
 export async function validateFromPreview(
   uploadId: string,
   columnMapping: Record<string, string>,

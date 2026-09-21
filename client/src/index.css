@@ -270,6 +270,121 @@ body {
   line-height: 1.35;
 }
 
+/* ─── Validation Results: partition bar ──────────────────────────────────────
+   Ready/Fixed/Blocked/Removed sum to the row count, so they are drawn as one
+   divided bar rather than four tiles. Total Rows is the caption above it: it is
+   what the segments add up to, not a peer of them. */
+.summary-rows { font-size: 13px; color: var(--text-muted); margin: 0 0 10px; }
+.summary-rows b { color: var(--text); font-size: 15px; }
+.summary-bar {
+  display: flex;
+  height: 34px;
+  border-radius: var(--radius);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  margin-bottom: 14px;
+}
+.summary-seg {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700; color: #fff;
+  /* A 1%-wide segment must stay visible and hoverable for its tooltip. */
+  min-width: 4px;
+  white-space: nowrap; overflow: hidden;
+}
+.seg-ready { background: var(--success); }
+.seg-fixed { background: var(--info); }
+.seg-blocked { background: var(--error); }
+.seg-removed { background: #94a3b8; }
+
+.summary-legends {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px;
+}
+.summary-legend { border-left: 3px solid var(--border); padding: 2px 0 2px 11px; }
+.summary-legend .legend-label {
+  display: block; font-size: 12px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .5px;
+}
+.summary-legend .legend-value { display: block; font-size: 23px; font-weight: 700; line-height: 1.15; }
+.summary-legend .legend-note { display: block; font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.legend-ready { border-left-color: var(--success); }
+.legend-ready .legend-label { color: var(--success); }
+.legend-fixed { border-left-color: var(--info); }
+.legend-fixed .legend-label { color: var(--info); }
+.legend-blocked { border-left-color: var(--error); }
+.legend-blocked .legend-label { color: var(--error); }
+.legend-removed { border-left-color: #94a3b8; }
+.legend-removed .legend-label { color: var(--text-muted); }
+/* Zero carries no signal — stays grey however severe the bucket is. */
+.legend-zero { border-left-color: var(--border); }
+.legend-zero .legend-label { color: var(--text-muted); }
+.legend-zero .legend-value { color: #94a3b8; }
+
+/* Duplicates live below the rule because they are NOT part of the partition: a
+   duplicate is Fixed when moved to Note and Blocked when not. */
+.summary-diagnostics {
+  margin-top: 16px; padding-top: 14px;
+  border-top: 1px dashed var(--border);
+  display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+}
+.summary-diag-label {
+  font-size: 12px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .5px; color: var(--text-muted);
+}
+.summary-chip {
+  background: var(--warning-bg); border: 1px solid var(--warning-border);
+  color: var(--warning); border-radius: 999px;
+  padding: 4px 12px; font-size: 12.5px; font-weight: 600;
+}
+.summary-diag-none { font-size: 13px; color: var(--text-muted); }
+
+/* ─── Mapping screen: cleanup options ────────────────────────────────────────
+   Grouped by what they are FOR, with each option showing what it would do to
+   this file. Replaces five bare checkboxes on one header line whose only
+   explanation was a title tooltip. */
+.options-panel { margin: 18px 0 4px; }
+.options-group + .options-group { margin-top: 16px; }
+.options-group-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  gap: 10px; flex-wrap: wrap; margin-bottom: 6px;
+}
+.options-group-head b { font-size: 14px; }
+.options-group-head span { font-size: 12.5px; color: var(--text-muted); }
+.option-row {
+  display: flex; align-items: center; gap: 13px;
+  padding: 12px 15px; border: 1px solid var(--border);
+  border-radius: var(--radius); margin-top: 8px;
+  background: var(--surface); cursor: pointer;
+}
+.option-row.is-on { border-color: var(--info-border); background: var(--info-bg); }
+.option-switch { width: 16px; height: 16px; flex: none; accent-color: var(--primary); cursor: pointer; }
+.option-text { flex: 1; min-width: 0; }
+.option-name { display: block; font-weight: 600; font-size: 14px; }
+.option-desc { display: block; font-size: 12.5px; color: var(--text-muted); margin-top: 1px; }
+.option-effect {
+  flex: none; text-align: right; font-size: 12.5px; font-weight: 700;
+  color: var(--info); white-space: nowrap;
+}
+.option-effect small { display: block; font-weight: 400; color: var(--text-muted); font-size: 11.5px; }
+.option-effect-idle { color: var(--text-muted); font-weight: 400; }
+
+.options-tally {
+  margin-top: 18px; border: 1px solid var(--success-border);
+  background: var(--success-bg); border-radius: var(--radius);
+  padding: 14px 16px; display: flex; justify-content: space-between;
+  align-items: center; gap: 12px; flex-wrap: wrap;
+}
+.options-tally-n { font-size: 20px; font-weight: 700; color: var(--success); }
+.options-tally-l { font-size: 13px; color: #166534; }
+.options-tally-r { font-size: 12.5px; color: var(--text-muted); text-align: right; }
+
+@media (max-width: 640px) {
+  .option-row { flex-wrap: wrap; }
+  .option-effect { width: 100%; text-align: left; }
+  .options-tally-r { text-align: left; }
+}
+
 /* ─── Issues Table ───────────────────────────────────────────────────────── */
 .issues-section {
   background: var(--surface);

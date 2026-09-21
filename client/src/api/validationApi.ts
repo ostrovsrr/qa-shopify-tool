@@ -12,6 +12,7 @@ import {
   UpdateMetadataPayload,
   ValidationHistoryItem,
   ValidationResult,
+  ValidationSummary,
 } from '../types';
 
 const api = axios.create({
@@ -47,6 +48,34 @@ export interface TemplateFlags {
   mergeMatchingDuplicates: boolean;
   moveInvalidContactToNotes: boolean;
   fillMissingContactName: boolean;
+}
+
+/** Flags whose effect is previewed per option. HeliosMigratedTag is excluded —
+ *  it tags rows, it does not change whether any of them import. */
+export type PreviewableFlag =
+  | 'moveInvalidContactToNotes'
+  | 'fillMissingContactName'
+  | 'mergeMatchingDuplicates'
+  | 'moveDuplicatesToNotes';
+
+export interface EffectsPreview {
+  current: ValidationSummary;
+  toggled: Record<PreviewableFlag, ValidationSummary>;
+}
+
+/** Read-only: what each option would do to this file. Persists nothing and does
+ *  not consume the preview, so it is safe to call on every toggle. */
+export async function previewFlagEffects(
+  uploadId: string,
+  columnMapping: ColumnMapping,
+  flags: TemplateFlags,
+): Promise<EffectsPreview> {
+  const { data } = await api.post<EffectsPreview>('/customer-validation/preview-effects', {
+    uploadId,
+    columnMapping,
+    ...flags,
+  });
+  return data;
 }
 
 export async function validateWithMapping(

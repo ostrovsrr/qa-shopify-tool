@@ -53,7 +53,7 @@ The server has vitest tests (`npm run test`, `npm run test:integration`, `npm ru
 
 ### Data flow — Customers
 1. Client uploads CSV → `POST /api/customer-validation/preview` (returns parsed headers for column mapping)
-2. User maps CSV columns to Shopify fields on the `ColumnMappingScreen`
+2. User maps CSV columns to Shopify fields on the `ColumnMappingScreen`, and sets the cleanup options in `OptionsPanel`. That panel calls `POST /api/customer-validation/preview-effects` (debounced) to show what each option would do to *this* file — "+112 rows would import". **That endpoint is read-only: it persists nothing and deliberately does NOT consume the preview entry**, so an operator can toggle, look, toggle again, and only then validate for real. Merchant PII must not accumulate because somebody flicked a switch.
 3. Client submits mapping → `POST /api/customer-validation/validate` → runs all 13 rules, persists `ValidationRun`, `ValidationIssue`, and `OriginalCustomerRow` records to Postgres. The rules run on the **template dataset** (`runCustomerValidation`), i.e. the rows as the import sends them after merge / move-invalid-to-Notes / move-duplicates-to-Notes / fill-missing-name / HeliosMigrated tag — not on the raw file. Every rule's behaviour is pinned to a real test-store verdict; see the rule file comments before changing one.
 4. Client displays results; user can download `GET /api/customer-validation/report/:id` as Excel
 
