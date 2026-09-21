@@ -188,6 +188,44 @@ describe('buildTemplateDataset — fillMissingContactName', () => {
     expect([...droppedBlank]).toEqual([5]);
   });
 
+  // "Blank" means every MAPPED column is empty, and Keep / Add-to-* columns count
+  // as mapped: a row carrying only a kept passthrough value still reaches Shopify,
+  // so it is a customer and must survive.
+  it('does not treat a row carrying only a Keep column as blank', () => {
+    const { rows, namesFilled, droppedBlank } = buildTemplateDataset({
+      originalRows: [orig(4, { Email: '', 'Internal ID': 'X-99' })],
+      columnMapping: { Email: 'Email', 'Internal ID': 'Keep' },
+      fillMissingContactName: true,
+    });
+    expect(droppedBlank.size).toBe(0);
+    expect(rows[0].record['Internal ID']).toBe('X-99');
+    expect(rows[0].record['First Name']).toBe('Unknown 4');
+    expect(namesFilled.has(4)).toBe(true);
+  });
+
+  it('does not treat a row carrying only an Add-to-Note column as blank', () => {
+    const { rows, droppedBlank } = buildTemplateDataset({
+      originalRows: [orig(4, { Email: '', 'Legacy Ref': 'ref-1' })],
+      columnMapping: { Email: 'Email', 'Legacy Ref': 'Add to Note' },
+      fillMissingContactName: true,
+    });
+    expect(droppedBlank.size).toBe(0);
+    expect(rows[0].record['Note']).toBe('ref-1');
+    expect(rows[0].record['First Name']).toBe('Unknown 4');
+  });
+
+  // A column mapped to "Ignore" never reaches Shopify, so a row holding nothing
+  // else really would import as an empty customer. It is dropped.
+  it('treats a row whose only data is in an IGNORED column as blank', () => {
+    const { rows, droppedBlank } = buildTemplateDataset({
+      originalRows: [orig(4, { Email: '', 'Internal ID': 'X-99' })],
+      columnMapping: { Email: 'Email' },
+      fillMissingContactName: true,
+    });
+    expect(rows).toHaveLength(0);
+    expect([...droppedBlank]).toEqual([4]);
+  });
+
   it('keeps blank rows when the flag is off', () => {
     const { rows, droppedBlank } = buildTemplateDataset({
       originalRows: [orig(5, { 'First Name': '', Email: '' })],
