@@ -343,7 +343,13 @@ body {
    Grouped by what they are FOR, with each option showing what it would do to
    this file. Replaces five bare checkboxes on one header line whose only
    explanation was a title tooltip. */
-.options-panel { margin: 18px 0 4px; }
+/* A section of .mapping-card, which has no padding of its own — every section
+   inside it supplies its own 20px/24px and a bottom rule. Without these the
+   panel sat flush against the card edge while the header above it was inset. */
+.options-panel {
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--border);
+}
 .options-group + .options-group { margin-top: 16px; }
 .options-group-head {
   display: flex; justify-content: space-between; align-items: baseline;
@@ -749,24 +755,6 @@ body {
   display: flex;
   align-items: center;
   gap: 14px;
-}
-
-.helios-tag-label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  font-weight: 500;
-  color: #374151;
-  cursor: pointer;
-  user-select: none;
-}
-
-.helios-tag-label input[type="checkbox"] {
-  width: 15px;
-  height: 15px;
-  cursor: pointer;
-  accent-color: #004C3F;
 }
 
 .mapping-title {
