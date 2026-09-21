@@ -39,19 +39,25 @@ export async function previewCsv(file: File): Promise<CsvPreview> {
   return data;
 }
 
+/** The mapping screen's checkboxes. One object rather than a row of positional
+ *  booleans — they all look alike at a call site. */
+export interface TemplateFlags {
+  heliosMigratedTag: boolean;
+  moveDuplicatesToNotes: boolean;
+  mergeMatchingDuplicates: boolean;
+  moveInvalidContactToNotes: boolean;
+  fillMissingContactName: boolean;
+}
+
 export async function validateWithMapping(
   uploadId: string,
   columnMapping: ColumnMapping,
-  heliosMigratedTag: boolean,
-  moveDuplicatesToNotes: boolean,
-  mergeMatchingDuplicates: boolean,
+  flags: TemplateFlags,
 ): Promise<ValidationResult> {
   const { data } = await api.post<ValidationResult>('/customer-validation/validate', {
     uploadId,
     columnMapping,
-    heliosMigratedTag,
-    moveDuplicatesToNotes,
-    mergeMatchingDuplicates,
+    ...flags,
   });
   return data;
 }

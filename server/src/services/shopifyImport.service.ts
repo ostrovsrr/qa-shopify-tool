@@ -75,11 +75,14 @@ interface ImportSourceRun {
   columnMapping: unknown;
   moveDuplicatesToNotes?: boolean;
   mergeMatchingDuplicates?: boolean;
+  moveInvalidContactToNotes?: boolean;
+  fillMissingContactName?: boolean;
 }
 
 /** Build the final rows the import sends to Shopify — the same transformation
  *  the Excel "Shopify Template" sheet applies (column mapping + optional
- *  same-person merge + optional move-duplicates-to-Notes), so the store import
+ *  same-person merge + optional move-invalid-to-Notes + optional
+ *  move-duplicates-to-Notes + optional placeholder names), so the store import
  *  tests exactly the file the user would hand to Shopify. The HeliosMigrated
  *  tag is intentionally NOT applied here: it's a migration marker, not part of
  *  the QA comparison, and test-store customers already get their own qa tags. */
@@ -89,6 +92,8 @@ function buildImportRows(run: ImportSourceRun): TemplateRow[] {
     columnMapping: run.columnMapping as Record<string, string> | null,
     moveDuplicatesToNotes: run.moveDuplicatesToNotes ?? false,
     mergeMatchingDuplicates: run.mergeMatchingDuplicates ?? false,
+    moveInvalidContactToNotes: run.moveInvalidContactToNotes ?? false,
+    fillMissingContactName: run.fillMissingContactName ?? false,
   }).rows;
 }
 
