@@ -9,6 +9,7 @@ import {
   SHOPIFY_COLUMNS,
 } from '../services/columnMapping.service';
 import { CustomerValidationIssue, Severity } from '../types';
+import { CustomerTemplateFlags } from '../services/customerValidation.service';
 import { AutoFixEntry, computeAutoFixes } from './autoFix';
 import { excelSafeRecord, excelSafeText } from './excelCell';
 import { buildTemplateDataset } from './templateDataset';
@@ -57,6 +58,8 @@ export async function streamExcelReport(
     heliosMigratedTag: boolean;
     moveDuplicatesToNotes: boolean;
     mergeMatchingDuplicates: boolean;
+    moveInvalidContactToNotes: boolean;
+    fillMissingContactName: boolean;
     originalRows: { rowNumber: number; data: unknown }[];
   };
 
@@ -82,9 +85,13 @@ export async function streamExcelReport(
       : {};
 
   const autoFixes = computeAutoFixes(runData.originalRows, columnMapping);
-  const heliosMigratedTag: boolean = runData.heliosMigratedTag ?? false;
-  const moveDuplicatesToNotes: boolean = runData.moveDuplicatesToNotes ?? false;
-  const mergeMatchingDuplicates: boolean = runData.mergeMatchingDuplicates ?? false;
+  const flags: CustomerTemplateFlags = {
+    heliosMigratedTag: runData.heliosMigratedTag ?? false,
+    moveDuplicatesToNotes: runData.moveDuplicatesToNotes ?? false,
+    mergeMatchingDuplicates: runData.mergeMatchingDuplicates ?? false,
+    moveInvalidContactToNotes: runData.moveInvalidContactToNotes ?? false,
+    fillMissingContactName: runData.fillMissingContactName ?? false,
+  };
 
   // Headers must be set before the workbook writes its first byte.
   onReady(run.fileName);
@@ -101,16 +108,7 @@ export async function streamExcelReport(
 
   addIssuesSheet(workbook, 'Errors', issues.filter((i) => i.severity === 'Error'));
   addFullUploadedFileSheet(workbook, originalColumns, runData.originalRows);
-  addShopifyTemplateSheet(
-    workbook,
-    columnMapping,
-    runData.originalRows,
-    autoFixes,
-    heliosMigratedTag,
-    moveDuplicatesToNotes,
-    issues,
-    mergeMatchingDuplicates,
-  );
+  addShopifyTemplateSheet(workbook, columnMapping, runData.originalRows, autoFixes, issues, flags);
 
   await workbook.commit();
 }
@@ -207,11 +205,16 @@ function addShopifyTemplateSheet(
   columnMapping: Record<string, string>,
   originalRows: { rowNumber: number; data: unknown }[],
   autoFixes: AutoFixEntry[] = [],
-  heliosMigratedTag = false,
-  moveDuplicatesToNotes = false,
   issues: CustomerValidationIssue[] = [],
-  mergeMatchingDuplicates = false,
+  flags: CustomerTemplateFlags = {},
 ) {
+  const {
+    heliosMigratedTag = false,
+    moveDuplicatesToNotes = false,
+    mergeMatchingDuplicates = false,
+    moveInvalidContactToNotes = false,
+    fillMissingContactName = false,
+  } = flags;
   const sheet = workbook.addWorksheet('Shopify Template');
 
   if (Object.keys(columnMapping).length === 0 || originalRows.length === 0) {
@@ -233,13 +236,23 @@ function addShopifyTemplateSheet(
   // The transformation itself (mapping + auto-fixes + optional merge +
   // move-to-Notes + Helios tag) is shared with the test-store import so what
   // gets imported is exactly what this sheet shows.
-  const { rows: templateRows, emailDupes, phoneDupes, anyMerges, fixMap } = buildTemplateDataset({
+  const {
+    rows: templateRows,
+    emailDupes,
+    phoneDupes,
+    anyMerges,
+    fixMap,
+    invalidMoved,
+    namesFilled,
+  } = buildTemplateDataset({
     originalRows,
     columnMapping,
     autoFixes,
     heliosMigratedTag,
     moveDuplicatesToNotes,
     mergeMatchingDuplicates,
+    moveInvalidContactToNotes,
+    fillMissingContactName,
   });
   const emailGroups = emailDupes.groups;
   const phoneGroups = phoneDupes.groups;
@@ -248,6 +261,19 @@ function addShopifyTemplateSheet(
   // DuplicatePhoneNotes marker) columns even when neither was mapped
   if (moveDuplicatesToNotes && (emailDupes.repeats.size > 0 || phoneDupes.repeats.size > 0)) {
     if (!effectiveColumns.includes('Note')) effectiveColumns.push('Note');
+    if (!effectiveColumns.includes('Tags')) effectiveColumns.push('Tags');
+  }
+
+  // Same for the cleanup options: whatever a transform wrote has to appear as a
+  // column, or the sheet would hide a value the import is going to send. The
+  // placeholder name needs First Name in particular — without this the operator
+  // hands over a file with no sign of it while the import sends it anyway.
+  if (invalidMoved.size > 0) {
+    if (!effectiveColumns.includes('Note')) effectiveColumns.push('Note');
+    if (!effectiveColumns.includes('Tags')) effectiveColumns.push('Tags');
+  }
+  if (namesFilled.size > 0) {
+    if (!effectiveColumns.includes('First Name')) effectiveColumns.push('First Name');
     if (!effectiveColumns.includes('Tags')) effectiveColumns.push('Tags');
   }
 

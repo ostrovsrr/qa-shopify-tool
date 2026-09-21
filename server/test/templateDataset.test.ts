@@ -80,3 +80,170 @@ describe('buildTemplateDataset', () => {
     expect(rows[0].record).toEqual({ Email: 'a@x.com' });
   });
 });
+
+// The values Shopify rejects outright are cleared into Note so the rest of the
+// row still imports. The verdict comes from contactValidity.ts, the same code
+// InvalidEmailRule / InvalidPhoneRule report from, so what is stripped here and
+// what is flagged there can never disagree.
+describe('buildTemplateDataset — moveInvalidContactToNotes', () => {
+  it('clears an invalid email into Note and tags the row', () => {
+    const { rows, invalidMoved } = buildTemplateDataset({
+      originalRows: [orig(2, { 'First Name': 'Ann', Email: 'qa..probe@example.com' })],
+      moveInvalidContactToNotes: true,
+    });
+    expect(rows[0].record['Email']).toBe('');
+    expect(rows[0].record['Note']).toBe('Invalid email: qa..probe@example.com');
+    expect(rows[0].record['Tags']).toBe('InvalidEmailNotes');
+    expect(invalidMoved.has(2)).toBe(true);
+  });
+
+  it('clears an invalid phone into Note and tags the row', () => {
+    const { rows } = buildTemplateDataset({
+      originalRows: [orig(2, { 'First Name': 'Ann', Phone: '555-555-5555' })],
+      moveInvalidContactToNotes: true,
+    });
+    expect(rows[0].record['Phone']).toBe('');
+    expect(rows[0].record['Note']).toBe('Invalid phone: 555-555-5555');
+    expect(rows[0].record['Tags']).toBe('InvalidPhoneNotes');
+  });
+
+  it('leaves valid values alone and keeps an existing Note', () => {
+    const { rows, invalidMoved } = buildTemplateDataset({
+      originalRows: [
+        orig(2, { Email: 'real@example.com', Phone: '+1 613 555 0104', Note: 'keep me' }),
+      ],
+      moveInvalidContactToNotes: true,
+    });
+    expect(rows[0].record['Email']).toBe('real@example.com');
+    expect(rows[0].record['Phone']).toBe('+1 613 555 0104');
+    expect(rows[0].record['Note']).toBe('keep me');
+    expect(invalidMoved.size).toBe(0);
+  });
+
+  it('appends both to one Note, after the text already there', () => {
+    const { rows } = buildTemplateDataset({
+      originalRows: [orig(2, { Email: 'bad@@x.com', Phone: 'not a phone', Note: 'existing' })],
+      moveInvalidContactToNotes: true,
+    });
+    expect(rows[0].record['Note']).toBe(
+      'existing | Invalid email: bad@@x.com | Invalid phone: not a phone',
+    );
+    expect(rows[0].record['Tags']).toBe('InvalidEmailNotes,InvalidPhoneNotes');
+  });
+
+  // Ordering: stripping runs before the duplicate grouping, so a value that has
+  // been cleared cannot also be reported as a duplicate of itself.
+  it('does not group two rows sharing one invalid email as duplicates', () => {
+    const { rows, emailDupes } = buildTemplateDataset({
+      originalRows: [
+        orig(2, { 'First Name': 'A', Email: 'bad..dup@x.com' }),
+        orig(3, { 'First Name': 'B', Email: 'bad..dup@x.com' }),
+      ],
+      moveInvalidContactToNotes: true,
+      moveDuplicatesToNotes: true,
+    });
+    expect(emailDupes.groups.size).toBe(0);
+    for (const row of rows) {
+      expect(row.record['Note']).toBe('Invalid email: bad..dup@x.com');
+      expect(row.record['Note']).not.toContain('Duplicate');
+    }
+  });
+
+  it('changes nothing when the flag is off', () => {
+    const originalRows = [orig(2, { Email: 'qa..probe@example.com', Phone: '555-555-5555' })];
+    expect(buildTemplateDataset({ originalRows }).rows[0].record).toEqual({
+      Email: 'qa..probe@example.com',
+      Phone: '555-555-5555',
+    });
+  });
+});
+
+describe('buildTemplateDataset — fillMissingContactName', () => {
+  it('names a row that has data but no identity field', () => {
+    const { rows, namesFilled } = buildTemplateDataset({
+      originalRows: [orig(7, { 'Default Address City': 'Toronto', Tags: 'vip' })],
+      fillMissingContactName: true,
+    });
+    expect(rows[0].record['First Name']).toBe('Unknown 7');
+    expect(rows[0].record['Tags']).toBe('vip,NoContactInfo');
+    expect(namesFilled.has(7)).toBe(true);
+  });
+
+  // The guard that matters: toRows() trims only TRAILING blank rows, so a blank
+  // line mid-file survives as an all-empty row. Naming it would invent a
+  // customer out of a stray newline, and would silence the mass-MissingContact
+  // signal that tells an operator they mapped the wrong columns.
+  it('leaves a fully blank row alone, so it still reports MissingContact', () => {
+    const { rows, namesFilled } = buildTemplateDataset({
+      originalRows: [orig(5, { 'First Name': '', Email: '', 'Default Address City': '' })],
+      fillMissingContactName: true,
+    });
+    expect(rows[0].record['First Name']).toBe('');
+    expect(rows[0].record['Tags']).toBeUndefined();
+    expect(namesFilled.size).toBe(0);
+  });
+
+  it('leaves a row that already has any identity field alone', () => {
+    const { rows, namesFilled } = buildTemplateDataset({
+      originalRows: [
+        orig(2, { 'Last Name': 'Solo', 'Default Address City': 'Toronto' }),
+        orig(3, { Phone: '+1 613 555 0104', 'Default Address City': 'Ottawa' }),
+      ],
+      fillMissingContactName: true,
+    });
+    expect(rows[0].record['First Name']).toBeUndefined();
+    expect(rows[1].record['First Name']).toBeUndefined();
+    expect(namesFilled.size).toBe(0);
+  });
+
+  it('changes nothing when the flag is off', () => {
+    const { rows, namesFilled } = buildTemplateDataset({
+      originalRows: [orig(7, { 'Default Address City': 'Toronto' })],
+    });
+    expect(rows[0].record['First Name']).toBeUndefined();
+    expect(namesFilled.size).toBe(0);
+  });
+});
+
+// The composition the two flags were built for.
+describe('buildTemplateDataset — both cleanup flags together', () => {
+  it('rescues a row whose only identity was an invalid email', () => {
+    const { rows, namesFilled } = buildTemplateDataset({
+      originalRows: [orig(4, { Email: 'bad..dup@x.com', 'Default Address City': 'Toronto' })],
+      moveInvalidContactToNotes: true,
+      fillMissingContactName: true,
+    });
+    expect(rows[0].record['Email']).toBe('');
+    expect(rows[0].record['First Name']).toBe('Unknown 4');
+    expect(rows[0].record['Note']).toBe('Invalid email: bad..dup@x.com');
+    expect(rows[0].record['Tags']).toBe('InvalidEmailNotes,NoContactInfo');
+    expect(namesFilled.has(4)).toBe(true);
+  });
+
+  // hadSubstance is snapshotted before the strip, so the Note written by
+  // moveInvalidContactToNotes must not make a blank row look substantial.
+  it('still refuses to name a blank row when both flags are on', () => {
+    const { rows, namesFilled } = buildTemplateDataset({
+      originalRows: [orig(5, { Email: '', Phone: '', 'Default Address City': '' })],
+      moveInvalidContactToNotes: true,
+      fillMissingContactName: true,
+    });
+    expect(rows[0].record['First Name']).toBeUndefined();
+    expect(rows[0].record['Note']).toBeUndefined();
+    expect(namesFilled.size).toBe(0);
+  });
+
+  it('is deterministic with both flags on', () => {
+    const opts = {
+      originalRows: [
+        orig(2, { Email: 'bad..dup@x.com', 'Default Address City': 'Toronto' }),
+        orig(3, { 'First Name': 'Ann', Phone: '555-555-5555' }),
+      ],
+      moveInvalidContactToNotes: true,
+      fillMissingContactName: true,
+    };
+    const a = buildTemplateDataset(opts);
+    const b = buildTemplateDataset(opts);
+    expect(a.rows.map((r) => r.record)).toEqual(b.rows.map((r) => r.record));
+  });
+});

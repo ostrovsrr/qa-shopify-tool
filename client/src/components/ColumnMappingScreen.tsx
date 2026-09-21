@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import type { TemplateFlags } from '../api/validationApi';
 import { ColumnMapping, CsvPreview } from '../types';
 
 const SHOPIFY_COLUMNS = [
@@ -32,12 +33,7 @@ const KEEP_TARGET = 'Keep';
 
 interface Props {
   preview: CsvPreview;
-  onValidate: (
-    mapping: ColumnMapping,
-    heliosMigratedTag: boolean,
-    moveDuplicatesToNotes: boolean,
-    mergeMatchingDuplicates: boolean,
-  ) => void;
+  onValidate: (mapping: ColumnMapping, flags: TemplateFlags) => void;
   onBack: () => void;
   loading: boolean;
 }
@@ -53,6 +49,10 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
   const [heliosMigratedTag, setHeliosMigratedTag] = useState(true);
   const [moveDuplicatesToNotes, setMoveDuplicatesToNotes] = useState(false);
   const [mergeMatchingDuplicates, setMergeMatchingDuplicates] = useState(false);
+  // Both off by default: each one edits the data the operator is about to hand
+  // to Shopify, so it happens only when they ask for it.
+  const [moveInvalidContactToNotes, setMoveInvalidContactToNotes] = useState(false);
+  const [fillMissingContactName, setFillMissingContactName] = useState(false);
 
   const mappedCount = Object.values(mapping).filter(Boolean).length;
   const targetCounts = new Map<string, number>();
@@ -75,7 +75,13 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
     for (const [src, tgt] of Object.entries(mapping)) {
       if (tgt) filtered[src] = tgt;
     }
-    onValidate(filtered, heliosMigratedTag, moveDuplicatesToNotes, mergeMatchingDuplicates);
+    onValidate(filtered, {
+      heliosMigratedTag,
+      moveDuplicatesToNotes,
+      mergeMatchingDuplicates,
+      moveInvalidContactToNotes,
+      fillMissingContactName,
+    });
   };
 
   return (
@@ -128,6 +134,30 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
               disabled={loading}
             />
             Merge matching duplicates
+          </label>
+          <label
+            className="helios-tag-label"
+            title="In the Shopify Template sheet, an Email or Phone that Shopify would reject is cleared, appended to Note as 'Invalid email: ...' / 'Invalid phone: ...', and tagged InvalidEmailNotes / InvalidPhoneNotes so it's filterable in Shopify admin. The rest of the row imports instead of the whole customer being rejected. Only the invalid field is moved — a row with a bad phone keeps its email."
+          >
+            <input
+              type="checkbox"
+              checked={moveInvalidContactToNotes}
+              onChange={(e) => setMoveInvalidContactToNotes(e.target.checked)}
+              disabled={loading}
+            />
+            Move invalid emails/phones to Note
+          </label>
+          <label
+            className="helios-tag-label"
+            title="Shopify rejects a customer with no name, email and phone. In the Shopify Template sheet, a row that carries other data (an address, tags, a note) is given First Name 'Unknown <row number>' and tagged NoContactInfo so it imports and stays findable. Blank rows are never named — they keep reporting MissingContact, which is how you spot a file mapped to the wrong columns."
+          >
+            <input
+              type="checkbox"
+              checked={fillMissingContactName}
+              onChange={(e) => setFillMissingContactName(e.target.checked)}
+              disabled={loading}
+            />
+            Name contactless rows "Unknown"
           </label>
           <button
             className="btn btn-primary"

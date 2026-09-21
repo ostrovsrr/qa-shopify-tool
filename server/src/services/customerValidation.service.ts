@@ -30,18 +30,32 @@ function applyColumnMapping(
   }));
 }
 
+/** The operator's choices on the mapping screen. Every one of them changes what
+ *  the import sends, so they travel together: stored on the ValidationRun, read
+ *  back by the import, and replayed by the report. */
+export interface CustomerTemplateFlags {
+  heliosMigratedTag?: boolean;
+  moveDuplicatesToNotes?: boolean;
+  mergeMatchingDuplicates?: boolean;
+  moveInvalidContactToNotes?: boolean;
+  fillMissingContactName?: boolean;
+}
+
 /**
  * Run every customer rule against the rows as they will be SENT: the same template
  * dataset the import and the Excel "Shopify Template" sheet build from (mapping,
- * same-person merge, move-duplicates-to-Notes, HeliosMigrated tag). With those
- * options off it is the mapped file itself. With them on, a duplicate whose phone
- * is moved to Note is no longer a rejected phone, a merged-away row is not imported
- * at all, and a Note that grows past Shopify's limit is caught. Pure — no I/O.
+ * same-person merge, move-invalid-to-Notes, move-duplicates-to-Notes, placeholder
+ * names, HeliosMigrated tag). With those options off it is the mapped file itself.
+ * With them on, a duplicate whose phone is moved to Note is no longer a rejected
+ * phone, an invalid email that was stripped is no longer an invalid email, a row
+ * given a placeholder name is no longer a missing contact, a merged-away row is
+ * not imported at all, and a Note that grows past Shopify's limit is caught.
+ * Pure — no I/O.
  */
 export function runCustomerValidation(
   rawRows: CustomerCsvRow[],
   columnMapping: Record<string, string>,
-  options: { heliosMigratedTag?: boolean; moveDuplicatesToNotes?: boolean; mergeMatchingDuplicates?: boolean } = {},
+  options: CustomerTemplateFlags = {},
 ): CustomerValidationIssue[] {
   const dataset = buildTemplateDataset({
     originalRows: rawRows.map((r) => ({ rowNumber: r.rowNumber, data: r.original })),
@@ -49,6 +63,8 @@ export function runCustomerValidation(
     heliosMigratedTag: options.heliosMigratedTag ?? false,
     moveDuplicatesToNotes: options.moveDuplicatesToNotes ?? false,
     mergeMatchingDuplicates: options.mergeMatchingDuplicates ?? false,
+    moveInvalidContactToNotes: options.moveInvalidContactToNotes ?? false,
+    fillMissingContactName: options.fillMissingContactName ?? false,
   });
   const sentRows: CustomerCsvRow[] = dataset.rows.map((r) => ({
     rowNumber: r.rowNumber,
@@ -72,12 +88,20 @@ export async function validateCustomerCsv(
   filePath: string,
   fileName: string,
   columnMapping: Record<string, string> = {},
-  heliosMigratedTag = false,
-  moveDuplicatesToNotes = false,
-  mergeMatchingDuplicates = false,
+  // One object rather than a row of positional booleans: five of them in a call
+  // is an argument-order bug waiting to happen, and the import reads the same
+  // set back off the run.
+  flags: CustomerTemplateFlags = {},
   // Display + audit only. NEVER a filter on who may see this run.
   createdBy?: string,
 ): Promise<CustomerValidationResult> {
+  const {
+    heliosMigratedTag = false,
+    moveDuplicatesToNotes = false,
+    mergeMatchingDuplicates = false,
+    moveInvalidContactToNotes = false,
+    fillMissingContactName = false,
+  } = flags;
   const { rows: rawRows, headers } = await parseCsvFile(filePath);
   if (rawRows.length === 0) {
     throw new CsvParseError('The file contains a header row but no customer data rows.');
@@ -91,6 +115,8 @@ export async function validateCustomerCsv(
     heliosMigratedTag,
     moveDuplicatesToNotes,
     mergeMatchingDuplicates,
+    moveInvalidContactToNotes,
+    fillMissingContactName,
   });
 
   const errors = allIssues.filter((i) => i.severity === 'Error').length;
@@ -125,6 +151,8 @@ export async function validateCustomerCsv(
           heliosMigratedTag,
           moveDuplicatesToNotes,
           mergeMatchingDuplicates,
+          moveInvalidContactToNotes,
+          fillMissingContactName,
         },
       });
 
@@ -171,9 +199,7 @@ export async function validateCustomerCsv(
 export async function validateFromPreview(
   uploadId: string,
   columnMapping: Record<string, string>,
-  heliosMigratedTag = false,
-  moveDuplicatesToNotes = false,
-  mergeMatchingDuplicates = false,
+  flags: CustomerTemplateFlags = {},
   createdBy?: string,
 ): Promise<CustomerValidationResult | null> {
   const entry = getPreview(uploadId);
@@ -183,9 +209,7 @@ export async function validateFromPreview(
     entry.filePath,
     entry.fileName,
     columnMapping,
-    heliosMigratedTag,
-    moveDuplicatesToNotes,
-    mergeMatchingDuplicates,
+    flags,
     createdBy,
   );
   // The validate step consumed the preview — delete it, which unlinks the temp

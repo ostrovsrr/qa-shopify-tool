@@ -32,6 +32,10 @@ const validateWithMappingSchema = z.object({
   heliosMigratedTag: z.boolean().default(true),
   moveDuplicatesToNotes: z.boolean().default(false),
   mergeMatchingDuplicates: z.boolean().default(false),
+  // Both default OFF: each one edits the data the operator is about to hand to
+  // Shopify, so it happens only when they ask for it.
+  moveInvalidContactToNotes: z.boolean().default(false),
+  fillMissingContactName: z.boolean().default(false),
 });
 
 // POST /api/customer-validation/preview
@@ -83,9 +87,13 @@ export async function validateWithMappingHandler(
     const result = await validateFromPreview(
       parsed.data.uploadId,
       parsed.data.columnMapping,
-      parsed.data.heliosMigratedTag,
-      parsed.data.moveDuplicatesToNotes,
-      parsed.data.mergeMatchingDuplicates,
+      {
+        heliosMigratedTag: parsed.data.heliosMigratedTag,
+        moveDuplicatesToNotes: parsed.data.moveDuplicatesToNotes,
+        mergeMatchingDuplicates: parsed.data.mergeMatchingDuplicates,
+        moveInvalidContactToNotes: parsed.data.moveInvalidContactToNotes,
+        fillMissingContactName: parsed.data.fillMissingContactName,
+      },
       actorFrom(req),
     );
     if (!result) {
@@ -113,9 +121,7 @@ export async function uploadHandler(
       req.file.path,
       req.file.originalname,
       {},
-      false,
-      false,
-      false,
+      {},
       actorFrom(req),
     );
     res.status(200).json(result);

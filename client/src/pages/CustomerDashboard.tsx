@@ -6,6 +6,7 @@ import {
   getReportDownloadUrl,
   previewCsv,
   validateWithMapping,
+  type TemplateFlags,
 } from '../api/validationApi';
 import { ColumnMappingScreen } from '../components/ColumnMappingScreen';
 import { ImportPanel } from '../components/ImportPanel';
@@ -82,23 +83,12 @@ export function CustomerDashboard() {
     }
   };
 
-  const handleValidate = async (
-    mapping: ColumnMapping,
-    heliosMigratedTag: boolean,
-    moveDuplicatesToNotes: boolean,
-    mergeMatchingDuplicates: boolean,
-  ) => {
+  const handleValidate = async (mapping: ColumnMapping, flags: TemplateFlags) => {
     if (!preview) return;
     setLoading(true);
     setError('');
     try {
-      const data = await validateWithMapping(
-        preview.uploadId,
-        mapping,
-        heliosMigratedTag,
-        moveDuplicatesToNotes,
-        mergeMatchingDuplicates,
-      );
+      const data = await validateWithMapping(preview.uploadId, mapping, flags);
       setResult(data);
       setUploadPhase('results');
       setHistoryRefresh((n) => n + 1);

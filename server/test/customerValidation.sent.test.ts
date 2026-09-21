@@ -43,4 +43,48 @@ describe('runCustomerValidation judges what is sent', () => {
     expect(types(runCustomerValidation(makeRows([{ 'First Name': 'A', Tags: tags }]), {}, { heliosMigratedTag: true })))
       .toEqual(['2:TooManyTags']);
   });
+
+  it('with move-invalid-to-Notes on, stops flagging the values it strips', () => {
+    const bad = () =>
+      makeRows([{ 'First Name': 'Ann', Email: 'qa..probe@example.com', Phone: '555-555-5555' }]);
+    expect(types(runCustomerValidation(bad(), {}))).toEqual(['2:InvalidEmail', '2:InvalidPhone']);
+    expect(runCustomerValidation(bad(), {}, { moveInvalidContactToNotes: true })).toHaveLength(0);
+  });
+
+  it('catches a Note pushed past the limit by the moved invalid value', () => {
+    const issues = runCustomerValidation(
+      makeRows([{ 'First Name': 'Ann', Email: 'qa..probe@example.com', Note: 'x'.repeat(4990) }]),
+      {},
+      { moveInvalidContactToNotes: true },
+    );
+    expect(types(issues)).toEqual(['2:FieldTooLong']);
+  });
+
+  it('with fill-missing-name on, stops flagging MissingContact on a row with data', () => {
+    const noIdentity = () => makeRows([{ 'Default Address City': 'Toronto', Tags: 'vip' }]);
+    expect(types(runCustomerValidation(noIdentity(), {}))).toEqual(['2:MissingContact']);
+    expect(runCustomerValidation(noIdentity(), {}, { fillMissingContactName: true })).toHaveLength(0);
+  });
+
+  // The wrong-mapping alarm has to keep ringing: a blank row is never named, so
+  // it still reports MissingContact with the option on.
+  it('still reports MissingContact for a blank row with fill-missing-name on', () => {
+    const blank = () => makeRows([{ 'First Name': '', Email: '', 'Default Address City': '' }]);
+    expect(types(runCustomerValidation(blank(), {}, { fillMissingContactName: true })))
+      .toEqual(['2:MissingContact']);
+  });
+
+  // The composition: strip the unusable email, then rescue the row it emptied.
+  it('imports a row whose only identity was an invalid email when both are on', () => {
+    const row = () => makeRows([{ Email: 'qa..probe@example.com', 'Default Address City': 'Toronto' }]);
+    expect(types(runCustomerValidation(row(), {}))).toEqual(['2:InvalidEmail']);
+    expect(types(runCustomerValidation(row(), {}, { moveInvalidContactToNotes: true })))
+      .toEqual(['2:MissingContact']);
+    expect(
+      runCustomerValidation(row(), {}, {
+        moveInvalidContactToNotes: true,
+        fillMissingContactName: true,
+      }),
+    ).toHaveLength(0);
+  });
 });

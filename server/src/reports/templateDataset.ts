@@ -1,7 +1,8 @@
 import { AutoFixEntry } from './autoFix';
 import { mergeMatchingDuplicateRows, TemplateRow } from './mergeDuplicates';
 import { applyMappingToRecord } from '../services/columnMapping.service';
-import { canonicalPhone } from '../utils/normalize';
+import { canonicalPhone, isRowFullyEmpty } from '../utils/normalize';
+import { emailProblem, phoneProblem } from '../validators/customer/contactValidity';
 
 export const HELIOS_TAG = 'HeliosMigrated';
 
@@ -15,8 +16,9 @@ export interface DuplicateGroups {
 }
 
 /** The final customer dataset a validation run produces: column mapping,
- *  auto-fixes, optional same-person merging, optional move-duplicates-to-Notes,
- *  and the HeliosMigrated tag all applied to each surviving row's record.
+ *  auto-fixes, optional same-person merging, optional move-invalid-to-Notes,
+ *  optional move-duplicates-to-Notes, optional placeholder names, and the
+ *  HeliosMigrated tag all applied to each surviving row's record.
  *  Both the Excel "Shopify Template" sheet and the test-store import build from
  *  this, so what gets imported is exactly what the template shows. */
 export interface TemplateDataset {
@@ -26,6 +28,10 @@ export interface TemplateDataset {
   anyMerges: boolean;
   /** rowNumber → shopify column → fixed value (for the report's highlight). */
   fixMap: Map<number, Map<string, string>>;
+  /** Rows whose invalid Email/Phone was stripped into Note. */
+  invalidMoved: Set<number>;
+  /** Rows given a placeholder First Name so Shopify would accept them. */
+  namesFilled: Set<number>;
 }
 
 export interface TemplateDatasetOptions {
@@ -35,6 +41,20 @@ export interface TemplateDatasetOptions {
   heliosMigratedTag?: boolean;
   moveDuplicatesToNotes?: boolean;
   mergeMatchingDuplicates?: boolean;
+  moveInvalidContactToNotes?: boolean;
+  fillMissingContactName?: boolean;
+}
+
+/** Append to Note / Tags without clobbering what the row already carries.
+ *  Several transforms write both, so the joining lives in one place. */
+function appendNote(record: Record<string, string>, parts: string[]): void {
+  const existing = (record['Note'] ?? '').trim();
+  record['Note'] = [existing, ...parts].filter(Boolean).join(' | ');
+}
+
+function appendTags(record: Record<string, string>, tags: string[]): void {
+  const existing = (record['Tags'] ?? '').trim();
+  record['Tags'] = [existing, ...tags].filter(Boolean).join(',');
 }
 
 /** Assign duplicate-group numbers per surviving row, grouped by a Shopify
@@ -87,6 +107,8 @@ export function buildTemplateDataset(options: TemplateDatasetOptions): TemplateD
     heliosMigratedTag = false,
     moveDuplicatesToNotes = false,
     mergeMatchingDuplicates = false,
+    moveInvalidContactToNotes = false,
+    fillMissingContactName = false,
   } = options;
   const columnMapping = options.columnMapping ?? {};
   const hasMapping = Object.keys(columnMapping).length > 0;
@@ -125,6 +147,50 @@ export function buildTemplateDataset(options: TemplateDatasetOptions): TemplateD
     templateRows = mergeMatchingDuplicateRows(templateRows);
   }
   const anyMerges = templateRows.some((row) => row.mergedFrom.length > 0);
+
+  // Which rows carry anything Shopify would store, judged HERE — before the
+  // transforms below write their own Note and Tags. Read any later and a blank
+  // line in the middle of the CSV looks substantial because we just wrote
+  // "Invalid email: ..." into it. fillMissingContactName consults this.
+  const hadSubstance = new Set<number>();
+  for (const row of templateRows) {
+    if (!isRowFullyEmpty(row.record)) hadSubstance.add(row.rowNumber);
+  }
+
+  // Strip values Shopify rejects outright into Note, so the row imports without
+  // them instead of failing whole. Runs BEFORE the duplicate grouping below: an
+  // email that has already been cleared cannot form a duplicate group, so the
+  // report never shows a group number against an empty cell. It also lowers the
+  // row's completeness score, which is correct — a row that just lost its email
+  // is a worse keeper than one that kept it.
+  const invalidMoved = new Set<number>();
+  if (moveInvalidContactToNotes) {
+    for (const row of templateRows) {
+      const record = row.record;
+      const moved: string[] = [];
+      const tags: string[] = [];
+
+      const email = (record['Email'] ?? '').trim();
+      if (email && emailProblem(email)) {
+        moved.push(`Invalid email: ${email}`);
+        tags.push('InvalidEmailNotes');
+        record['Email'] = '';
+      }
+      const phone = (record['Phone'] ?? '').trim();
+      if (phone && phoneProblem(phone)) {
+        moved.push(`Invalid phone: ${phone}`);
+        tags.push('InvalidPhoneNotes');
+        record['Phone'] = '';
+      }
+
+      if (moved.length > 0) {
+        appendNote(record, moved);
+        appendTags(record, tags);
+        invalidMoved.add(row.rowNumber);
+      }
+    }
+  }
+  const namesFilled = new Set<number>();
 
   // Completeness score per surviving row (recomputed after merging, since a
   // merged keeper absorbs fields). Used to pick which row of a duplicate group
@@ -176,12 +242,30 @@ export function buildTemplateDataset(options: TemplateDatasetOptions): TemplateD
         }
       }
       if (moved.length > 0) {
-        const existingNote = (record['Note'] ?? '').trim();
-        record['Note'] = [existingNote, ...moved].filter(Boolean).join(' | ');
+        appendNote(record, moved);
         // Tag the stripped rows (never the keeper) so they're filterable in
         // Shopify admin after import
-        const existingTags = (record['Tags'] ?? '').trim();
-        record['Tags'] = [existingTags, ...dupTags].filter(Boolean).join(',');
+        appendTags(record, dupTags);
+      }
+    }
+
+    // LAST of the row transforms, after everything above that can empty a row.
+    // Shopify rejects a customer with no name, email or phone outright, so a
+    // placeholder First Name is the difference between importing the row's
+    // address, tags and notes and losing them. Guarded two ways: the row must
+    // still have no identity field, and it must have carried real data before
+    // these transforms ran — a blank CSV line stays a MissingContact error
+    // instead of becoming a customer conjured out of a stray newline. The row
+    // number keeps them apart in the admin; the tag makes them filterable and
+    // reachable by the QA cleanup route.
+    if (fillMissingContactName) {
+      const hasIdentity = ['First Name', 'Last Name', 'Email', 'Phone'].some(
+        (field) => (record[field] ?? '').trim() !== '',
+      );
+      if (!hasIdentity && hadSubstance.has(row.rowNumber)) {
+        record['First Name'] = `Unknown ${row.rowNumber}`;
+        appendTags(record, ['NoContactInfo']);
+        namesFilled.add(row.rowNumber);
       }
     }
 
@@ -201,5 +285,13 @@ export function buildTemplateDataset(options: TemplateDatasetOptions): TemplateD
     }
   }
 
-  return { rows: templateRows, emailDupes, phoneDupes, anyMerges, fixMap };
+  return {
+    rows: templateRows,
+    emailDupes,
+    phoneDupes,
+    anyMerges,
+    fixMap,
+    invalidMoved,
+    namesFilled,
+  };
 }
