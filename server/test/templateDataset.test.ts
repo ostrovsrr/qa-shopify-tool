@@ -169,18 +169,31 @@ describe('buildTemplateDataset — fillMissingContactName', () => {
     expect(namesFilled.has(7)).toBe(true);
   });
 
-  // The guard that matters: toRows() trims only TRAILING blank rows, so a blank
-  // line mid-file survives as an all-empty row. Naming it would invent a
-  // customer out of a stray newline, and would silence the mass-MissingContact
-  // signal that tells an operator they mapped the wrong columns.
-  it('leaves a fully blank row alone, so it still reports MissingContact', () => {
-    const { rows, namesFilled } = buildTemplateDataset({
-      originalRows: [orig(5, { 'First Name': '', Email: '', 'Default Address City': '' })],
+  // toRows() trims only TRAILING blank rows, so a blank line mid-file survives as
+  // an all-empty row. It is not a customer, so it leaves the dataset rather than
+  // being named (a customer conjured out of a stray newline) or carried (an
+  // import failure for a line holding nothing). It stays on the "Full Uploaded
+  // File" sheet.
+  it('drops a fully blank row instead of naming it', () => {
+    const { rows, namesFilled, droppedBlank } = buildTemplateDataset({
+      originalRows: [
+        orig(4, { 'First Name': '', Email: '', 'Default Address City': 'Toronto' }),
+        orig(5, { 'First Name': '', Email: '', 'Default Address City': '' }),
+      ],
       fillMissingContactName: true,
     });
-    expect(rows[0].record['First Name']).toBe('');
-    expect(rows[0].record['Tags']).toBeUndefined();
-    expect(namesFilled.size).toBe(0);
+    expect(rows.map((r) => r.rowNumber)).toEqual([4]);
+    expect(rows[0].record['First Name']).toBe('Unknown 4');
+    expect(namesFilled.has(4)).toBe(true);
+    expect([...droppedBlank]).toEqual([5]);
+  });
+
+  it('keeps blank rows when the flag is off', () => {
+    const { rows, droppedBlank } = buildTemplateDataset({
+      originalRows: [orig(5, { 'First Name': '', Email: '' })],
+    });
+    expect(rows.map((r) => r.rowNumber)).toEqual([5]);
+    expect(droppedBlank.size).toBe(0);
   });
 
   it('leaves a row that already has any identity field alone', () => {
@@ -220,17 +233,18 @@ describe('buildTemplateDataset — both cleanup flags together', () => {
     expect(namesFilled.has(4)).toBe(true);
   });
 
-  // hadSubstance is snapshotted before the strip, so the Note written by
-  // moveInvalidContactToNotes must not make a blank row look substantial.
-  it('still refuses to name a blank row when both flags are on', () => {
-    const { rows, namesFilled } = buildTemplateDataset({
+  // Blankness is judged BEFORE the strip runs, so the Note that
+  // moveInvalidContactToNotes writes cannot make a blank row look substantial
+  // and save it from being dropped.
+  it('still drops a blank row when both flags are on', () => {
+    const { rows, namesFilled, droppedBlank } = buildTemplateDataset({
       originalRows: [orig(5, { Email: '', Phone: '', 'Default Address City': '' })],
       moveInvalidContactToNotes: true,
       fillMissingContactName: true,
     });
-    expect(rows[0].record['First Name']).toBeUndefined();
-    expect(rows[0].record['Note']).toBeUndefined();
+    expect(rows).toHaveLength(0);
     expect(namesFilled.size).toBe(0);
+    expect([...droppedBlank]).toEqual([5]);
   });
 
   it('is deterministic with both flags on', () => {

@@ -66,12 +66,12 @@ describe('runCustomerValidation judges what is sent', () => {
     expect(runCustomerValidation(noIdentity(), {}, { fillMissingContactName: true })).toHaveLength(0);
   });
 
-  // The wrong-mapping alarm has to keep ringing: a blank row is never named, so
-  // it still reports MissingContact with the option on.
-  it('still reports MissingContact for a blank row with fill-missing-name on', () => {
+  // A blank line leaves the dataset, so there is nothing left to flag: no
+  // MissingContact, and no customer invented from a stray newline either.
+  it('reports nothing for a blank row with fill-missing-name on', () => {
     const blank = () => makeRows([{ 'First Name': '', Email: '', 'Default Address City': '' }]);
-    expect(types(runCustomerValidation(blank(), {}, { fillMissingContactName: true })))
-      .toEqual(['2:MissingContact']);
+    expect(types(runCustomerValidation(blank(), {}))).toEqual(['2:MissingContact']);
+    expect(runCustomerValidation(blank(), {}, { fillMissingContactName: true })).toHaveLength(0);
   });
 
   // The composition: strip the unusable email, then rescue the row it emptied.

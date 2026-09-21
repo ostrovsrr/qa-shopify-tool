@@ -149,7 +149,7 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
           </label>
           <label
             className="helios-tag-label"
-            title="Shopify rejects a customer with no name, email and phone. In the Shopify Template sheet, a row that carries other data (an address, tags, a note) is given First Name 'Unknown <row number>' and tagged NoContactInfo so it imports and stays findable. Blank rows are never named — they keep reporting MissingContact, which is how you spot a file mapped to the wrong columns."
+            title="Shopify rejects a customer with no name, email and phone. In the Shopify Template sheet, every such row is given First Name 'Unknown <row number>' and tagged NoContactInfo so it imports and stays findable. Rows that are completely blank are not customers at all — they are removed from the template rather than named, and still appear on the Full Uploaded File sheet."
           >
             <input
               type="checkbox"

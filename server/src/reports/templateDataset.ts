@@ -32,6 +32,8 @@ export interface TemplateDataset {
   invalidMoved: Set<number>;
   /** Rows given a placeholder First Name so Shopify would accept them. */
   namesFilled: Set<number>;
+  /** Blank lines removed from the dataset entirely (not customers at all). */
+  droppedBlank: Set<number>;
 }
 
 export interface TemplateDatasetOptions {
@@ -148,13 +150,21 @@ export function buildTemplateDataset(options: TemplateDatasetOptions): TemplateD
   }
   const anyMerges = templateRows.some((row) => row.mergedFrom.length > 0);
 
-  // Which rows carry anything Shopify would store, judged HERE — before the
-  // transforms below write their own Note and Tags. Read any later and a blank
-  // line in the middle of the CSV looks substantial because we just wrote
-  // "Invalid email: ..." into it. fillMissingContactName consults this.
-  const hadSubstance = new Set<number>();
-  for (const row of templateRows) {
-    if (!isRowFullyEmpty(row.record)) hadSubstance.add(row.rowNumber);
+  // A row with nothing in any mapped column is not a customer — it is a blank
+  // line. toRows() trims only TRAILING empties, so one sitting mid-file survives
+  // this far. Drop it rather than carry it: naming it would invent a customer out
+  // of a stray newline, and leaving it would fail the import for a line that holds
+  // nothing. It still appears untouched on the "Full Uploaded File" sheet.
+  //
+  // Judged HERE, before the transforms below write their own Note and Tags — read
+  // any later and a blank line looks substantial because we just wrote
+  // "Invalid email: ..." into it.
+  const droppedBlank = new Set<number>();
+  if (fillMissingContactName) {
+    for (const row of templateRows) {
+      if (isRowFullyEmpty(row.record)) droppedBlank.add(row.rowNumber);
+    }
+    templateRows = templateRows.filter((row) => !droppedBlank.has(row.rowNumber));
   }
 
   // Strip values Shopify rejects outright into Note, so the row imports without
@@ -252,17 +262,15 @@ export function buildTemplateDataset(options: TemplateDatasetOptions): TemplateD
     // LAST of the row transforms, after everything above that can empty a row.
     // Shopify rejects a customer with no name, email or phone outright, so a
     // placeholder First Name is the difference between importing the row's
-    // address, tags and notes and losing them. Guarded two ways: the row must
-    // still have no identity field, and it must have carried real data before
-    // these transforms ran — a blank CSV line stays a MissingContact error
-    // instead of becoming a customer conjured out of a stray newline. The row
-    // number keeps them apart in the admin; the tag makes them filterable and
-    // reachable by the QA cleanup route.
+    // address, tags and notes and losing them. Every surviving row qualifies —
+    // the blank lines were dropped above, so anything still here carries data
+    // worth keeping. The row number keeps them apart in the admin; the tag makes
+    // them filterable and reachable by the QA cleanup route.
     if (fillMissingContactName) {
       const hasIdentity = ['First Name', 'Last Name', 'Email', 'Phone'].some(
         (field) => (record[field] ?? '').trim() !== '',
       );
-      if (!hasIdentity && hadSubstance.has(row.rowNumber)) {
+      if (!hasIdentity) {
         record['First Name'] = `Unknown ${row.rowNumber}`;
         appendTags(record, ['NoContactInfo']);
         namesFilled.add(row.rowNumber);
@@ -293,5 +301,6 @@ export function buildTemplateDataset(options: TemplateDatasetOptions): TemplateD
     fixMap,
     invalidMoved,
     namesFilled,
+    droppedBlank,
   };
 }
