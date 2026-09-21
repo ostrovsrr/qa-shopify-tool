@@ -8,6 +8,7 @@ import {
   Severity,
   UpdateValidationMetadata,
   ValidationHistoryItem,
+  ValidationSummary,
 } from '../types';
 import { customerValidationRules } from '../validators/customer';
 import prisma from '../db/prisma';
@@ -57,6 +58,16 @@ export function runCustomerValidation(
   columnMapping: Record<string, string>,
   options: CustomerTemplateFlags = {},
 ): CustomerValidationIssue[] {
+  return buildValidationOutcome(rawRows, columnMapping, options).issues;
+}
+
+/** The issues plus what became of every row. Same single pass — the summary is
+ *  derived from the very dataset the rules judged, so the two cannot disagree. */
+export function buildValidationOutcome(
+  rawRows: CustomerCsvRow[],
+  columnMapping: Record<string, string>,
+  options: CustomerTemplateFlags = {},
+): { issues: CustomerValidationIssue[]; summary: ValidationSummary } {
   const dataset = buildTemplateDataset({
     originalRows: rawRows.map((r) => ({ rowNumber: r.rowNumber, data: r.original })),
     columnMapping,
@@ -81,7 +92,65 @@ export function runCustomerValidation(
       issues.push(issue);
     }
   }
-  return issues;
+
+  const errorIssues = issues.filter((i) => i.severity === 'Error');
+
+  // BLOCKED WINS. A row the rules still flag is not "fixed", whatever the tool
+  // did to it — otherwise a row whose email we moved but whose country code is
+  // still wrong would be counted as both, and the buckets would stop summing.
+  const blocked = new Set(errorIssues.map((i) => i.rowNumber));
+
+  const fixed = new Set<number>();
+  for (const set of [dataset.invalidMoved, dataset.duplicatesMoved, dataset.namesFilled]) {
+    for (const rowNumber of set) if (!blocked.has(rowNumber)) fixed.add(rowNumber);
+  }
+
+  // Rows that left the dataset: blank lines dropped, plus any absorbed by the
+  // same-person merge. Derived from the row count rather than tracked, so it
+  // cannot drift from what the dataset actually contains.
+  const removed = rawRows.length - dataset.rows.length;
+  const removedBlank = dataset.droppedBlank.size;
+
+  const countWithout = (set: Set<number>) => {
+    let n = 0;
+    for (const rowNumber of set) if (!blocked.has(rowNumber)) n++;
+    return n;
+  };
+
+  // Duplicate diagnostics count the REPEATS Shopify would reject, never the
+  // keeper — a group of 3 loses 2 rows, and 2 is the number that matters.
+  const emailRepeats = dataset.emailDupes.repeats;
+  const phoneRepeats = dataset.phoneDupes.repeats;
+  const duplicateRecords = new Set([...emailRepeats, ...phoneRepeats]);
+  let duplicateBoth = 0;
+  for (const rowNumber of emailRepeats) if (phoneRepeats.has(rowNumber)) duplicateBoth++;
+
+  const summary: ValidationSummary = {
+    totalRows: rawRows.length,
+    ready: rawRows.length - removed - blocked.size - fixed.size,
+    fixed: fixed.size,
+    blocked: blocked.size,
+    removed,
+
+    fixedInvalidContact: countWithout(dataset.invalidMoved),
+    fixedDuplicates: countWithout(dataset.duplicatesMoved),
+    fixedNamed: countWithout(dataset.namesFilled),
+
+    removedBlank,
+    removedMerged: removed - removedBlank,
+
+    duplicateRecords: duplicateRecords.size,
+    duplicateEmail: emailRepeats.size,
+    duplicatePhone: phoneRepeats.size,
+    duplicateBoth,
+    duplicateGroups:
+      new Set(dataset.emailDupes.groups.values()).size +
+      new Set(dataset.phoneDupes.groups.values()).size,
+
+    errorCount: errorIssues.length,
+  };
+
+  return { issues, summary };
 }
 
 export async function validateCustomerCsv(
@@ -111,7 +180,7 @@ export async function validateCustomerCsv(
   // Apply mapping only to the rows fed into validators; raw data is preserved separately
   const rows = applyColumnMapping(rawRows, columnMapping);
 
-  const allIssues = runCustomerValidation(rawRows, columnMapping, {
+  const { issues: allIssues, summary } = buildValidationOutcome(rawRows, columnMapping, {
     heliosMigratedTag,
     moveDuplicatesToNotes,
     mergeMatchingDuplicates,
@@ -119,7 +188,7 @@ export async function validateCustomerCsv(
     fillMissingContactName,
   });
 
-  const errors = allIssues.filter((i) => i.severity === 'Error').length;
+  const errors = summary.errorCount;
 
   const affectedRowNumbers = new Set(allIssues.map((i) => i.rowNumber));
   const affectedRows: AffectedRow[] = rows
@@ -153,6 +222,7 @@ export async function validateCustomerCsv(
           mergeMatchingDuplicates,
           moveInvalidContactToNotes,
           fillMissingContactName,
+          summary: summary as unknown as object,
         },
       });
 
@@ -193,6 +263,7 @@ export async function validateCustomerCsv(
     totalRows: rawRows.length,
     errors,
     issues: allIssues,
+    summary,
   };
 }
 
@@ -238,6 +309,9 @@ export async function getValidationResult(
     fileName: run.fileName,
     totalRows: run.totalRows,
     errors: run.errors,
+    // Null for runs validated before the summary existed; the UI falls back to
+    // the plain Total/Errors pair rather than inventing numbers for them.
+    summary: ((run as { summary?: unknown }).summary as ValidationSummary | null) ?? null,
     issues: run.issues.map((issue) => ({
       rowNumber: issue.rowNumber,
       column: issue.columnName,

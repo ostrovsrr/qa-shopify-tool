@@ -259,6 +259,16 @@ body {
 .card-info { background: var(--info-bg); border-color: var(--info-border); }
 .card-info .card-label { color: var(--info); }
 .card-info .card-value { color: var(--info); }
+.card-success { background: var(--success-bg); border-color: var(--success-border); }
+.card-success .card-label { color: var(--success); }
+.card-success .card-value { color: var(--success); }
+/* The one-line breakdown under a count ("12 email · 3 both"). Deliberately
+   quiet: it explains the number above it, it does not compete with it. */
+.card-note {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
 
 /* ─── Issues Table ───────────────────────────────────────────────────────── */
 .issues-section {

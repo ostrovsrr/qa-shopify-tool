@@ -55,6 +55,11 @@ model ValidationRun {
   // placeholder First Name ("Unknown <row>") so Shopify accepts it. Blank rows
   // are never named.
   fillMissingContactName Boolean           @default(false)
+  // What became of every row (ValidationSummary) — ready/fixed/blocked/removed
+  // plus duplicate diagnostics, for the Validation Results cards. One JSON blob
+  // rather than a dozen counter columns. NULL on runs validated before it
+  // existed; the UI falls back to Total/Errors for those.
+  summary            Json?
   ticketNumber       String?
   ticketName      String?
   comments        String?
