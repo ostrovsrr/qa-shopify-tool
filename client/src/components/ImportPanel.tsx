@@ -6,6 +6,7 @@ import {
   cleanupQaCustomers,
   fetchImportFeedback,
   fetchLatestImportForValidation,
+  fetchBusyStores,
   fetchShopifyStores,
   fetchStoreCustomerStats,
   getImportReportDownloadUrl,
@@ -33,6 +34,8 @@ const POLL_INTERVAL_MS = 3000;
 // How long Shopify's tag-filtered counts take to catch up with a create or delete
 // (seen: several seconds). One re-read after this settles the store card.
 const STATS_SETTLE_MS = 6000;
+// How often the picker re-asks which stores are busy.
+const BUSY_POLL_MS = 15000;
 
 function errMessage(err: unknown, fallback: string): string {
   if (axios.isAxiosError(err)) {
@@ -69,6 +72,9 @@ export function ImportPanel({ result }: Props) {
   const [restoring, setRestoring] = useState(true);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  // storeId → what holds it ("a product import"). Shown on the picker so nobody
+  // picks a busy store and only finds out from the 409. (TODOS §1 follow-up)
+  const [storesInUse, setStoresInUse] = useState<Record<string, string>>({});
 
   const primaryStoreId = selectedStoreIds[0];
   const inParallelSelect = importMode === 'parallel' && parallelPhase === 'select';
@@ -144,6 +150,23 @@ export function ImportPanel({ result }: Props) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stores]);
+
+  // ── which stores are busy (any flow, any colleague) ──────────────────────────
+  // Polled while the panel is open: a lock appears and clears on someone else's
+  // schedule, not on anything this page does.
+  useEffect(() => {
+    let active = true;
+    const load = () =>
+      fetchBusyStores().then(
+        (busy) => active && setStoresInUse(Object.fromEntries(busy.map((b) => [b.storeId, b.operation]))),
+      );
+    void load();
+    const timer = window.setInterval(() => void load(), BUSY_POLL_MS);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   // ── restore the latest import when (re)opening a validation run ───────────────
   useEffect(() => {
@@ -590,6 +613,9 @@ export function ImportPanel({ result }: Props) {
                           ? 'unreachable'
                           : 'counting…'}
                     </small>
+                    {storesInUse[store.id] && (
+                      <small className="store-chip-busy">In use: {storesInUse[store.id]}</small>
+                    )}
                   </button>
                 ))}
               </div>

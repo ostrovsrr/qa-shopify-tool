@@ -88,6 +88,14 @@ export interface ShopifyStore {
   authMode: 'adminToken' | 'clientCredentials';
 }
 
+// A store holding a live busy-lock: an import or cleanup is running on it, so a
+// new one would be refused with a 409. `operation` reads like "a customer import".
+export interface BusyStore {
+  storeId: string;
+  operation: string;
+  acquiredAt: string;
+}
+
 export interface StoreCustomerStats {
   storeId?: string;
   shop: string;

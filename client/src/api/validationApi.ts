@@ -7,6 +7,7 @@ import {
   CsvPreview,
   ImportFeedback,
   ShopifyHealth,
+  BusyStore,
   ShopifyStore,
   StoreCustomerStats,
   UpdateMetadataPayload,
@@ -122,6 +123,15 @@ export async function fetchShopifyStores(): Promise<ShopifyStore[]> {
   return data.stores ?? [];
 }
 
+/** Stores busy with an import or cleanup right now (shared with the product
+ *  picker). Empty on any error: this only decorates the picker. */
+export async function fetchBusyStores(): Promise<BusyStore[]> {
+  const { data, status } = await api.get<{ busy: BusyStore[] }>('/shopify/stores/busy', {
+    validateStatus: () => true,
+  });
+  return status === 200 ? data.busy ?? [] : [];
+}
+
 export async function fetchStoreCustomerStats(
   storeId: string,
 ): Promise<StoreCustomerStats> {
@@ -180,7 +190,7 @@ export async function runBatchImport(
   return data;
 }
 
-// Latest import for a validation run, or null when none exists (404). Used to
+// Latest import for a validation run, or null when none exists. Used to
 // restore/resume an import when a run is reopened from History.
 export async function fetchLatestImportForValidation(
   validationId: string,

@@ -21,6 +21,7 @@ import {
   shopifyHealthHandler,
   shopifyStoreProductStatsHandler,
   shopifyStoreStatsHandler,
+  shopifyBusyStoresHandler,
   shopifyStoresHandler,
 } from './controllers/shopifyHealth.controller';
 import {
@@ -169,6 +170,7 @@ app.delete('/api/customer-validation/:validationId', deleteValidationHandler);
 // ── Shopify test-store import + feedback loop ────────────────────────────────
 app.get('/api/shopify/health', shopifyHealthHandler);
 app.get('/api/shopify/stores', shopifyStoresHandler);
+app.get('/api/shopify/stores/busy', shopifyBusyStoresHandler);
 
 // GET /api/action-log — who destroyed what. Read-only; nothing in the app makes a
 // decision from this table (see services/actionLog.service.ts).
