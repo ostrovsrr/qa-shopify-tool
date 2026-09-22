@@ -52,7 +52,8 @@ export function SummaryCards({ result, onDownload }: Props) {
           <span className="card-label">Total Rows</span>
           <span className="card-value">{result.totalRows}</span>
         </div>
-        <div className="card card-error">
+        {/* Red only when there is something to fix — same as the product review card. */}
+        <div className={`card ${result.errors > 0 ? 'card-error' : 'card-neutral'}`}>
           <span className="card-label">Errors</span>
           <span className="card-value">{result.errors}</span>
         </div>
