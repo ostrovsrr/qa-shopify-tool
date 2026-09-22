@@ -40,7 +40,9 @@ function PrecheckNotice({ upload }: { upload: UploadSummary }) {
       <div className="warning-banner">
         The pre-check found <strong>{upload.precheckErrors}</strong> error{upload.precheckErrors === 1 ? '' : 's'} in{' '}
         <strong>{products}</strong> product{products === 1 ? '' : 's'}. Shopify will reject{' '}
-        {products === 1 ? 'that product' : 'those products'}; the rest will import. You can still import to confirm.
+        {products === 1 ? 'that product' : 'those products'};{' '}
+        {blockers.length > 0 ? 'once the whole-file rows above are fixed, ' : ''}the rest will import. You can still
+        import to confirm.
       </div>
     </>
   );
