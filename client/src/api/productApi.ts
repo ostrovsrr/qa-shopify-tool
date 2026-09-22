@@ -146,11 +146,12 @@ export async function fetchImportFeedback(importRunId: string): Promise<ProductI
 export async function fetchLatestImportForUpload(
   uploadId: string,
 ): Promise<ProductImportFeedback | null> {
-  const { data, status } = await api.get<ProductImportFeedback>(
+  const { data, status } = await api.get<ProductImportFeedback | null>(
     `/product-import/by-upload/${encodeURIComponent(uploadId)}`,
     { validateStatus: () => true },
   );
-  return status === 200 ? data : null;
+  // 200 with null = never imported (older servers answered 404).
+  return status === 200 && data ? data : null;
 }
 
 // Batch-aware: one cleanup run per store the import touched. Poll them all.

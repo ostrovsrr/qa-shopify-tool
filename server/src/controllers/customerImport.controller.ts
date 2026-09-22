@@ -155,11 +155,10 @@ export async function getLatestImportForValidationHandler(
       return;
     }
     const feedback = await reconcileLatestImportForValidation(parsed.data);
-    if (!feedback) {
-      res.status(404).json({ error: 'No import found for this validation run.' });
-      return;
-    }
-    res.json(feedback);
+    // "Not imported yet" is a normal answer, not a missing resource: a 404 here
+    // logged a red console error on every clean results page. The client already
+    // reads any non-object as "no import". (TODOS §4a)
+    res.json(feedback ?? null);
   } catch (err) {
     if (handleShopifyError(err, res)) return;
     next(err);

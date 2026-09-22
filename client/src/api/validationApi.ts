@@ -185,11 +185,12 @@ export async function runBatchImport(
 export async function fetchLatestImportForValidation(
   validationId: string,
 ): Promise<ImportFeedback | null> {
-  const { data, status } = await api.get<ImportFeedback>(
+  const { data, status } = await api.get<ImportFeedback | null>(
     `/customer-import/by-validation/${encodeURIComponent(validationId)}`,
     { validateStatus: () => true },
   );
-  return status === 200 ? data : null;
+  // 200 with null = never imported (older servers answered 404).
+  return status === 200 && data ? data : null;
 }
 
 // Batch-aware: one cleanup run per store the import touched. Poll them all.
