@@ -141,3 +141,16 @@ consumes, so there is nothing durable to link to.
 **e. Mobile.** At 375×812 the header wraps to three lines and the page scrolls
 horizontally (535px wide in a 375px viewport), driven by the per-store results
 table. Internal desktop tool, so this is a scope call rather than a bug.
+
+---
+
+## 6. Deferred /qa findings (2026-09-22, customer cleanup options, PR #16)
+
+Report: `.gstack/qa-reports/qa-report-localhost-2026-09-22-customers.md`.
+
+- **Errors card is red at 0 (low, visual).** `client/src/components/SummaryCards.tsx` always uses
+  `card-error`; the product review screen switches to neutral at 0. Twin asymmetry.
+- **Dropped blank row reads "Not imported" in the import report (low, content).** The customer
+  import workbook gives no reason for a blank line left out by "Name contactless rows". Say
+  "Blank line, not sent" instead. Related: the validation-results note added for ISSUE-C1 only
+  appears right after Validate; a run reopened from History does not recompute it.
