@@ -123,3 +123,14 @@ describe('runProductValidation', () => {
     expect(issues.every((i) => i.severity === 'Error')).toBe(true);
   });
 });
+
+// TODOS §5: a whole-file message quoted Shopify's wording, which already opens
+// with a quote, and read `...fixed): ""abc" is not a valid price"`.
+describe('pre-check message quoting', () => {
+  it('does not double the quotes around Shopify\'s own wording', () => {
+    const issues = runProductValidation([group('p', [{ Title: 'P', 'Variant Price': 'abc' }])]);
+    const money = issues.find((i) => i.issueType === 'UnreadableMoney')!;
+    expect(money.message).toContain(': "abc" is not a valid price');
+    expect(money.message).not.toContain('""');
+  });
+});

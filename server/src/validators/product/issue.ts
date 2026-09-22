@@ -33,7 +33,9 @@ export function productIssue(
     severity: 'Error',
     issueType: f.issueType,
     currentValue: f.currentValue,
-    message: `${f.message} ${consequence}: "${f.shopifySays}"`,
+    // Shopify's wording can itself open with a quote ('"abc" is not a valid
+    // price'); wrapping that again read as ""abc" is not a valid price".
+    message: `${f.message} ${consequence}: ${f.shopifySays.startsWith('"') ? f.shopifySays : `"${f.shopifySays}"`}`,
     suggestedFix: f.suggestedFix,
   };
 }
