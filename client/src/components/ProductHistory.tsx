@@ -127,6 +127,8 @@ export function ProductHistory({ onOpen, refreshTrigger }: Props) {
   const [history, setHistory] = useState<ProductHistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // See ValidationHistory: failed actions show inline, not in a blocking alert().
+  const [actionError, setActionError] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
 
   // Twin of ValidationHistory: your uploads by default, with the same escape
@@ -150,9 +152,10 @@ export function ProductHistory({ onOpen, refreshTrigger }: Props) {
     if (!confirm('Delete this upload and its import runs?')) return;
     try {
       await deleteUpload(id);
+      setActionError('');
       setHistory((h) => h.filter((item) => item.id !== id));
     } catch {
-      alert('Failed to delete upload.');
+      setActionError('Failed to delete upload.');
     }
   };
 
@@ -164,10 +167,11 @@ export function ProductHistory({ onOpen, refreshTrigger }: Props) {
   const handleSaveMetadata = async (id: string, payload: UpdateMetadataPayload) => {
     try {
       const updated = await updateUploadMetadata(id, payload);
+      setActionError('');
       setHistory((h) => h.map((item) => (item.id === id ? { ...item, ...updated } : item)));
       setEditingId(null);
     } catch {
-      alert('Failed to save metadata.');
+      setActionError('Failed to save metadata.');
     }
   };
 
@@ -230,6 +234,7 @@ export function ProductHistory({ onOpen, refreshTrigger }: Props) {
   return (
     <div className="history-section">
       {header}
+      {actionError && <div className="error-banner">{actionError}</div>}
       <div className="history-list">
         {history.map((item) => (
           <div key={item.id} className="history-item-wrapper">

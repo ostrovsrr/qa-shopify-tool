@@ -8,13 +8,16 @@ interface Props {
 export function ProductUploadArea({ onUpload, loading }: Props) {
   const [dragging, setDragging] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  // Inline, not alert() — see the customer twin, UploadArea.
+  const [fileError, setFileError] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
   const handleFile = useCallback((file: File) => {
     if (!file.name.toLowerCase().endsWith('.csv')) {
-      alert('Please select a CSV file.');
+      setFileError(`"${file.name}" is not a CSV file. Choose a .csv file.`);
       return;
     }
+    setFileError('');
     setSelectedFile(file);
   }, []);
 
@@ -69,6 +72,8 @@ export function ProductUploadArea({ onUpload, loading }: Props) {
           </>
         )}
       </div>
+
+      {fileError && <div className="error-banner">{fileError}</div>}
 
       <input
         ref={inputRef}
