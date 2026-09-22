@@ -1,14 +1,27 @@
 import { ProductGroup, ProductValidationIssue, ProductValidationRule } from '../../types';
 import { DuplicateVariantRule } from './duplicateVariant.rule';
-import { MissingOptionValueRule } from './missingOptionValue.rule';
 import { GiftCardRule } from './giftCard.rule';
+import { MoneyRule } from './money.rule';
+import { VariantFieldsRule } from './variantFields.rule';
+import { OptionsRule } from './options.rule';
+import { ProductFieldsRule } from './productFields.rule';
+import { ImageUrlRule } from './imageUrl.rule';
+import { FILE_BLOCKING_ISSUE_TYPES } from './issue';
 
-// File-level checks only: each predicts a rejection from the CSV alone. Rejections
-// that depend on the target store (a metafield with no definition there) are left
-// to the import, which reports them.
+export { FILE_BLOCKING_ISSUE_TYPES };
+
+// File-level checks only: each predicts, from the CSV alone, a rejection by
+// Shopify's admin CSV import, pinned to an observed verdict (see
+// docs/products/rejection-probe-results.md). A file with no pre-check errors
+// should import every product. Store-dependent outcomes (a metafield with no
+// definition there is silently dropped, not rejected) are not errors.
 export const productValidationRules: ProductValidationRule[] = [
+  new MoneyRule(),
+  new VariantFieldsRule(),
+  new ProductFieldsRule(),
+  new OptionsRule(),
   new DuplicateVariantRule(),
-  new MissingOptionValueRule(),
+  new ImageUrlRule(),
   new GiftCardRule(),
 ];
 
@@ -20,3 +33,4 @@ export function runProductValidation(groups: ProductGroup[]): ProductValidationI
   }
   return issues.sort((a, b) => a.rowNumber - b.rowNumber);
 }
+

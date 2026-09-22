@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ActorBadge } from '../components/ActorBadge';
 import { NavLink, useNavigate, useParams } from 'react-router-dom';
-import { fetchUpload, uploadProductCsv } from '../api/productApi';
+import { fetchUpload, getPrecheckReportDownloadUrl, uploadProductCsv } from '../api/productApi';
 import { ProductHistory } from '../components/ProductHistory';
 import { StoreImportControls } from '../components/StoreImportControls';
 import { ProductUploadArea } from '../components/ProductUploadArea';
@@ -11,19 +11,49 @@ import { UploadSummary } from '../types';
 // upload → review (file, product count, pre-check; no mapping) → import.
 type UploadPhase = 'upload' | 'review' | 'import';
 
-// The pre-check never blocks an import; it says which products Shopify will reject.
+// The pre-check never blocks the test import; it says what Shopify's CSV import
+// will do with this file. Twin of the customer Validation Results header.
 function PrecheckNotice({ upload }: { upload: UploadSummary }) {
   if (upload.precheckErrors === null) {
     return <p className="muted">Uploaded before the product pre-check existed, so it was not checked.</p>;
   }
-  if (upload.precheckErrors === 0) return null;
+  if (upload.precheckErrors === 0) {
+    return (
+      <div className="success-banner">
+        ✓ No problems found. Shopify's CSV import should accept every product in this file.
+      </div>
+    );
+  }
   const products = new Set(upload.issues.map((i) => i.handle)).size;
+  const blockers = upload.issues.filter((i) => i.blocksFile);
   return (
-    <div className="warning-banner">
-      The pre-check found <strong>{upload.precheckErrors}</strong> error{upload.precheckErrors === 1 ? '' : 's'} in{' '}
-      <strong>{products}</strong> product{products === 1 ? '' : 's'}. Shopify will reject{' '}
-      {products === 1 ? 'that product' : 'those products'}. You can still import to confirm.
-    </div>
+    <>
+      {blockers.length > 0 && (
+        <div className="error-banner">
+          Shopify's CSV import will refuse this <strong>whole file</strong> at upload until{' '}
+          {blockers.length === 1 ? 'row' : 'rows'}{' '}
+          <strong>{[...new Set(blockers.map((i) => i.rowNumber))].slice(0, 10).join(', ')}</strong>
+          {blockers.length > 10 ? '…' : ''} {blockers.length === 1 ? 'is' : 'are'} fixed (a price with no number in
+          it, or a blank inventory policy). The test import below still runs, so you can see every other problem.
+        </div>
+      )}
+      <div className="warning-banner">
+        The pre-check found <strong>{upload.precheckErrors}</strong> error{upload.precheckErrors === 1 ? '' : 's'} in{' '}
+        <strong>{products}</strong> product{products === 1 ? '' : 's'}. Shopify will reject{' '}
+        {products === 1 ? 'that product' : 'those products'}; the rest will import. You can still import to confirm.
+      </div>
+    </>
+  );
+}
+
+function PrecheckReportButton({ uploadId }: { uploadId: string }) {
+  return (
+    <button
+      className="btn btn-outline btn-sm"
+      onClick={() => window.open(getPrecheckReportDownloadUrl(uploadId), '_blank')}
+    >
+      Download pre-check report
+    </button>
   );
 }
 
@@ -186,6 +216,7 @@ export function ProductDashboard() {
                   <button className="btn btn-outline btn-sm" onClick={handleNewUpload}>
                     ← Choose another file
                   </button>
+                  <PrecheckReportButton uploadId={upload.uploadId} />
                   <button
                     className="btn btn-primary"
                     onClick={() => navigate(`/products/${upload.uploadId}`)}
@@ -205,6 +236,7 @@ export function ProductDashboard() {
                   <span className="muted">
                     {upload.fileName} · <strong>{upload.productCount}</strong> products
                   </span>
+                  <PrecheckReportButton uploadId={upload.uploadId} />
                 </div>
                 <PrecheckNotice upload={upload} />
                 {upload.issues.length > 0 && <IssuesTable issues={upload.issues} />}

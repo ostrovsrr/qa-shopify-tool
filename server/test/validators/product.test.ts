@@ -66,25 +66,33 @@ describe('DuplicateVariantRule', () => {
   });
 });
 
-describe('MissingOptionValueRule', () => {
-  const rule = new MissingOptionValueRule();
+describe('DuplicateVariantRule with blank option values', () => {
+  const rule = new DuplicateVariantRule();
 
-  // Seen in a real file: a stray "Variant" row inside a Color/Size product.
-  it('flags a variant row with no value for a declared option, and names the stray option set', () => {
+  // The admin import fills a blank option value in as "Default Title" rather
+  // than rejecting it (observed 2026-09-22), so one blank row is fine...
+  it('does not flag a single blank option value', () => {
     const issues = rule.validate([
       group('opals', [
-        { 'Option1 Name': 'Color', 'Option2 Name': 'Size', 'Option1 Value': 'Teal/TE', 'Option2 Value': '3mm' },
-        { 'Option1 Name': 'Variant', 'Option1 Value': 'Copy of Opals White' },
+        { 'Option1 Name': 'Size', 'Option1 Value': 'S' },
+        { 'Option1 Value': '', 'Variant SKU': 'B' },
       ]),
     ]);
-    expect(issues).toHaveLength(1);
-    expect(issues[0]).toMatchObject({ rowNumber: 3, issueType: 'MissingOptionValue' });
-    expect(issues[0].message).toContain('"Size"');
-    expect(issues[0].message).toContain('declares options "Variant"');
+    expect(issues).toHaveLength(0);
   });
 
-  it('ignores products without declared options', () => {
-    expect(rule.validate([group('plain', [{ 'Variant SKU': 'A' }])])).toHaveLength(0);
+  // ...but two blank rows are both "Default Title" and collide.
+  it('flags a second blank option value as a duplicate of the first', () => {
+    const issues = rule.validate([
+      group('opals', [
+        { 'Option1 Name': 'Size', 'Option1 Value': 'S' },
+        { 'Option1 Value': '', 'Variant SKU': 'B' },
+        { 'Option1 Value': '', 'Variant SKU': 'C' },
+      ]),
+    ]);
+    expect(issues.map((i) => i.rowNumber)).toEqual([4]);
+    expect(issues[0].message).toContain('A blank option value imports as "Default Title"');
+    expect(issues[0].message).toContain("The variant 'Default Title' already exists.");
   });
 });
 
@@ -105,8 +113,8 @@ describe('GiftCardRule', () => {
 describe('runProductValidation', () => {
   it('returns every rule\'s findings in row order, all as errors', () => {
     const issues = runProductValidation([
-      group('gift-card-GC', [{ 'Gift Card': 'yes' }], 9),
-      group('beans', [{ 'Variant SKU': 'A' }, { 'Variant SKU': 'B' }], 2),
+      group('gift-card-GC', [{ Title: 'Gift card', 'Gift Card': 'yes' }], 9),
+      group('beans', [{ Title: 'Beans', 'Variant SKU': 'A' }, { 'Variant SKU': 'B' }], 2),
     ]);
     expect(issues.map((i) => [i.rowNumber, i.issueType])).toEqual([
       [3, 'DuplicateVariant'],

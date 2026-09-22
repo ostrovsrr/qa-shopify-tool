@@ -1,6 +1,7 @@
 import { ProductGroup, ProductValidationIssue, ProductValidationRule } from '../../types';
 import { col } from '../../services/productCsvParser';
 import { isTruthy } from '../../services/productVariants';
+import { productIssue, rawCell } from './issue';
 
 // Shopify's help center: "you can't create a gift card by importing a product CSV
 // file. A gift card can only be created and activated in the Shopify admin." The
@@ -16,16 +17,14 @@ export class GiftCardRule implements ProductValidationRule {
       if (!first) continue;
       const value = col(first.normalized, 'Gift Card');
       if (value === '' || !isTruthy(value)) continue;
-      issues.push({
-        rowNumber: first.rowNumber,
-        handle: group.handle,
+      issues.push(productIssue(group, first, {
         column: 'Gift Card',
-        severity: 'Error',
         issueType: 'GiftCardProduct',
-        currentValue: first.original['Gift Card'] ?? value,
-        message: `Product "${group.handle}" is a gift card. Shopify does not create gift cards from a product CSV import.`,
+        currentValue: rawCell(first, 'Gift Card') || value,
+        message: `Product "${group.handle}" is a gift card, and Shopify does not create gift cards from a product CSV import.`,
+        shopifySays: 'Gift card products can only be created after they have been activated',
         suggestedFix: 'Create the gift card in the Shopify admin and remove this product from the CSV, or set Gift Card to FALSE.',
-      });
+      }));
     }
 
     return issues;
