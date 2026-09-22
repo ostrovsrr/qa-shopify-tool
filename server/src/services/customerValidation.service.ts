@@ -57,6 +57,17 @@ export function runCustomerValidation(
   columnMapping: Record<string, string>,
   options: CustomerTemplateFlags = {},
 ): CustomerValidationIssue[] {
+  return runCustomerValidationDetailed(rawRows, columnMapping, options).issues;
+}
+
+/** runCustomerValidation plus the CSV rows the dataset dropped as blank lines
+ *  (fillMissingContactName), so the caller can say where they went: they are
+ *  not errors, but they are not imported either. */
+export function runCustomerValidationDetailed(
+  rawRows: CustomerCsvRow[],
+  columnMapping: Record<string, string>,
+  options: CustomerTemplateFlags = {},
+): { issues: CustomerValidationIssue[]; droppedBlankRows: number[] } {
   const dataset = buildTemplateDataset({
     originalRows: rawRows.map((r) => ({ rowNumber: r.rowNumber, data: r.original })),
     columnMapping,
@@ -81,7 +92,7 @@ export function runCustomerValidation(
       issues.push(issue);
     }
   }
-  return issues;
+  return { issues, droppedBlankRows: [...dataset.droppedBlank].sort((a, b) => a - b) };
 }
 
 export async function validateCustomerCsv(
@@ -111,7 +122,7 @@ export async function validateCustomerCsv(
   // Apply mapping only to the rows fed into validators; raw data is preserved separately
   const rows = applyColumnMapping(rawRows, columnMapping);
 
-  const allIssues = runCustomerValidation(rawRows, columnMapping, {
+  const { issues: allIssues, droppedBlankRows } = runCustomerValidationDetailed(rawRows, columnMapping, {
     heliosMigratedTag,
     moveDuplicatesToNotes,
     mergeMatchingDuplicates,
@@ -193,6 +204,7 @@ export async function validateCustomerCsv(
     totalRows: rawRows.length,
     errors,
     issues: allIssues,
+    droppedBlankRows,
   };
 }
 
