@@ -31,6 +31,9 @@ const TERMINAL_STATUSES = ['COMPLETED', 'FAILED', 'CANCELED', 'EXPIRED'];
 const isTerminal = (status: string): boolean => TERMINAL_STATUSES.includes(status);
 
 const POLL_INTERVAL_MS = 3000;
+// How long Shopify's tag-filtered counts take to catch up with a create or delete
+// (seen: several seconds). One re-read after this settles the store card.
+const STATS_SETTLE_MS = 6000;
 
 function errMessage(err: unknown, fallback: string): string {
   if (axios.isAxiosError(err)) {
@@ -288,9 +291,15 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
     window.open(getImportReportDownloadUrl(feedback.importRunId), '_blank');
   };
 
+  // See the customer twin (ImportPanel): read now, then again once Shopify's
+  // tag-filtered count has caught up with the write. (TODOS §4c)
   const refreshStoreStats = async (storeId: string) => {
-    const st = await fetchStoreProductStats(storeId).catch(() => null);
-    if (st) setStoreStats((m) => ({ ...m, [storeId]: st }));
+    const read = async () => {
+      const st = await fetchStoreProductStats(storeId).catch(() => null);
+      if (st) setStoreStats((m) => ({ ...m, [storeId]: st }));
+    };
+    await read();
+    window.setTimeout(() => void read(), STATS_SETTLE_MS);
   };
 
   const cleanStore = async (storeId: string) => {
