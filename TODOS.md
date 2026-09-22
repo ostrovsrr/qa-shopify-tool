@@ -148,7 +148,7 @@ table. Internal desktop tool, so this is a scope call rather than a bug.
 
 Found by /qa on `product-precheck-admin-parity`. Report: `.gstack/qa-reports/qa-report-localhost-2026-09-22.md`.
 
-- **Doubled quotes in whole-file pre-check messages (low, content).** `productIssue`
+- **Doubled quotes in whole-file pre-check messages (low, content).** ✅ Fixed 2026-09-22. `productIssue`
   (`server/src/validators/product/issue.ts`) wraps Shopify's wording in quotes, and the money
   wording already starts with one, so the message reads `...fixed): ""abc" is not a valid price"`.
   Repro: upload a product CSV with Variant Price `abc`. Fix: don't add quotes when the wording
