@@ -193,7 +193,16 @@ export async function streamProductPrecheckReport(
         const rejected = rejectedHandles.has(handle);
         // Per product, so the fine ones stay visible even when the file has a
         // blocker; the blocker's own product says so.
-        const expected = blockingHandles.has(handle) ? 'Rejected (blocks file)' : rejected ? 'Rejected' : 'Imports';
+        // An upload made before the pre-check existed has no issues because it
+        // was never checked — not because it is clean.
+        const expected =
+          upload.precheckErrors === null
+            ? 'Not checked'
+            : blockingHandles.has(handle)
+              ? 'Rejected (blocks file)'
+              : rejected
+                ? 'Rejected'
+                : 'Imports';
         const rowData: Record<string, string | number> = {
           'Row Number': origRow.rowNumber,
           'Expected Result': expected,
@@ -201,11 +210,13 @@ export async function streamProductPrecheckReport(
         };
         for (const col of originalColumns) rowData[col] = data[col] ?? '';
         const row = sheet.addRow(excelSafeRecord(rowData));
-        row.getCell(2).fill = {
-          type: 'pattern',
-          pattern: 'solid',
-          fgColor: { argb: expected === 'Imports' ? RESULT_COLOURS.accepted : RESULT_COLOURS.rejected },
-        };
+        if (expected !== 'Not checked') {
+          row.getCell(2).fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: expected === 'Imports' ? RESULT_COLOURS.accepted : RESULT_COLOURS.rejected },
+          };
+        }
         row.commit();
       }
     }
