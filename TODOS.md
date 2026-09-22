@@ -141,3 +141,22 @@ consumes, so there is nothing durable to link to.
 **e. Mobile.** At 375×812 the header wraps to three lines and the page scrolls
 horizontally (535px wide in a 375px viewport), driven by the per-store results
 table. Internal desktop tool, so this is a scope call rather than a bug.
+
+---
+
+## 5. Deferred /qa findings (2026-09-22, product pre-check parity)
+
+Found by /qa on `product-precheck-admin-parity`. Report: `.gstack/qa-reports/qa-report-localhost-2026-09-22.md`.
+
+- **Doubled quotes in whole-file pre-check messages (low, content).** `productIssue`
+  (`server/src/validators/product/issue.ts`) wraps Shopify's wording in quotes, and the money
+  wording already starts with one, so the message reads `...fixed): ""abc" is not a valid price"`.
+  Repro: upload a product CSV with Variant Price `abc`. Fix: don't add quotes when the wording
+  already starts with one, or quote with ‘…’.
+- **Pass-through rejections read like GraphQL errors (medium, UX).** Bad money / grams / inventory
+  policy / status are sent to productSet unchanged so Shopify rejects them, but the results table
+  groups them under field `query` with `Variable $input of type ProductSetInput! was provided
+  invalid value for ...`. This is the planned rejection-message work: keep the full error path,
+  map it to CSV row + column, and add an explanation per code.
+- **Results table overflows on phones (low, visual).** At 375px the product results page is 738px
+  wide (the Rejections table in `ProductResultsView`). Pre-existing; the tool is desktop-first.
