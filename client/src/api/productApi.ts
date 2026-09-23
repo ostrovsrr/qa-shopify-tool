@@ -72,6 +72,12 @@ export async function deleteUpload(uploadId: string): Promise<void> {
   await api.delete(`/product-upload/${uploadId}`);
 }
 
+/** The pre-check workbook for an upload, before any import (twin of the
+ *  customer prevalidation report). */
+export function getPrecheckReportDownloadUrl(uploadId: string): string {
+  return `/api/product-upload/${uploadId}/report`;
+}
+
 export function getImportReportDownloadUrl(importRunId: string): string {
   return `/api/product-import/${importRunId}/report`;
 }

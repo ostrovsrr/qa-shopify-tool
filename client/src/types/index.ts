@@ -151,6 +151,9 @@ export interface ImportFeedback {
 // A product pre-check finding: the customer issue shape plus the product's Handle.
 export interface ProductValidationIssue extends ValidationIssue {
   handle: string;
+  // Shopify's CSV import refuses the WHOLE file at upload for this issue, not
+  // just its product. The tool's test import still runs.
+  blocksFile?: boolean;
 }
 
 export interface UploadSummary {

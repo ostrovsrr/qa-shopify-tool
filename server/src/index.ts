@@ -34,6 +34,7 @@ import {
 import {
   deleteUploadHandler as deleteProductUploadHandler,
   getHistoryHandler as getProductHistoryHandler,
+  getPrecheckReportHandler as getProductPrecheckReportHandler,
   getUploadHandler as getProductUploadHandler,
   updateMetadataHandler as updateProductMetadataHandler,
   uploadHandler as productUploadHandler,
@@ -201,6 +202,7 @@ app.post('/api/shopify/stores/:storeId/cleanup-qa-products', cleanupQaProductsHa
 app.post('/api/product-upload', upload.single('file'), productUploadHandler);
 app.get('/api/product-upload/history', getProductHistoryHandler);
 app.get('/api/product-upload/:id', getProductUploadHandler);
+app.get('/api/product-upload/:id/report', getProductPrecheckReportHandler);
 app.patch('/api/product-upload/:id/metadata', updateProductMetadataHandler);
 app.delete('/api/product-upload/:id', deleteProductUploadHandler);
 

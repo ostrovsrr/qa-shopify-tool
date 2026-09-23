@@ -1,4 +1,5 @@
 import { col } from './productCsvParser';
+import { DEFAULT_OPTION_VALUE } from './productValues';
 
 // How a Handle group's rows become a product's options and variants. Shared by the
 // productSet builder (productImport.service) and the product pre-check rules
@@ -31,6 +32,14 @@ export function variantRowIndexes(rows: Record<string, string>[]): number[] {
   return out;
 }
 
+/** An option named after a blank one (Option3 with no Option2). The admin CSV
+ *  import rejects the product: "Can't have option X as option3 without
+ *  providing option2". */
+export function hasOptionGap(first: Record<string, string>): boolean {
+  const names = OPTION_NAME_COLS.map((c) => col(first, c));
+  return names.some((n, i) => i > 0 && n !== '' && names[i - 1] === '');
+}
+
 /** The product's option names, declared on the group's first row. */
 export function productOptionNames(first: Record<string, string>): string[] {
   return OPTION_NAME_COLS.map((c) => col(first, c)).filter(Boolean);
@@ -38,8 +47,9 @@ export function productOptionNames(first: Record<string, string>): string[] {
 
 /** The option values a variant row gets, one per declared option. With no declared
  *  options Shopify's single default option applies and every variant is "Default
- *  Title". A blank entry means the row has no value for that option. */
+ *  Title". A blank value is not an error: the admin CSV import fills it in as
+ *  "Default Title" too (observed 2026-09-22), so two such rows are duplicates. */
 export function variantOptionValues(row: Record<string, string>, optionNames: string[]): string[] {
-  if (optionNames.length === 0) return ['Default Title'];
-  return optionNames.map((_, i) => col(row, OPTION_VALUE_COLS[i]));
+  if (optionNames.length === 0) return [DEFAULT_OPTION_VALUE];
+  return optionNames.map((_, i) => col(row, OPTION_VALUE_COLS[i]) || DEFAULT_OPTION_VALUE);
 }

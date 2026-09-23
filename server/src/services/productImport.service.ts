@@ -14,12 +14,22 @@ import {
 } from './shopifyBulk';
 import { col, extractMetafields, groupByHandle } from './productCsvParser';
 import {
+  hasOptionGap,
   isTruthy,
   OPTION_VALUE_COLS,
   productOptionNames,
   variantOptionValues,
   variantRowIndexes,
 } from './productVariants';
+import {
+  formatMoney,
+  parseGrams,
+  parseInventoryPolicy,
+  parseMoney,
+  parseQuantity,
+  parseStatus,
+  splitTags,
+} from './productValues';
 import {
   getShopifyClient,
   ShopifyAuthError,
@@ -105,14 +115,28 @@ const WEIGHT_UNIT_ENUM: Record<string, string> = {
   oz: 'OUNCES',
 };
 
+// Grams are read like the admin import reads them (parseGrams: "100g" is 100).
+// A value the admin rejects ("heavy") is sent as-is so productSet rejects the
+// product too, instead of the import quietly dropping the weight.
 function buildWeight(row: Record<string, string>): Record<string, unknown> | null {
   const gramsRaw = col(row, 'Variant Grams');
-  const grams = Number(gramsRaw);
-  if (gramsRaw === '' || !Number.isFinite(grams)) return null;
+  const grams = parseGrams(gramsRaw);
+  if (grams === null) return null;
   const unitKey = col(row, 'Variant Weight Unit').toLowerCase();
   const unit = WEIGHT_UNIT_ENUM[unitKey] ?? 'GRAMS';
+  if (grams === 'invalid') return { value: gramsRaw, unit };
   const value = grams / (GRAMS_PER_UNIT[unitKey] ?? 1);
   return { value: Math.round(value * 10000) / 10000, unit };
+}
+
+// Money as the admin import reads it (parseMoney: "$10.00" is 10.00). A cell
+// with no number makes the admin refuse the whole file; here it is passed
+// through unchanged so productSet rejects just this product and the rest of the
+// file still imports.
+function money(raw: string): string {
+  const value = parseMoney(raw);
+  if (value === null) return '';
+  return value === 'invalid' ? raw : formatMoney(value);
 }
 
 function buildVariantFields(
@@ -121,8 +145,8 @@ function buildVariantFields(
 ): Record<string, unknown> {
   const fields: Record<string, unknown> = compact({
     sku: col(row, 'Variant SKU'),
-    price: col(row, 'Variant Price'),
-    compareAtPrice: col(row, 'Variant Compare At Price'),
+    price: money(col(row, 'Variant Price')),
+    compareAtPrice: money(col(row, 'Variant Compare At Price')),
     barcode: col(row, 'Variant Barcode'),
   });
   const taxable = col(row, 'Variant Taxable');
@@ -133,16 +157,24 @@ function buildVariantFields(
   const image = col(row, 'Variant Image');
   if (image !== '') fields.file = { originalSource: image, contentType: 'IMAGE' };
 
-  // "Variant Inventory Policy": deny (default) / continue.
-  const policy = col(row, 'Variant Inventory Policy').toLowerCase();
-  if (policy !== '') fields.inventoryPolicy = policy === 'continue' ? 'CONTINUE' : 'DENY';
+  // "Variant Inventory Policy": deny / continue in any case; no column at all
+  // leaves Shopify's default (deny). An invalid value, or a blank one when the
+  // column exists (the admin import refuses the whole file for that), is sent
+  // as-is so productSet rejects this product and the report lists it; the rest
+  // of the file still imports.
+  const policyRaw = col(row, 'Variant Inventory Policy');
+  const policy = parseInventoryPolicy(policyRaw);
+  if (policy === 'DENY' || policy === 'CONTINUE') fields.inventoryPolicy = policy;
+  else if (policy === 'invalid' || 'Variant Inventory Policy' in row) {
+    fields.inventoryPolicy = policyRaw.toUpperCase();
+  }
 
   // InventoryItemInput: tracked ("Variant Inventory Tracker" is blank for
   // untracked; any tracker value means tracked — third-party trackers like
   // shipwire have no API equivalent, tracking is the closest representation),
   // unit cost, requiresShipping, and weight.
   const inventoryItem: Record<string, unknown> = compact({
-    cost: col(row, 'Cost per item'),
+    cost: money(col(row, 'Cost per item')),
   });
   const tracker = col(row, 'Variant Inventory Tracker');
   if (tracker !== '') inventoryItem.tracked = true;
@@ -154,10 +186,10 @@ function buildVariantFields(
 
   // "Variant Inventory Qty" needs a location; when the store's location couldn't
   // be resolved (missing read_locations scope) quantities are skipped rather
-  // than failing every product line.
-  const qtyRaw = col(row, 'Variant Inventory Qty');
-  const qty = Number(qtyRaw);
-  if (locationId && qtyRaw !== '' && Number.isInteger(qty)) {
+  // than failing every product line. Read as a leading integer, like the admin
+  // import ("1.5" is 1, "ten" is 0): a quantity never fails a product.
+  const qty = parseQuantity(col(row, 'Variant Inventory Qty'));
+  if (locationId && qty !== null) {
     fields.inventoryQuantities = [{ locationId, name: 'available', quantity: qty }];
   }
 
@@ -204,6 +236,7 @@ export function buildProductSetInput(
   group: ProductGroup,
   importRunId: string,
   locationId?: string,
+  definedMetafields?: Set<string>,
 ): Record<string, unknown> {
   const rows = group.rows.map((r) => r.normalized);
   const first = rows[0] ?? {};
@@ -226,12 +259,18 @@ export function buildProductSetInput(
       ...buildVariantFields(row, locationId),
     }));
   } else {
-    // Distinct, non-empty values per option position, in first-seen order.
+    // Distinct values per option position, in first-seen order. A blank value
+    // is "Default Title", as the admin import fills it in (variantOptionValues).
+    // Except across a gap (Option3 with no Option2), which the admin rejects:
+    // productOptionNames closes the gap, so the shifted option reads the blank
+    // column; leaving it with no values makes productSet reject the product too
+    // (OPTION_VALUES_MISSING) instead of importing it as "Default Title".
+    const gap = hasOptionGap(first);
     const valuesPerOption = optionNames.map((_, i) => {
       const seen = new Set<string>();
       const values: { name: string }[] = [];
       for (const row of variantRows) {
-        const v = col(row, OPTION_VALUE_COLS[i]);
+        const v = gap ? col(row, OPTION_VALUE_COLS[i]) : variantOptionValues(row, optionNames)[i];
         if (v && !seen.has(v)) {
           seen.add(v);
           values.push({ name: v });
@@ -255,22 +294,22 @@ export function buildProductSetInput(
     }));
   }
 
-  const csvTags = col(first, 'Tags')
-    .split(',')
-    .map((t) => t.trim())
-    .filter(Boolean);
-  const tags = [TEARDOWN_TAG, qaImportTagForRun(importRunId), ...csvTags];
+  const tags = [TEARDOWN_TAG, qaImportTagForRun(importRunId), ...splitTags(col(first, 'Tags'))];
 
-  // The "Status" column (active/draft/archived, newer templates) wins; only
-  // when it's absent does "Published" decide active-vs-draft. (Published really
-  // controls Online Store publication, which productSet can't set — a Shopify
-  // CSV with Status=active + Published=FALSE means "active but unpublished",
-  // and mapping it to DRAFT would be wrong.)
-  const statusCol = col(first, 'Status').toLowerCase();
+  // The "Status" column (active/draft/archived/unlisted, newer templates) wins;
+  // only when it's blank does "Published" decide active-vs-draft. (Published
+  // really controls Online Store publication, which productSet can't set — a
+  // Shopify CSV with Status=active + Published=FALSE means "active but
+  // unpublished", and mapping it to DRAFT would be wrong.) A Status the admin
+  // import rejects is sent as-is so productSet rejects the product too.
+  const statusRaw = col(first, 'Status');
+  const parsedStatus = parseStatus(statusRaw);
   const published = col(first, 'Published');
   let status: string;
-  if (statusCol === 'active' || statusCol === 'draft' || statusCol === 'archived') {
-    status = statusCol.toUpperCase();
+  if (parsedStatus === 'invalid') {
+    status = statusRaw.toUpperCase();
+  } else if (parsedStatus !== null) {
+    status = parsedStatus;
   } else {
     status = published === '' || isTruthy(published) ? 'ACTIVE' : 'DRAFT';
   }
@@ -293,15 +332,20 @@ export function buildProductSetInput(
   if (files.length > 0) input.files = files;
 
   // Product-level metafields from the group's first row. We omit `type` and let
-  // Shopify resolve it from the existing metafield definition (so the matching
-  // definitions must already exist on the store). A metafield value Shopify
-  // rejects (e.g. a taxonomy/reference field given plain text) fails the whole
-  // productSet line — which is exactly the kind of issue this QA tool surfaces.
-  const metafields = extractMetafields(first).map((mf) => ({
-    namespace: mf.namespace,
-    key: mf.key,
-    value: mf.value,
-  }));
+  // Shopify resolve it from the existing metafield definition. A metafield
+  // column with NO definition on the store is dropped: the admin CSV import
+  // skips it silently and imports the product, while productSet would reject
+  // the product ("Type can't be blank"). `definedMetafields` is the store's
+  // "namespace.key" set; undefined (couldn't be read) sends every metafield.
+  // A value Shopify rejects for a DEFINED metafield (e.g. a taxonomy/reference
+  // field given plain text) still fails the whole productSet line.
+  const metafields = extractMetafields(first)
+    .filter((mf) => !definedMetafields || definedMetafields.has(`${mf.namespace}.${mf.key}`))
+    .map((mf) => ({
+      namespace: mf.namespace,
+      key: mf.key,
+      value: mf.value,
+    }));
   if (metafields.length > 0) input.metafields = metafields;
 
   return input;
@@ -315,11 +359,12 @@ export function buildProductLines(
   groups: ProductGroup[],
   importRunId: string,
   locationId?: string,
+  definedMetafields?: Set<string>,
 ): BuiltJsonl<string> {
   const lines: string[] = [];
   const lineRefs: string[] = [];
   for (const group of groups) {
-    const input = buildProductSetInput(group, importRunId, locationId);
+    const input = buildProductSetInput(group, importRunId, locationId, definedMetafields);
     lines.push(JSON.stringify({ input }));
     lineRefs.push(group.handle);
   }
@@ -343,6 +388,53 @@ async function fetchLocationId(
     );
     return undefined;
   }
+}
+
+/** The store's product metafield definitions as "namespace.key". Returns
+ *  undefined instead of throwing — every metafield is then sent, and a column
+ *  with no definition rejects its product as it did before. */
+async function fetchDefinedMetafields(
+  client: Awaited<ReturnType<typeof getShopifyClient>>,
+): Promise<Set<string> | undefined> {
+  const defined = new Set<string>();
+  let after: string | null = null;
+  try {
+    for (;;) {
+      const data: {
+        metafieldDefinitions: {
+          nodes: { namespace: string; key: string }[];
+          pageInfo: { hasNextPage: boolean; endCursor: string | null };
+        };
+      } = await client.query(
+        `query($after: String) {
+          metafieldDefinitions(first: 250, ownerType: PRODUCT, after: $after) {
+            nodes { namespace key }
+            pageInfo { hasNextPage endCursor }
+          }
+        }`,
+        { after },
+      );
+      for (const d of data.metafieldDefinitions.nodes) defined.add(`${d.namespace}.${d.key}`);
+      if (!data.metafieldDefinitions.pageInfo.hasNextPage) return defined;
+      after = data.metafieldDefinitions.pageInfo.endCursor;
+    }
+  } catch (err) {
+    console.warn(
+      `Could not read metafield definitions for ${client.shop}; sending every metafield: ${(err as Error).message}`,
+    );
+    return undefined;
+  }
+}
+
+/** What the builder needs to know about the target store. */
+async function fetchStoreContext(
+  client: Awaited<ReturnType<typeof getShopifyClient>>,
+): Promise<{ locationId?: string; definedMetafields?: Set<string> }> {
+  const [locationId, definedMetafields] = await Promise.all([
+    fetchLocationId(client),
+    fetchDefinedMetafields(client),
+  ]);
+  return { locationId, definedMetafields };
 }
 
 /** Parse one productSet result line into a per-product outcome. Uses the real
@@ -448,8 +540,8 @@ export async function startProductImport(
 
   const importRunId = uuidv4();
   const groups = groupsFromOriginalRows(upload.originalRows);
-  const locationId = await fetchLocationId(client);
-  const { jsonl, lineRefs } = buildProductLines(groups, importRunId, locationId);
+  const { locationId, definedMetafields } = await fetchStoreContext(client);
+  const { jsonl, lineRefs } = buildProductLines(groups, importRunId, locationId, definedMetafields);
   if (lineRefs.length === 0) {
     return {
       ok: false,
@@ -860,8 +952,8 @@ async function launchBatchJob(
       return;
     }
 
-    const locationId = await fetchLocationId(client);
-    const { jsonl } = buildProductLines(batch, parentId, locationId);
+    const { locationId, definedMetafields } = await fetchStoreContext(client);
+    const { jsonl } = buildProductLines(batch, parentId, locationId, definedMetafields);
     const stagedPath = await stagedUpload(client, jsonl, 'bulk_products.jsonl');
     // Intent before the side effect. From here until the update below lands, a
     // crash leaves an op on Shopify that we may have no id for — and the shop cannot
@@ -1106,8 +1198,8 @@ async function relaunchProductRun(runId: string): Promise<void> {
 
   const client = await getShopifyClient(run.storeId ?? undefined);
   const groups = groupsFromOriginalRows(run.uploadRun.originalRows);
-  const locationId = await fetchLocationId(client);
-  const { jsonl, lineRefs } = buildProductLines(groups, runId, locationId);
+  const { locationId, definedMetafields } = await fetchStoreContext(client);
+  const { jsonl, lineRefs } = buildProductLines(groups, runId, locationId, definedMetafields);
   if (lineRefs.length === 0) {
     await prisma.productImportRun.updateMany({
       where: { id: runId, status: 'PENDING' },
