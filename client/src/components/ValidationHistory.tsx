@@ -131,6 +131,9 @@ export function ValidationHistory({ onOpen, refreshTrigger }: Props) {
   const [history, setHistory] = useState<ValidationHistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // A failed delete/save, shown above the list instead of a blocking alert().
+  // Kept apart from `error`, which replaces the whole list.
+  const [actionError, setActionError] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
 
   // YOUR runs by default. The database is shared across every colleague's
@@ -159,9 +162,10 @@ export function ValidationHistory({ onOpen, refreshTrigger }: Props) {
     if (!confirm('Delete this validation run?')) return;
     try {
       await deleteValidation(id);
+      setActionError('');
       setHistory((h) => h.filter((item) => item.id !== id));
     } catch {
-      alert('Failed to delete validation run.');
+      setActionError('Failed to delete validation run.');
     }
   };
 
@@ -173,10 +177,11 @@ export function ValidationHistory({ onOpen, refreshTrigger }: Props) {
   const handleSaveMetadata = async (id: string, payload: UpdateMetadataPayload) => {
     try {
       const updated = await updateValidationMetadata(id, payload);
+      setActionError('');
       setHistory((h) => h.map((item) => (item.id === id ? { ...item, ...updated } : item)));
       setEditingId(null);
     } catch {
-      alert('Failed to save metadata.');
+      setActionError('Failed to save metadata.');
     }
   };
 
@@ -240,6 +245,7 @@ export function ValidationHistory({ onOpen, refreshTrigger }: Props) {
   return (
     <div className="history-section">
       {header}
+      {actionError && <div className="error-banner">{actionError}</div>}
       <div className="history-list">
         {history.map((item) => (
           <div key={item.id} className="history-item-wrapper">

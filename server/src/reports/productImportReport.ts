@@ -5,6 +5,7 @@ import { HttpError } from '../errors';
 import { purgedMessage } from '../services/retention.service';
 import { excelSafeRecord, excelSafeText } from './excelCell';
 import { hintFor } from '../services/productFeedback.service';
+import { FILE_BLOCKING_ISSUE_TYPES } from '../validators/product';
 
 // Product import report (results keyed by Handle):
 //   • Products With Shopify Result — one row per product, in CSV order
@@ -133,6 +134,98 @@ export async function streamProductImportReport(
   await workbook.commit();
 }
 
+// ── Pre-check report (before any import) ─────────────────────────────────────
+// The product twin of the customer pre-validation report: what Shopify's CSV
+// import will do with this file, from the file alone.
+//   • Pre-check Errors — one row per issue, with Shopify's own wording
+//   • Full Uploaded File — every CSV row with its product's expected result
+//     (Imports / Rejected / Rejected (blocks file)) and the issues on that row
+export async function streamProductPrecheckReport(
+  uploadId: string,
+  stream: Writable,
+  onReady: (sourceFileName: string) => void,
+): Promise<void> {
+  const upload = await prisma.productUploadRun.findUnique({ where: { id: uploadId } });
+  if (!upload) throw new HttpError(404, 'Upload not found.');
+  if (upload.piiPurgedAt) throw new HttpError(410, purgedMessage(upload.piiPurgedAt));
+
+  const originalColumns = Array.isArray(upload.originalColumns) ? (upload.originalColumns as string[]) : [];
+  const issues = await prisma.productValidationIssue.findMany({
+    where: { uploadRunId: uploadId },
+    select: { rowNumber: true, handle: true, issueType: true },
+  });
+  const typesByRow = new Map<number, Set<string>>();
+  const rejectedHandles = new Set<string>();
+  // Products whose issue makes Shopify's CSV import refuse the whole file.
+  const blockingHandles = new Set<string>();
+  for (const i of issues) {
+    if (!typesByRow.has(i.rowNumber)) typesByRow.set(i.rowNumber, new Set());
+    typesByRow.get(i.rowNumber)!.add(i.issueType);
+    rejectedHandles.add(i.handle);
+    if (FILE_BLOCKING_ISSUE_TYPES.has(i.issueType)) blockingHandles.add(i.handle);
+  }
+
+  onReady(upload.fileName);
+
+  const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({ stream, useStyles: true, useSharedStrings: false });
+  workbook.creator = 'Shopify Products QA Tool';
+  workbook.created = new Date();
+
+  await addPrecheckSheet(workbook, uploadId, upload.precheckErrors);
+
+  const sheet = workbook.addWorksheet('Full Uploaded File');
+  if (originalColumns.length === 0) {
+    sheet.addRow(['No uploaded file data available.']).commit();
+  } else {
+    const allColumns = ['Row Number', 'Expected Result', 'Pre-check Errors', ...originalColumns];
+    sheet.columns = allColumns.map((col) => ({
+      header: excelSafeText(col),
+      key: col,
+      width: col === 'Row Number' ? 12 : col === 'Expected Result' ? 22 : col === 'Pre-check Errors' ? 30 : 22,
+    }));
+    sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(allColumns.length)}1` };
+    styleHeader(sheet.getRow(1), HEADER_COLOURS.Uploaded);
+
+    for await (const batch of iterOriginalRows(uploadId)) {
+      for (const origRow of batch) {
+        const data = (origRow.data ?? {}) as Record<string, string>;
+        const handle = (data['Handle'] ?? '').trim();
+        const rejected = rejectedHandles.has(handle);
+        // Per product, so the fine ones stay visible even when the file has a
+        // blocker; the blocker's own product says so.
+        // An upload made before the pre-check existed has no issues because it
+        // was never checked — not because it is clean.
+        const expected =
+          upload.precheckErrors === null
+            ? 'Not checked'
+            : blockingHandles.has(handle)
+              ? 'Rejected (blocks file)'
+              : rejected
+                ? 'Rejected'
+                : 'Imports';
+        const rowData: Record<string, string | number> = {
+          'Row Number': origRow.rowNumber,
+          'Expected Result': expected,
+          'Pre-check Errors': [...(typesByRow.get(origRow.rowNumber) ?? [])].join(', '),
+        };
+        for (const col of originalColumns) rowData[col] = data[col] ?? '';
+        const row = sheet.addRow(excelSafeRecord(rowData));
+        if (expected !== 'Not checked') {
+          row.getCell(2).fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: expected === 'Imports' ? RESULT_COLOURS.accepted : RESULT_COLOURS.rejected },
+          };
+        }
+        row.commit();
+      }
+    }
+  }
+  sheet.commit();
+
+  await workbook.commit();
+}
+
 function styleHeader(row: ExcelJS.Row, bgArgb: string): void {
   row.eachCell((cell) => {
     cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
@@ -217,11 +310,13 @@ async function addPrecheckSheet(
     return;
   }
 
-  const columns = ['Row Number', 'Handle', 'Column', 'Issue Type', 'Current Value', 'Message', 'Suggested Fix'];
+  // Scope: "Whole file" issues make Shopify refuse the file at upload; the rest
+  // fail only their own product.
+  const columns = ['Row Number', 'Handle', 'Column', 'Issue Type', 'Scope', 'Current Value', 'Message', 'Suggested Fix'];
   sheet.columns = columns.map((col) => ({
     header: col,
     key: col,
-    width: col === 'Message' || col === 'Suggested Fix' ? 60 : col === 'Row Number' ? 12 : 26,
+    width: col === 'Message' || col === 'Suggested Fix' ? 60 : col === 'Row Number' || col === 'Scope' ? 12 : 26,
   }));
   sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(columns.length)}1` };
   styleHeader(sheet.getRow(1), HEADER_COLOURS.Precheck);
@@ -237,6 +332,7 @@ async function addPrecheckSheet(
       Handle: issue.handle,
       Column: issue.columnName,
       'Issue Type': issue.issueType,
+      Scope: FILE_BLOCKING_ISSUE_TYPES.has(issue.issueType) ? 'Whole file' : 'Product',
       'Current Value': issue.currentValue ?? '',
       Message: issue.message,
       'Suggested Fix': issue.suggestedFix ?? '',

@@ -6,6 +6,7 @@ import {
   ProductHistoryItem,
   ProductImportFeedback,
   ShopifyHealth,
+  BusyStore,
   ShopifyStore,
   StoreProductStats,
   UpdateMetadataPayload,
@@ -72,6 +73,12 @@ export async function deleteUpload(uploadId: string): Promise<void> {
   await api.delete(`/product-upload/${uploadId}`);
 }
 
+/** The pre-check workbook for an upload, before any import (twin of the
+ *  customer prevalidation report). */
+export function getPrecheckReportDownloadUrl(uploadId: string): string {
+  return `/api/product-upload/${uploadId}/report`;
+}
+
 export function getImportReportDownloadUrl(importRunId: string): string {
   return `/api/product-import/${importRunId}/report`;
 }
@@ -83,6 +90,15 @@ export async function fetchShopifyStores(): Promise<ShopifyStore[]> {
     validateStatus: () => true,
   });
   return data.stores ?? [];
+}
+
+/** Twin of the customer fetchBusyStores — the lock is per store, not per flow,
+ *  so a customer import shows here too. */
+export async function fetchBusyStores(): Promise<BusyStore[]> {
+  const { data, status } = await api.get<{ busy: BusyStore[] }>('/shopify/stores/busy', {
+    validateStatus: () => true,
+  });
+  return status === 200 ? data.busy ?? [] : [];
 }
 
 export async function fetchStoreProductStats(storeId: string): Promise<StoreProductStats> {
@@ -141,16 +157,17 @@ export async function fetchImportFeedback(importRunId: string): Promise<ProductI
   return data;
 }
 
-// Latest import for an upload, or null when none exists (404). Used to
+// Latest import for an upload, or null when none exists. Used to
 // restore/resume an import when an upload is reopened from History.
 export async function fetchLatestImportForUpload(
   uploadId: string,
 ): Promise<ProductImportFeedback | null> {
-  const { data, status } = await api.get<ProductImportFeedback>(
+  const { data, status } = await api.get<ProductImportFeedback | null>(
     `/product-import/by-upload/${encodeURIComponent(uploadId)}`,
     { validateStatus: () => true },
   );
-  return status === 200 ? data : null;
+  // 200 with null = never imported (older servers answered 404).
+  return status === 200 && data ? data : null;
 }
 
 // Batch-aware: one cleanup run per store the import touched. Poll them all.

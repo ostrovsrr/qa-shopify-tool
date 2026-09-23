@@ -8,6 +8,7 @@ import {
   SHOPIFY_COLUMNS,
 } from '../services/columnMapping.service';
 import { excelSafeRecord, excelSafeText } from './excelCell';
+import { buildTemplateDataset } from './templateDataset';
 
 // Written with ExcelJS's *streaming* workbook writer: every row is committed
 // (flushed to the output stream and freed) as it's built. This report has four
@@ -80,6 +81,7 @@ export async function streamShopifyVerificationReport(
       : {};
 
   const rowResults = importRun.rowResults as ReportRowResult[];
+  const notImported = notImportedReasons(validationRun);
   const originalByRow = new Map(
     validationRun.originalRows.map((row) => [row.rowNumber, row.data as Record<string, string>]),
   );
@@ -107,11 +109,42 @@ export async function streamShopifyVerificationReport(
     originalColumns,
     validationRun.originalRows,
     rowResults,
+    notImported,
   );
   addFullUploadedFileSheet(workbook, originalColumns, validationRun.originalRows);
-  addShopifyTemplateSheet(workbook, columnMapping, validationRun.originalRows, rowResults);
+  addShopifyTemplateSheet(workbook, columnMapping, validationRun.originalRows, rowResults, notImported);
 
   await workbook.commit();
+}
+
+// Why a CSV row has no Shopify result. The import sends the template dataset,
+// not the raw file, so a row can be left out on purpose: a blank line dropped by
+// "Name contactless rows", or a duplicate absorbed by "Merge matching
+// duplicates". Rebuilt from the run's own flags (the same pure function the
+// import used), so the report can say which, instead of a bare "Not imported".
+export function notImportedReasons(run: {
+  originalRows: OriginalRow[];
+  columnMapping: unknown;
+  moveDuplicatesToNotes?: boolean | null;
+  mergeMatchingDuplicates?: boolean | null;
+  moveInvalidContactToNotes?: boolean | null;
+  fillMissingContactName?: boolean | null;
+}): Map<number, string> {
+  const reasons = new Map<number, string>();
+  if (!run.mergeMatchingDuplicates && !run.fillMissingContactName) return reasons;
+  const dataset = buildTemplateDataset({
+    originalRows: run.originalRows,
+    columnMapping: run.columnMapping as Record<string, string> | null,
+    moveDuplicatesToNotes: run.moveDuplicatesToNotes ?? false,
+    mergeMatchingDuplicates: run.mergeMatchingDuplicates ?? false,
+    moveInvalidContactToNotes: run.moveInvalidContactToNotes ?? false,
+    fillMissingContactName: run.fillMissingContactName ?? false,
+  });
+  for (const row of dataset.droppedBlank) reasons.set(row, 'Not imported: blank line');
+  for (const kept of dataset.rows) {
+    for (const absorbed of kept.mergedFrom) reasons.set(absorbed, `Not imported: merged into row ${kept.rowNumber}`);
+  }
+  return reasons;
 }
 
 function styleHeader(row: ExcelJS.Row, bgArgb: string) {
@@ -174,6 +207,7 @@ function addRowsWithShopifyResultSheet(
   originalColumns: string[],
   originalRows: OriginalRow[],
   rowResults: ReportRowResult[],
+  notImported: Map<number, string>,
 ) {
   const sheet = workbook.addWorksheet('Rows With Shopify Result');
   const resultByRow = new Map(rowResults.map((r) => [r.rowNumber, r]));
@@ -200,7 +234,7 @@ function addRowsWithShopifyResultSheet(
     const result = resultByRow.get(origRow.rowNumber);
     const rowData: Record<string, string | number | boolean> = {
       'Row Number': origRow.rowNumber,
-      'Shopify Result': result ? (result.accepted ? 'Accepted' : 'Rejected') : 'Not imported',
+      'Shopify Result': result ? (result.accepted ? 'Accepted' : 'Rejected') : notImported.get(origRow.rowNumber) ?? 'Not imported',
       'Shopify Customer ID': result?.shopifyCustomerId ?? '',
       'Shopify Field': result?.shopifyField ?? '',
       'Shopify Code': result?.shopifyCode ?? '',
@@ -258,6 +292,7 @@ function addShopifyTemplateSheet(
   columnMapping: Record<string, string>,
   originalRows: OriginalRow[],
   rowResults: ReportRowResult[],
+  notImported: Map<number, string>,
 ) {
   const sheet = workbook.addWorksheet('Shopify Template');
 
@@ -300,7 +335,7 @@ function addShopifyTemplateSheet(
     const result = resultByRow.get(origRow.rowNumber);
     const rowData: Record<string, string | number> = {
       'Row Number': origRow.rowNumber,
-      'Shopify Result': result ? (result.accepted ? 'Accepted' : 'Rejected') : 'Not imported',
+      'Shopify Result': result ? (result.accepted ? 'Accepted' : 'Rejected') : notImported.get(origRow.rowNumber) ?? 'Not imported',
       'Shopify Field': result?.shopifyField ?? '',
       'Shopify Code': result?.shopifyCode ?? '',
       'Shopify Message': result?.message ?? '',

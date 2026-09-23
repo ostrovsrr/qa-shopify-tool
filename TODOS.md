@@ -20,7 +20,7 @@ held by an already-terminal or deleted row simply takes it, so a missed release 
 store. A TTL (30 min, renewed on every poll) is the backstop for a run nobody is polling — those
 can never reach terminal on their own.
 
-**Remaining follow-up (small):** the store picker does not yet SHOW which stores are busy — a
+**Follow-up ✅ DONE (2026-09-22):** both store pickers now show "In use: <operation>" (GET /api/shopify/stores/busy, polled every 15s). Was: the store picker did not SHOW which stores are busy — a
 colleague only finds out by trying and getting the 409. `busyStores()` is already implemented and
 tested; it just needs a route and the two store-picker components. Worth doing before real users
 arrive, since "pick a store, get rejected, pick again" is a bad first impression.
@@ -110,19 +110,19 @@ High/Medium findings from that sweep were fixed in commits `180d253`, `28e2034`,
 `3cb923c`, `cfa4dc4`, `9e411d8`. Full report:
 `.gstack/qa-reports/qa-report-localhost-3101-2026-09-07.md`.
 
-**a. "No import yet" is a 404, so every clean results page logs console errors.**
+**a. "No import yet" is a 404, so every clean results page logs console errors — ✅ DONE (2026-09-22):** both lookups now answer 200 with null.
 `GET /api/customer-import/by-validation/:id` and `/api/product-import/by-upload/:id`
 404 when nothing has been imported. The client handles it correctly, but the
 browser logs a red error anyway — twice per load under StrictMode. An empty 200
 body would be quieter. **Cons:** it is a defensible REST shape; changing it
 touches both API clients.
 
-**b. Wrong file type uses a blocking `alert()`.** Six `alert()` calls across
+**b. Wrong file type uses a blocking `alert()` — ✅ DONE (2026-09-22):** inline error banners on both upload areas and both history lists. Six `alert()` calls across
 `UploadArea`, `ProductUploadArea`, `ValidationHistory`, `ProductHistory`. The app
 already has an inline error style. Cosmetic, but `alert()` also blocks the whole
 tab, which matters for a tool that runs long imports.
 
-**c. Counts read impossibly for a few seconds after a cleanup.** The card can show
+**c. Counts read impossibly for a few seconds after a cleanup — ✅ DONE (2026-09-22):** the store card re-reads once more 6s after any import/cleanup. The card can show
 `Total products: 0 · QA imports: 5` — Shopify's tag-filtered count lagging its own
 delete. Self-corrects on the next refresh and no longer blocks anything (the
 count-based disable on Clean QA was removed in `9e411d8`). Fix would be a
@@ -141,3 +141,32 @@ consumes, so there is nothing durable to link to.
 **e. Mobile.** At 375×812 the header wraps to three lines and the page scrolls
 horizontally (535px wide in a 375px viewport), driven by the per-store results
 table. Internal desktop tool, so this is a scope call rather than a bug.
+
+---
+
+## 6. Deferred /qa findings (2026-09-22, customer cleanup options, PR #16) — ✅ DONE (2026-09-22)
+
+Report: `.gstack/qa-reports/qa-report-localhost-2026-09-22-customers.md`.
+
+- **Errors card is red at 0 (low, visual).** ✅ Fixed: neutral at 0. `client/src/components/SummaryCards.tsx` always uses
+  `card-error`; the product review screen switches to neutral at 0. Twin asymmetry.
+- **Dropped blank row reads "Not imported" in the import report (low, content).** ✅ Fixed: both sheets now say "Not imported: blank line" or "Not imported: merged into row N" (`notImportedReasons`, which also covers the merge option). The customer
+  import workbook gives no reason for a blank line left out by "Name contactless rows". Say
+  "Blank line, not sent" instead. Related: the validation-results note added for ISSUE-C1 only
+  appears right after Validate; a run reopened from History does not recompute it.
+## 5. Deferred /qa findings (2026-09-22, product pre-check parity)
+
+Found by /qa on `product-precheck-admin-parity`. Report: `.gstack/qa-reports/qa-report-localhost-2026-09-22.md`.
+
+- **Doubled quotes in whole-file pre-check messages (low, content).** ✅ Fixed 2026-09-22. `productIssue`
+  (`server/src/validators/product/issue.ts`) wraps Shopify's wording in quotes, and the money
+  wording already starts with one, so the message reads `...fixed): ""abc" is not a valid price"`.
+  Repro: upload a product CSV with Variant Price `abc`. Fix: don't add quotes when the wording
+  already starts with one, or quote with ‘…’.
+- **Pass-through rejections read like GraphQL errors (medium, UX).** Bad money / grams / inventory
+  policy / status are sent to productSet unchanged so Shopify rejects them, but the results table
+  groups them under field `query` with `Variable $input of type ProductSetInput! was provided
+  invalid value for ...`. This is the planned rejection-message work: keep the full error path,
+  map it to CSV row + column, and add an explanation per code.
+- **Results table overflows on phones (low, visual).** At 375px the product results page is 738px
+  wide (the Rejections table in `ProductResultsView`). Pre-existing; the tool is desktop-first.

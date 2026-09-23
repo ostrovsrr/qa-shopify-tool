@@ -10,6 +10,8 @@ import {
 import { removeUploadFile } from '../services/uploadFile';
 import { actorFrom, recordAction } from '../services/actionLog.service';
 import { parseHistoryQuery } from '../utils/historyQuery';
+import { reportFileName } from '../utils/reportFileName';
+import { streamProductPrecheckReport } from '../reports/productImportReport';
 
 const uuidSchema = z.string().uuid('Invalid upload ID format.');
 
@@ -132,6 +134,37 @@ export async function deleteUploadHandler(
     await recordAction(req, { action: 'DELETE_PRODUCT_UPLOAD', target: parsed.data });
     res.json({ message: 'Upload deleted successfully.' });
   } catch (err) {
+    next(err);
+  }
+}
+
+// GET /api/product-upload/:id/report — the pre-check workbook, before any import.
+// Twin of the customer prevalidation report.
+export async function getPrecheckReportHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const parsed = uuidSchema.safeParse(req.params.id);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.errors[0].message });
+      return;
+    }
+    // Headers go on in onReady: after the DB read, before the first byte.
+    await streamProductPrecheckReport(parsed.data, res, (sourceFileName) => {
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${reportFileName('product-precheck-report', sourceFileName, 'xlsx')}"`,
+      );
+    });
+  } catch (err) {
+    // Once streaming has begun the headers are flushed: tear the connection down.
+    if (res.headersSent) {
+      res.destroy();
+      return;
+    }
     next(err);
   }
 }

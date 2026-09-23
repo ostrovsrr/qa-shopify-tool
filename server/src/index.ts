@@ -22,6 +22,7 @@ import {
   shopifyHealthHandler,
   shopifyStoreProductStatsHandler,
   shopifyStoreStatsHandler,
+  shopifyBusyStoresHandler,
   shopifyStoresHandler,
 } from './controllers/shopifyHealth.controller';
 import {
@@ -35,6 +36,7 @@ import {
 import {
   deleteUploadHandler as deleteProductUploadHandler,
   getHistoryHandler as getProductHistoryHandler,
+  getPrecheckReportHandler as getProductPrecheckReportHandler,
   getUploadHandler as getProductUploadHandler,
   updateMetadataHandler as updateProductMetadataHandler,
   uploadHandler as productUploadHandler,
@@ -171,6 +173,7 @@ app.delete('/api/customer-validation/:validationId', deleteValidationHandler);
 // ── Shopify test-store import + feedback loop ────────────────────────────────
 app.get('/api/shopify/health', shopifyHealthHandler);
 app.get('/api/shopify/stores', shopifyStoresHandler);
+app.get('/api/shopify/stores/busy', shopifyBusyStoresHandler);
 
 // GET /api/action-log — who destroyed what. Read-only; nothing in the app makes a
 // decision from this table (see services/actionLog.service.ts).
@@ -203,6 +206,7 @@ app.post('/api/shopify/stores/:storeId/cleanup-qa-products', cleanupQaProductsHa
 app.post('/api/product-upload', upload.single('file'), productUploadHandler);
 app.get('/api/product-upload/history', getProductHistoryHandler);
 app.get('/api/product-upload/:id', getProductUploadHandler);
+app.get('/api/product-upload/:id/report', getProductPrecheckReportHandler);
 app.patch('/api/product-upload/:id/metadata', updateProductMetadataHandler);
 app.delete('/api/product-upload/:id', deleteProductUploadHandler);
 

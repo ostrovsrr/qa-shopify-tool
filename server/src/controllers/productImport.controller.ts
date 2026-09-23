@@ -141,11 +141,8 @@ export async function getLatestImportForUploadHandler(
       return;
     }
     const feedback = await reconcileLatestImportForUpload(parsed.data);
-    if (!feedback) {
-      res.status(404).json({ error: 'No import found for this upload.' });
-      return;
-    }
-    res.json(feedback);
+    // See the customer twin: "not imported yet" is a 200 with null, not a 404.
+    res.json(feedback ?? null);
   } catch (err) {
     if (handleShopifyError(err, res)) return;
     next(err);

@@ -74,6 +74,9 @@ export interface CustomerValidationResult {
   issues: CustomerValidationIssue[];
   /** Absent on runs validated before the summary existed. */
   summary?: ValidationSummary | null;
+  // CSV rows dropped as blank lines ("Name contactless rows" on). Returned by
+  // validate only; a reopened run does not recompute it.
+  droppedBlankRows?: number[];
 }
 
 export interface CustomerValidationRule {
@@ -140,6 +143,9 @@ export interface ProductGroup {
 // unit is a product and one product spans several rows.
 export interface ProductValidationIssue extends CustomerValidationIssue {
   handle: string;
+  // Set on the API response only: Shopify refuses the WHOLE file at upload for
+  // this issue, not just its product (validators/product FILE_BLOCKING_ISSUE_TYPES).
+  blocksFile?: boolean;
 }
 
 export interface ProductValidationRule {

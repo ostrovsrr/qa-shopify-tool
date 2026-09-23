@@ -103,6 +103,7 @@ Tell people before you run it.
 | SE6 | 3106 | Mandy | `http://10.20.30.208:3106` |
 | SE7 | 3107 | Pratha | `http://10.20.30.208:3107` |
 | SE8 | 3108 | Luigi | `http://10.20.30.208:3108` |
+| SE9 | 3109 | Steffi | `http://10.20.30.208:3109` |
 | _status page_ | 3100 | — | `http://10.20.30.208:3100` |
 
 The owner column is `QA_OWNER_SE*` in `deploy.env`, served by `GET /api/instance` and
@@ -158,7 +159,7 @@ Get-ScheduledTask -TaskPath '\QA Shopify Tool\' |
   Get-ScheduledTaskInfo | Format-Table TaskName, LastRunTime, LastTaskResult
 
 # health
-3101..3108 | ForEach-Object {
+3101..3109 | ForEach-Object {
   try   { "$_ -> $((Invoke-RestMethod "http://127.0.0.1:$_/api/health").status)" }
   catch { "$_ -> DOWN" }
 }

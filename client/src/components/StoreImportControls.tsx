@@ -6,6 +6,7 @@ import {
   cleanupQaProducts,
   fetchImportFeedback,
   fetchLatestImportForUpload,
+  fetchBusyStores,
   fetchShopifyStores,
   fetchStoreProductStats,
   getImportReportDownloadUrl,
@@ -31,6 +32,11 @@ const TERMINAL_STATUSES = ['COMPLETED', 'FAILED', 'CANCELED', 'EXPIRED'];
 const isTerminal = (status: string): boolean => TERMINAL_STATUSES.includes(status);
 
 const POLL_INTERVAL_MS = 3000;
+// How long Shopify's tag-filtered counts take to catch up with a create or delete
+// (seen: several seconds). One re-read after this settles the store card.
+const STATS_SETTLE_MS = 6000;
+// How often the picker re-asks which stores are busy.
+const BUSY_POLL_MS = 15000;
 
 function errMessage(err: unknown, fallback: string): string {
   if (axios.isAxiosError(err)) {
@@ -65,6 +71,8 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
   const [restoring, setRestoring] = useState(true);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  // See the customer twin (ImportPanel): busy stores, shown on the picker.
+  const [storesInUse, setStoresInUse] = useState<Record<string, string>>({});
 
   const primaryStoreId = selectedStoreIds[0];
   const inParallelSelect = importMode === 'parallel' && parallelPhase === 'select';
@@ -132,6 +140,21 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stores]);
+
+  // ── which stores are busy (any flow, any colleague) — see ImportPanel ─────────
+  useEffect(() => {
+    let active = true;
+    const load = () =>
+      fetchBusyStores().then(
+        (busy) => active && setStoresInUse(Object.fromEntries(busy.map((b) => [b.storeId, b.operation]))),
+      );
+    void load();
+    const timer = window.setInterval(() => void load(), BUSY_POLL_MS);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   // ── restore the latest import when (re)opening an upload ──────────────────────
   useEffect(() => {
@@ -288,9 +311,15 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
     window.open(getImportReportDownloadUrl(feedback.importRunId), '_blank');
   };
 
+  // See the customer twin (ImportPanel): read now, then again once Shopify's
+  // tag-filtered count has caught up with the write. (TODOS §4c)
   const refreshStoreStats = async (storeId: string) => {
-    const st = await fetchStoreProductStats(storeId).catch(() => null);
-    if (st) setStoreStats((m) => ({ ...m, [storeId]: st }));
+    const read = async () => {
+      const st = await fetchStoreProductStats(storeId).catch(() => null);
+      if (st) setStoreStats((m) => ({ ...m, [storeId]: st }));
+    };
+    await read();
+    window.setTimeout(() => void read(), STATS_SETTLE_MS);
   };
 
   const cleanStore = async (storeId: string) => {
@@ -569,6 +598,9 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
                           ? 'unreachable'
                           : 'counting…'}
                     </small>
+                    {storesInUse[store.id] && (
+                      <small className="store-chip-busy">In use: {storesInUse[store.id]}</small>
+                    )}
                   </button>
                 ))}
               </div>

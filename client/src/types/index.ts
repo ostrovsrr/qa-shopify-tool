@@ -45,6 +45,9 @@ export interface ValidationResult {
   issues: ValidationIssue[];
   /** Null on runs validated before the summary existed. */
   summary?: ValidationSummary | null;
+  // Blank lines left out of the import ("Name contactless rows" on). Only on a
+  // fresh validate; a reopened run does not carry it.
+  droppedBlankRows?: number[];
 }
 
 export interface ValidationHistoryImport {
@@ -117,6 +120,14 @@ export interface ShopifyStore {
   authMode: 'adminToken' | 'clientCredentials';
 }
 
+// A store holding a live busy-lock: an import or cleanup is running on it, so a
+// new one would be refused with a 409. `operation` reads like "a customer import".
+export interface BusyStore {
+  storeId: string;
+  operation: string;
+  acquiredAt: string;
+}
+
 export interface StoreCustomerStats {
   storeId?: string;
   shop: string;
@@ -180,6 +191,9 @@ export interface ImportFeedback {
 // A product pre-check finding: the customer issue shape plus the product's Handle.
 export interface ProductValidationIssue extends ValidationIssue {
   handle: string;
+  // Shopify's CSV import refuses the WHOLE file at upload for this issue, not
+  // just its product. The tool's test import still runs.
+  blocksFile?: boolean;
 }
 
 export interface UploadSummary {
