@@ -30,6 +30,8 @@ export interface TemplateDataset {
   fixMap: Map<number, Map<string, string>>;
   /** Rows whose invalid Email/Phone was stripped into Note. */
   invalidMoved: Set<number>;
+  /** Rows whose DUPLICATED Email/Phone was stripped into Note. */
+  duplicatesMoved: Set<number>;
   /** Rows given a placeholder First Name so Shopify would accept them. */
   namesFilled: Set<number>;
   /** Blank lines removed from the dataset entirely (not customers at all). */
@@ -201,6 +203,7 @@ export function buildTemplateDataset(options: TemplateDatasetOptions): TemplateD
     }
   }
   const namesFilled = new Set<number>();
+  const duplicatesMoved = new Set<number>();
 
   // Completeness score per surviving row (recomputed after merging, since a
   // merged keeper absorbs fields). Used to pick which row of a duplicate group
@@ -256,6 +259,7 @@ export function buildTemplateDataset(options: TemplateDatasetOptions): TemplateD
         // Tag the stripped rows (never the keeper) so they're filterable in
         // Shopify admin after import
         appendTags(record, dupTags);
+        duplicatesMoved.add(row.rowNumber);
       }
     }
 
@@ -300,6 +304,7 @@ export function buildTemplateDataset(options: TemplateDatasetOptions): TemplateD
     anyMerges,
     fixMap,
     invalidMoved,
+    duplicatesMoved,
     namesFilled,
     droppedBlank,
   };

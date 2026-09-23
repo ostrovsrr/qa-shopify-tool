@@ -10,12 +10,41 @@ export interface ValidationIssue {
   suggestedFix: string;
 }
 
+/** What became of every row. ready + fixed + blocked + removed === totalRows;
+ *  each row lands in exactly one, with BLOCKED winning any tie. The breakdown
+ *  fields deliberately do not sum — one row can carry two fixes, and one row can
+ *  be duplicated on both email and phone, which is why duplicateBoth exists. */
+export interface ValidationSummary {
+  totalRows: number;
+  ready: number;
+  fixed: number;
+  blocked: number;
+  removed: number;
+
+  fixedInvalidContact: number;
+  fixedDuplicates: number;
+  fixedNamed: number;
+
+  removedBlank: number;
+  removedMerged: number;
+
+  duplicateRecords: number;
+  duplicateEmail: number;
+  duplicatePhone: number;
+  duplicateBoth: number;
+  duplicateGroups: number;
+
+  errorCount: number;
+}
+
 export interface ValidationResult {
   validationId: string;
   fileName: string;
   totalRows: number;
   errors: number;
   issues: ValidationIssue[];
+  /** Null on runs validated before the summary existed. */
+  summary?: ValidationSummary | null;
   // Blank lines left out of the import ("Name contactless rows" on). Only on a
   // fresh validate; a reopened run does not carry it.
   droppedBlankRows?: number[];

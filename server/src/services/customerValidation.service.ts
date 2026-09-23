@@ -8,6 +8,7 @@ import {
   Severity,
   UpdateValidationMetadata,
   ValidationHistoryItem,
+  ValidationSummary,
 } from '../types';
 import { customerValidationRules } from '../validators/customer';
 import prisma from '../db/prisma';
@@ -57,7 +58,7 @@ export function runCustomerValidation(
   columnMapping: Record<string, string>,
   options: CustomerTemplateFlags = {},
 ): CustomerValidationIssue[] {
-  return runCustomerValidationDetailed(rawRows, columnMapping, options).issues;
+  return buildValidationOutcome(rawRows, columnMapping, options).issues;
 }
 
 /** runCustomerValidation plus the CSV rows the dataset dropped as blank lines
@@ -68,6 +69,17 @@ export function runCustomerValidationDetailed(
   columnMapping: Record<string, string>,
   options: CustomerTemplateFlags = {},
 ): { issues: CustomerValidationIssue[]; droppedBlankRows: number[] } {
+  const { issues, droppedBlankRows } = buildValidationOutcome(rawRows, columnMapping, options);
+  return { issues, droppedBlankRows };
+}
+
+/** The issues plus what became of every row. Same single pass — the summary is
+ *  derived from the very dataset the rules judged, so the two cannot disagree. */
+export function buildValidationOutcome(
+  rawRows: CustomerCsvRow[],
+  columnMapping: Record<string, string>,
+  options: CustomerTemplateFlags = {},
+): { issues: CustomerValidationIssue[]; summary: ValidationSummary; droppedBlankRows: number[] } {
   const dataset = buildTemplateDataset({
     originalRows: rawRows.map((r) => ({ rowNumber: r.rowNumber, data: r.original })),
     columnMapping,
@@ -92,7 +104,69 @@ export function runCustomerValidationDetailed(
       issues.push(issue);
     }
   }
-  return { issues, droppedBlankRows: [...dataset.droppedBlank].sort((a, b) => a - b) };
+
+  const errorIssues = issues.filter((i) => i.severity === 'Error');
+
+  // BLOCKED WINS. A row the rules still flag is not "fixed", whatever the tool
+  // did to it — otherwise a row whose email we moved but whose country code is
+  // still wrong would be counted as both, and the buckets would stop summing.
+  const blocked = new Set(errorIssues.map((i) => i.rowNumber));
+
+  const fixed = new Set<number>();
+  for (const set of [dataset.invalidMoved, dataset.duplicatesMoved, dataset.namesFilled]) {
+    for (const rowNumber of set) if (!blocked.has(rowNumber)) fixed.add(rowNumber);
+  }
+
+  // Rows that left the dataset: blank lines dropped, plus any absorbed by the
+  // same-person merge. Derived from the row count rather than tracked, so it
+  // cannot drift from what the dataset actually contains.
+  const removed = rawRows.length - dataset.rows.length;
+  const removedBlank = dataset.droppedBlank.size;
+
+  const countWithout = (set: Set<number>) => {
+    let n = 0;
+    for (const rowNumber of set) if (!blocked.has(rowNumber)) n++;
+    return n;
+  };
+
+  // Duplicate diagnostics count the REPEATS Shopify would reject, never the
+  // keeper — a group of 3 loses 2 rows, and 2 is the number that matters.
+  const emailRepeats = dataset.emailDupes.repeats;
+  const phoneRepeats = dataset.phoneDupes.repeats;
+  const duplicateRecords = new Set([...emailRepeats, ...phoneRepeats]);
+  let duplicateBoth = 0;
+  for (const rowNumber of emailRepeats) if (phoneRepeats.has(rowNumber)) duplicateBoth++;
+
+  const summary: ValidationSummary = {
+    totalRows: rawRows.length,
+    ready: rawRows.length - removed - blocked.size - fixed.size,
+    fixed: fixed.size,
+    blocked: blocked.size,
+    removed,
+
+    fixedInvalidContact: countWithout(dataset.invalidMoved),
+    fixedDuplicates: countWithout(dataset.duplicatesMoved),
+    fixedNamed: countWithout(dataset.namesFilled),
+
+    removedBlank,
+    removedMerged: removed - removedBlank,
+
+    duplicateRecords: duplicateRecords.size,
+    duplicateEmail: emailRepeats.size,
+    duplicatePhone: phoneRepeats.size,
+    duplicateBoth,
+    duplicateGroups:
+      new Set(dataset.emailDupes.groups.values()).size +
+      new Set(dataset.phoneDupes.groups.values()).size,
+
+    errorCount: errorIssues.length,
+  };
+
+  return {
+    issues,
+    summary,
+    droppedBlankRows: [...dataset.droppedBlank].sort((a, b) => a - b),
+  };
 }
 
 export async function validateCustomerCsv(
@@ -122,7 +196,7 @@ export async function validateCustomerCsv(
   // Apply mapping only to the rows fed into validators; raw data is preserved separately
   const rows = applyColumnMapping(rawRows, columnMapping);
 
-  const { issues: allIssues, droppedBlankRows } = runCustomerValidationDetailed(rawRows, columnMapping, {
+  const { issues: allIssues, summary, droppedBlankRows } = buildValidationOutcome(rawRows, columnMapping, {
     heliosMigratedTag,
     moveDuplicatesToNotes,
     mergeMatchingDuplicates,
@@ -130,7 +204,7 @@ export async function validateCustomerCsv(
     fillMissingContactName,
   });
 
-  const errors = allIssues.filter((i) => i.severity === 'Error').length;
+  const errors = summary.errorCount;
 
   const affectedRowNumbers = new Set(allIssues.map((i) => i.rowNumber));
   const affectedRows: AffectedRow[] = rows
@@ -164,6 +238,7 @@ export async function validateCustomerCsv(
           mergeMatchingDuplicates,
           moveInvalidContactToNotes,
           fillMissingContactName,
+          summary: summary as unknown as object,
         },
       });
 
@@ -204,8 +279,59 @@ export async function validateCustomerCsv(
     totalRows: rawRows.length,
     errors,
     issues: allIssues,
+    summary,
     droppedBlankRows,
   };
+}
+
+/** The flags whose effect on a file is worth previewing. HeliosMigratedTag is
+ *  left out on purpose: it tags rows, it does not change whether any of them
+ *  import, so a "+0 rows" next to it would be noise. */
+export const PREVIEWABLE_FLAGS = [
+  'moveInvalidContactToNotes',
+  'fillMissingContactName',
+  'mergeMatchingDuplicates',
+  'moveDuplicatesToNotes',
+] as const;
+
+export type PreviewableFlag = (typeof PREVIEWABLE_FLAGS)[number];
+
+export interface EffectsPreview {
+  /** Outcome with the flags exactly as the operator has them now. */
+  current: ValidationSummary;
+  /** Outcome with that one flag flipped, everything else held. The client
+   *  subtracts to show "+N rows would import". */
+  toggled: Record<PreviewableFlag, ValidationSummary>;
+}
+
+/**
+ * What each option would do to THIS file, without committing to anything.
+ *
+ * Reads the previewed CSV and rebuilds the dataset once per flag. Deliberately
+ * persists NOTHING: no ValidationRun, no rows, and the preview entry survives so
+ * the operator can keep toggling and then validate for real. Merchant PII must
+ * not accumulate because somebody flicked a switch.
+ */
+export async function previewFlagEffects(
+  uploadId: string,
+  columnMapping: Record<string, string>,
+  flags: CustomerTemplateFlags = {},
+): Promise<EffectsPreview | null> {
+  const entry = getPreview(uploadId);
+  if (!entry) return null;
+  assertValidColumnMapping(entry.headers, columnMapping);
+
+  // Parse once; the rebuild per flag is cheap next to reading the file again.
+  const { rows: rawRows } = await parseCsvFile(entry.filePath);
+  const summarize = (f: CustomerTemplateFlags) =>
+    buildValidationOutcome(rawRows, columnMapping, f).summary;
+
+  const toggled = {} as Record<PreviewableFlag, ValidationSummary>;
+  for (const flag of PREVIEWABLE_FLAGS) {
+    toggled[flag] = summarize({ ...flags, [flag]: !flags[flag] });
+  }
+
+  return { current: summarize(flags), toggled };
 }
 
 export async function validateFromPreview(
@@ -250,6 +376,9 @@ export async function getValidationResult(
     fileName: run.fileName,
     totalRows: run.totalRows,
     errors: run.errors,
+    // Null for runs validated before the summary existed; the UI falls back to
+    // the plain Total/Errors pair rather than inventing numbers for them.
+    summary: ((run as { summary?: unknown }).summary as ValidationSummary | null) ?? null,
     issues: run.issues.map((issue) => ({
       rowNumber: issue.rowNumber,
       column: issue.columnName,

@@ -9,6 +9,7 @@ import {
   getHistoryHandler,
   getReportHandler,
   getValidationHandler,
+  previewEffectsHandler,
   previewHandler,
   updateMetadataHandler,
   uploadHandler,
@@ -160,6 +161,7 @@ const upload = multer({
 
 // Order matters: /history must come before /:validationId to avoid param capture
 app.post('/api/customer-validation/preview', upload.single('file'), previewHandler);
+app.post('/api/customer-validation/preview-effects', previewEffectsHandler);
 app.post('/api/customer-validation/validate', validateWithMappingHandler);
 app.post('/api/customer-validation/upload', upload.single('file'), uploadHandler);
 app.get('/api/customer-validation/history', getHistoryHandler);

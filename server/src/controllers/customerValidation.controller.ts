@@ -6,6 +6,7 @@ import {
   deleteValidationRun,
   getValidationHistory,
   getValidationResult,
+  previewFlagEffects,
   updateValidationMetadata,
   validateCustomerCsv,
   validateFromPreview,
@@ -68,6 +69,45 @@ export async function previewHandler(
   } catch (err) {
     // Nothing took ownership of the file, so this request must not leave it behind.
     removeUploadFile(req.file?.path);
+    next(err);
+  }
+}
+
+const previewEffectsSchema = z.object({
+  uploadId: z.string().uuid('Invalid upload ID.'),
+  columnMapping: z.record(z.string(), z.string()),
+  heliosMigratedTag: z.boolean().default(false),
+  moveDuplicatesToNotes: z.boolean().default(false),
+  mergeMatchingDuplicates: z.boolean().default(false),
+  moveInvalidContactToNotes: z.boolean().default(false),
+  fillMissingContactName: z.boolean().default(false),
+});
+
+// POST /api/customer-validation/preview-effects
+//
+// Read-only: says what each cleanup option would do to the previewed file and
+// persists nothing. The preview entry is deliberately NOT consumed — the whole
+// point is that the operator can toggle, look, toggle again, and only then
+// validate for real.
+export async function previewEffectsHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const parsed = previewEffectsSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.errors[0].message });
+      return;
+    }
+    const { uploadId, columnMapping, ...flags } = parsed.data;
+    const result = await previewFlagEffects(uploadId, columnMapping, flags);
+    if (!result) {
+      res.status(404).json({ error: 'Upload not found or expired. Please re-upload the file.' });
+      return;
+    }
+    res.json(result);
+  } catch (err) {
     next(err);
   }
 }

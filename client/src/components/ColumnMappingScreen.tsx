@@ -1,5 +1,7 @@
-import { useState } from 'react';
-import type { TemplateFlags } from '../api/validationApi';
+import { useEffect, useState } from 'react';
+import { previewFlagEffects } from '../api/validationApi';
+import type { EffectsPreview, TemplateFlags } from '../api/validationApi';
+import { OptionsPanel } from './OptionsPanel';
 import { ColumnMapping, CsvPreview } from '../types';
 
 const SHOPIFY_COLUMNS = [
@@ -70,18 +72,60 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
     .filter(([, count]) => count > 1)
     .map(([target]) => target);
 
-  const handleValidate = () => {
+  const flags: TemplateFlags = {
+    heliosMigratedTag,
+    moveDuplicatesToNotes,
+    mergeMatchingDuplicates,
+    moveInvalidContactToNotes,
+    fillMissingContactName,
+  };
+
+  const filteredMapping = () => {
     const filtered: ColumnMapping = {};
     for (const [src, tgt] of Object.entries(mapping)) {
       if (tgt) filtered[src] = tgt;
     }
-    onValidate(filtered, {
-      heliosMigratedTag,
-      moveDuplicatesToNotes,
-      mergeMatchingDuplicates,
-      moveInvalidContactToNotes,
-      fillMissingContactName,
-    });
+    return filtered;
+  };
+
+  // What each option would do to THIS file. Debounced because it re-reads and
+  // re-parses the CSV server-side, and an operator flicking three switches
+  // should cost one request, not three. A mapping collision is skipped outright:
+  // the server would 400 on it, and the screen already says so.
+  const [effects, setEffects] = useState<EffectsPreview | null>(null);
+  const [effectsLoading, setEffectsLoading] = useState(false);
+  const mappingKey = JSON.stringify(filteredMapping());
+  const flagsKey = JSON.stringify(flags);
+
+  useEffect(() => {
+    if (duplicateTargets.length > 0) {
+      setEffects(null);
+      return;
+    }
+    let cancelled = false;
+    setEffectsLoading(true);
+    const timer = setTimeout(() => {
+      previewFlagEffects(preview.uploadId, JSON.parse(mappingKey), JSON.parse(flagsKey))
+        .then((data) => {
+          if (!cancelled) setEffects(data);
+        })
+        // A failed preview is not worth an error banner — the numbers simply do
+        // not appear, and Validate still works.
+        .catch(() => {
+          if (!cancelled) setEffects(null);
+        })
+        .finally(() => {
+          if (!cancelled) setEffectsLoading(false);
+        });
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [preview.uploadId, mappingKey, flagsKey, duplicateTargets.length]);
+
+  const handleValidate = () => {
+    onValidate(filteredMapping(), flags);
   };
 
   return (
@@ -102,63 +146,6 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
           </div>
         </div>
         <div className="mapping-header-right">
-          <label className="helios-tag-label">
-            <input
-              type="checkbox"
-              checked={heliosMigratedTag}
-              onChange={(e) => setHeliosMigratedTag(e.target.checked)}
-              disabled={loading}
-            />
-            Add HeliosMigrated Tag
-          </label>
-          <label
-            className="helios-tag-label"
-            title="In the Shopify Template sheet, one row per duplicate group keeps the duplicated email/phone (the row with the most filled-in fields); the others get it cleared, appended to Note, and tagged DuplicateEmailNotes / DuplicatePhoneNotes so they're filterable in Shopify admin. Only the duplicated field is moved."
-          >
-            <input
-              type="checkbox"
-              checked={moveDuplicatesToNotes}
-              onChange={(e) => setMoveDuplicatesToNotes(e.target.checked)}
-              disabled={loading}
-            />
-            Move duplicate emails/phones to Note
-          </label>
-          <label
-            className="helios-tag-label"
-            title="In the Shopify Template sheet, duplicate rows whose names also match (exactly, ignoring case) are merged into one customer: the most-filled row wins, empty fields fill from the others, tags are combined, notes concatenated. Marketing consent / tax exempt are never escalated to TRUE by a merge. A 'Merged From Rows' column shows what was absorbed."
-          >
-            <input
-              type="checkbox"
-              checked={mergeMatchingDuplicates}
-              onChange={(e) => setMergeMatchingDuplicates(e.target.checked)}
-              disabled={loading}
-            />
-            Merge matching duplicates
-          </label>
-          <label
-            className="helios-tag-label"
-            title="In the Shopify Template sheet, an Email or Phone that Shopify would reject is cleared, appended to Note as 'Invalid email: ...' / 'Invalid phone: ...', and tagged InvalidEmailNotes / InvalidPhoneNotes so it's filterable in Shopify admin. The rest of the row imports instead of the whole customer being rejected. Only the invalid field is moved — a row with a bad phone keeps its email."
-          >
-            <input
-              type="checkbox"
-              checked={moveInvalidContactToNotes}
-              onChange={(e) => setMoveInvalidContactToNotes(e.target.checked)}
-              disabled={loading}
-            />
-            Move invalid emails/phones to Note
-          </label>
-          <label
-            className="helios-tag-label"
-            title="Shopify rejects a customer with no name, email and phone. In the Shopify Template sheet, every such row is given First Name 'Unknown <row number>' and tagged NoContactInfo so it imports and stays findable. Rows that are completely blank are not customers at all — they are removed from the template rather than named, and still appear on the Full Uploaded File sheet."
-          >
-            <input
-              type="checkbox"
-              checked={fillMissingContactName}
-              onChange={(e) => setFillMissingContactName(e.target.checked)}
-              disabled={loading}
-            />
-            Name contactless rows "Unknown"
-          </label>
           <button
             className="btn btn-primary"
             onClick={handleValidate}
@@ -174,6 +161,21 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
           </button>
         </div>
       </div>
+
+      <OptionsPanel
+        flags={flags}
+        set={{
+          heliosMigratedTag: setHeliosMigratedTag,
+          moveDuplicatesToNotes: setMoveDuplicatesToNotes,
+          mergeMatchingDuplicates: setMergeMatchingDuplicates,
+          moveInvalidContactToNotes: setMoveInvalidContactToNotes,
+          fillMissingContactName: setFillMissingContactName,
+        }}
+        effects={effects}
+        effectsLoading={effectsLoading}
+        disabled={loading}
+      />
+
 
       <div className="mapping-body">
         {/* Column mapping table */}
