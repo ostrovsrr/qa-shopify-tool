@@ -4,7 +4,7 @@ import { CsvParseError } from '../errors';
 import { parseProductCsvFile } from './productCsvParser';
 import { ProductHistoryItem, ProductValidationIssue, UpdateUploadMetadata } from '../types';
 import { clampHistoryLimit, HistoryQuery } from './customerValidation.service';
-import { runProductValidation } from '../validators/product';
+import { FILE_BLOCKING_ISSUE_TYPES, runProductValidation } from '../validators/product';
 
 // Upload: parse the product CSV, group by Handle, run the file-level pre-check
 // (validators/product), and persist the run, its raw rows and its findings. No
@@ -43,6 +43,7 @@ function toApiIssue(i: StoredIssue): ProductValidationIssue {
     currentValue: i.currentValue ?? '',
     message: i.message,
     suggestedFix: i.suggestedFix ?? '',
+    blocksFile: FILE_BLOCKING_ISSUE_TYPES.has(i.issueType),
   };
 }
 
@@ -120,7 +121,7 @@ export async function createProductUpload(
     rowCount: parsed.rows.length,
     headers: parsed.headers,
     precheckErrors: issues.length,
-    issues,
+    issues: issues.map((i) => ({ ...i, blocksFile: FILE_BLOCKING_ISSUE_TYPES.has(i.issueType) })),
   };
 }
 

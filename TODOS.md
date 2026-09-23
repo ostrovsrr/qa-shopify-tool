@@ -154,3 +154,19 @@ Report: `.gstack/qa-reports/qa-report-localhost-2026-09-22-customers.md`.
   import workbook gives no reason for a blank line left out by "Name contactless rows". Say
   "Blank line, not sent" instead. Related: the validation-results note added for ISSUE-C1 only
   appears right after Validate; a run reopened from History does not recompute it.
+## 5. Deferred /qa findings (2026-09-22, product pre-check parity)
+
+Found by /qa on `product-precheck-admin-parity`. Report: `.gstack/qa-reports/qa-report-localhost-2026-09-22.md`.
+
+- **Doubled quotes in whole-file pre-check messages (low, content).** ✅ Fixed 2026-09-22. `productIssue`
+  (`server/src/validators/product/issue.ts`) wraps Shopify's wording in quotes, and the money
+  wording already starts with one, so the message reads `...fixed): ""abc" is not a valid price"`.
+  Repro: upload a product CSV with Variant Price `abc`. Fix: don't add quotes when the wording
+  already starts with one, or quote with ‘…’.
+- **Pass-through rejections read like GraphQL errors (medium, UX).** Bad money / grams / inventory
+  policy / status are sent to productSet unchanged so Shopify rejects them, but the results table
+  groups them under field `query` with `Variable $input of type ProductSetInput! was provided
+  invalid value for ...`. This is the planned rejection-message work: keep the full error path,
+  map it to CSV row + column, and add an explanation per code.
+- **Results table overflows on phones (low, visual).** At 375px the product results page is 738px
+  wide (the Rejections table in `ProductResultsView`). Pre-existing; the tool is desktop-first.
