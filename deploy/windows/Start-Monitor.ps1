@@ -20,7 +20,7 @@ param(
   [string]$DataDir    = 'C:\ProgramData\qa-shopify-tool\monitor',
   [int]$Port          = 3100,
   [int]$FirstPort     = 3101,
-  [int]$LastPort      = 3108,
+  [int]$LastPort      = 3109,
   [int]$MaxLogBytes   = 20MB
 )
 
