@@ -189,6 +189,15 @@ services:
     ports:
       - "${BIND_ADDR:-127.0.0.1}:3108:3001"
 
+  se9:
+    <<: *app
+    environment:
+      <<: *app-env
+      SHOPIFY_TEST_STORES: ${SHOPIFY_STORES_SE9:?set SHOPIFY_STORES_SE9 in deploy/.env}
+      QA_INSTANCE_OWNER: ${QA_OWNER_SE9:-}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:3109:3001"
+
 
 volumes:
   # The app database. Uploaded CSVs are NOT here and get no volume on purpose:
