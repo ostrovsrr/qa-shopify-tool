@@ -9,6 +9,7 @@ import { getStoreCustomerStats, QA_IMPORT_TAG } from '../services/shopifyCleanup
 import { getStoreProductStats } from '../services/productCleanup.service';
 import { reconcileCleanupRun, startCleanupRun } from '../services/cleanupRun.service';
 import { recordAction } from '../services/actionLog.service';
+import { busyStores } from '../services/storeLock.service';
 
 // GET /api/shopify/stores - safe store list for the UI.
 export function shopifyStoresHandler(
@@ -26,6 +27,21 @@ export function shopifyStoresHandler(
   }
 
   res.json({ stores: getSafeShopifyStores() });
+}
+
+// GET /api/shopify/stores/busy — which stores hold a live lock right now (an
+// import or cleanup in progress), so both store pickers can show "in use" before
+// a colleague picks one and gets the 409. (TODOS §1 follow-up)
+export async function shopifyBusyStoresHandler(
+  _req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    res.json({ busy: await busyStores() });
+  } catch (err) {
+    next(err);
+  }
 }
 
 // GET /api/shopify/health - connection + scope smoke test.

@@ -20,7 +20,7 @@ held by an already-terminal or deleted row simply takes it, so a missed release 
 store. A TTL (30 min, renewed on every poll) is the backstop for a run nobody is polling — those
 can never reach terminal on their own.
 
-**Remaining follow-up (small):** the store picker does not yet SHOW which stores are busy — a
+**Follow-up ✅ DONE (2026-09-22):** both store pickers now show "In use: <operation>" (GET /api/shopify/stores/busy, polled every 15s). Was: the store picker did not SHOW which stores are busy — a
 colleague only finds out by trying and getting the 409. `busyStores()` is already implemented and
 tested; it just needs a route and the two store-picker components. Worth doing before real users
 arrive, since "pick a store, get rejected, pick again" is a bad first impression.
@@ -110,19 +110,19 @@ High/Medium findings from that sweep were fixed in commits `180d253`, `28e2034`,
 `3cb923c`, `cfa4dc4`, `9e411d8`. Full report:
 `.gstack/qa-reports/qa-report-localhost-3101-2026-09-07.md`.
 
-**a. "No import yet" is a 404, so every clean results page logs console errors.**
+**a. "No import yet" is a 404, so every clean results page logs console errors — ✅ DONE (2026-09-22):** both lookups now answer 200 with null.
 `GET /api/customer-import/by-validation/:id` and `/api/product-import/by-upload/:id`
 404 when nothing has been imported. The client handles it correctly, but the
 browser logs a red error anyway — twice per load under StrictMode. An empty 200
 body would be quieter. **Cons:** it is a defensible REST shape; changing it
 touches both API clients.
 
-**b. Wrong file type uses a blocking `alert()`.** Six `alert()` calls across
+**b. Wrong file type uses a blocking `alert()` — ✅ DONE (2026-09-22):** inline error banners on both upload areas and both history lists. Six `alert()` calls across
 `UploadArea`, `ProductUploadArea`, `ValidationHistory`, `ProductHistory`. The app
 already has an inline error style. Cosmetic, but `alert()` also blocks the whole
 tab, which matters for a tool that runs long imports.
 
-**c. Counts read impossibly for a few seconds after a cleanup.** The card can show
+**c. Counts read impossibly for a few seconds after a cleanup — ✅ DONE (2026-09-22):** the store card re-reads once more 6s after any import/cleanup. The card can show
 `Total products: 0 · QA imports: 5` — Shopify's tag-filtered count lagging its own
 delete. Self-corrects on the next refresh and no longer blocks anything (the
 count-based disable on Clean QA was removed in `9e411d8`). Fix would be a
