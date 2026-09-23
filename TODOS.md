@@ -144,6 +144,16 @@ table. Internal desktop tool, so this is a scope call rather than a bug.
 
 ---
 
+## 6. Deferred /qa findings (2026-09-22, customer cleanup options, PR #16) — ✅ DONE (2026-09-22)
+
+Report: `.gstack/qa-reports/qa-report-localhost-2026-09-22-customers.md`.
+
+- **Errors card is red at 0 (low, visual).** ✅ Fixed: neutral at 0. `client/src/components/SummaryCards.tsx` always uses
+  `card-error`; the product review screen switches to neutral at 0. Twin asymmetry.
+- **Dropped blank row reads "Not imported" in the import report (low, content).** ✅ Fixed: both sheets now say "Not imported: blank line" or "Not imported: merged into row N" (`notImportedReasons`, which also covers the merge option). The customer
+  import workbook gives no reason for a blank line left out by "Name contactless rows". Say
+  "Blank line, not sent" instead. Related: the validation-results note added for ISSUE-C1 only
+  appears right after Validate; a run reopened from History does not recompute it.
 ## 5. Deferred /qa findings (2026-09-22, product pre-check parity)
 
 Found by /qa on `product-precheck-admin-parity`. Report: `.gstack/qa-reports/qa-report-localhost-2026-09-22.md`.

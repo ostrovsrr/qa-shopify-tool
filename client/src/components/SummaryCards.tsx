@@ -34,12 +34,26 @@ export function SummaryCards({ result, onDownload }: Props) {
         </div>
       )}
 
+      {/* Not errors, but not imported either: without this the row count here
+          and the import's row count disagree with no explanation. */}
+      {result.droppedBlankRows && result.droppedBlankRows.length > 0 && (
+        <p className="muted">
+          {result.droppedBlankRows.length === 1 ? 'Row' : 'Rows'}{' '}
+          {result.droppedBlankRows.slice(0, 10).join(', ')}
+          {result.droppedBlankRows.length > 10 ? '…' : ''} {result.droppedBlankRows.length === 1 ? 'is a' : 'are'}{' '}
+          blank line{result.droppedBlankRows.length === 1 ? '' : 's'}, not {result.droppedBlankRows.length === 1 ? 'a customer' : 'customers'}, so{' '}
+          {result.droppedBlankRows.length === 1 ? 'it is' : 'they are'} left out of the Shopify Template and the import (
+          {result.totalRows - result.droppedBlankRows.length} of {result.totalRows} rows are sent).
+        </p>
+      )}
+
       <div className="cards-grid">
         <div className="card card-neutral">
           <span className="card-label">Total Rows</span>
           <span className="card-value">{result.totalRows}</span>
         </div>
-        <div className="card card-error">
+        {/* Red only when there is something to fix — same as the product review card. */}
+        <div className={`card ${result.errors > 0 ? 'card-error' : 'card-neutral'}`}>
           <span className="card-label">Errors</span>
           <span className="card-value">{result.errors}</span>
         </div>

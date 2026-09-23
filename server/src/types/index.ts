@@ -22,6 +22,9 @@ export interface CustomerValidationResult {
   totalRows: number;
   errors: number;
   issues: CustomerValidationIssue[];
+  // CSV rows dropped as blank lines ("Name contactless rows" on). Returned by
+  // validate only; a reopened run does not recompute it.
+  droppedBlankRows?: number[];
 }
 
 export interface CustomerValidationRule {

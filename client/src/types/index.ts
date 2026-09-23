@@ -16,6 +16,9 @@ export interface ValidationResult {
   totalRows: number;
   errors: number;
   issues: ValidationIssue[];
+  // Blank lines left out of the import ("Name contactless rows" on). Only on a
+  // fresh validate; a reopened run does not carry it.
+  droppedBlankRows?: number[];
 }
 
 export interface ValidationHistoryImport {
