@@ -218,11 +218,21 @@ export async function renewStoreLock(ownerId: string): Promise<void> {
 export async function busyStores(): Promise<
   { storeId: string; operation: string; acquiredAt: Date }[]
 > {
+  return (await liveStoreLocks()).map(({ storeId, operation, acquiredAt }) => ({
+    storeId,
+    operation,
+    acquiredAt,
+  }));
+}
+
+/** Every lock whose holder is still running, expiry included — the fleet status
+ *  page uses `expiresAt` to tell a watched operation from one nobody is polling. */
+export async function liveStoreLocks(): Promise<StoreLock[]> {
   const locks = await prisma.storeLock.findMany();
-  const live: { storeId: string; operation: string; acquiredAt: Date }[] = [];
+  const live: StoreLock[] = [];
   for (const lock of locks) {
     if (await holderIsFinished(prisma, lock)) continue;
-    live.push({ storeId: lock.storeId, operation: lock.operation, acquiredAt: lock.acquiredAt });
+    live.push(lock);
   }
   return live;
 }
