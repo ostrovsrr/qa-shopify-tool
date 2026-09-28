@@ -54,6 +54,7 @@ import { resumePendingImports } from './services/importResume.service';
 import { sweepOrphanUploads, uploadStorage } from './services/uploadFile';
 import { errorHandler, requestId } from './middleware/errorHandler';
 import { getActionLog, normalizeActor } from './services/actionLog.service';
+import { getInstanceActivity, trackActivity } from './services/instanceActivity.service';
 import { purgeExpiredPii } from './services/retention.service';
 import { sweepRunningCleanups } from './services/cleanupRun.service';
 import { sweepRunningImports } from './services/importSweep.service';
@@ -88,6 +89,10 @@ app.use(express.json());
 
 // Tag every request, so a "it broke" from a colleague can be found in the log.
 app.use(requestId);
+
+// Note when this instance last did real work for its SE, for the fleet status page.
+// Skips the paths the monitor itself polls. See services/instanceActivity.service.ts.
+app.use(trackActivity);
 
 // ── Liveness probe ──────────────────────────────────────────────────────────
 //
@@ -131,6 +136,15 @@ app.get('/api/instance', (_req, res) => {
   const raw = process.env.QA_INSTANCE_OWNER ?? '';
   const owner = normalizeActor(raw);
   res.json({ owner: owner || null });
+});
+
+// What this instance's SE has run, and what is running on their stores right now.
+// Read by the fleet status page (deploy/monitor). Counts only -- never a file name
+// or a CSV value, because that page has no login.
+app.get('/api/instance/activity', (_req, res, next) => {
+  getInstanceActivity()
+    .then((activity) => res.json(activity))
+    .catch(next);
 });
 
 // ── File upload ─────────────────────────────────────────────────────────────

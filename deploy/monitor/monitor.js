@@ -38,6 +38,9 @@ const HISTORY_FILE = path.join(DATA_DIR, 'history.jsonl');
 
 const POLL_MS = 30_000;
 const PROBE_TIMEOUT_MS = 5_000;
+// Activity (run counts, what is running) hits the database, unlike the health probe,
+// so it is asked for less often. A minute is fresh enough for "is an import running".
+const ACTIVITY_MS = 60_000;
 // 7 days of 30s samples is ~20k lines and about 2 MB. Enough to answer "was it up
 // overnight" and "has this been happening all week" without needing a database.
 const RETAIN_MS = 7 * 24 * 60 * 60 * 1000;
@@ -53,6 +56,11 @@ const state = new Map(
 );
 
 let lastPollAt = null;
+
+/** Latest /api/instance/activity answer per port, kept while an instance is down so
+ *  the page still shows its last known counts. Null until the first answer — and
+ *  for an instance deployed before that endpoint existed, which answers 404. */
+const activity = new Map(ports.map((p) => [p, null]));
 
 // ── Probing ─────────────────────────────────────────────────────────────────
 
@@ -137,6 +145,21 @@ async function poll() {
 
   lastPollAt = now;
   appendHistory(now);
+}
+
+async function pollActivity() {
+  await Promise.all(
+    ports.map(async (port) => {
+      if (!state.get(port).up) return;
+      const res = await get(port, '/api/instance/activity');
+      if (!res || res.status !== 200) return;
+      try {
+        activity.set(port, { ...JSON.parse(res.body), fetchedAt: Date.now() });
+      } catch {
+        /* keep the previous answer */
+      }
+    }),
+  );
 }
 
 // ── History ─────────────────────────────────────────────────────────────────
@@ -248,6 +271,7 @@ function statusPayload() {
     instances: ports.map((port, i) => ({
       ...state.get(port),
       se: `SE${port - 3100}`,
+      activity: activity.get(port),
       day: day[i],
       week: week[i],
       strip: strip(history, i),
@@ -272,6 +296,66 @@ function pct(v) {
   if (v === null || v === undefined) return '—';
   const p = v * 100;
   return (p >= 99.95 ? '100' : p.toFixed(p < 95 ? 1 : 2)) + '%';
+}
+
+function num(n) {
+  return Number(n ?? 0).toLocaleString('en-US');
+}
+
+/** One SE's runs as "total" with the per-kind split underneath. Validations and
+ *  uploads are the checks; imports are what actually reached a test store. */
+function runCell(runs, key) {
+  if (!runs) return '<span class="muted">—</span>';
+  const pick = (k) => runs[k][key];
+  const total = pick('customerValidations') + pick('customerImports') + pick('productUploads') + pick('productImports');
+  return `<span class="big">${num(total)}</span>
+    <span class="split">cust ${num(pick('customerValidations'))} checked · ${num(pick('customerImports'))} imported<br>
+    prod ${num(pick('productUploads'))} checked · ${num(pick('productImports'))} imported</span>`;
+}
+
+function nowCell(i) {
+  const a = i.activity;
+  if (!a) {
+    return i.up
+      ? '<span class="muted" title="This instance predates /api/instance/activity — redeploy it">not reported</span>'
+      : '<span class="muted">—</span>';
+  }
+  if (a.active.length === 0) return '<span class="muted">idle</span>';
+  return a.active
+    .map((op) => {
+      const size = op.size ? ` · ${num(op.size)}` : '';
+      const where = op.shop ? op.shop.replace(/\.myshopify\.com$/, '') : op.storeId;
+      const stale = op.stale
+        ? ' <span class="flag" title="No browser is polling this run, so its status will not update until someone opens it. Shopify may still be working on it.">not watched</span>'
+        : '';
+      return `<div class="op"><span class="live"></span>${escapeHtml(op.operation)} → ${escapeHtml(where)}${size}
+        <span class="muted">· ${ago(Date.parse(op.startedAt))}</span>${stale}</div>`;
+    })
+    .join('');
+}
+
+function renderActivity(instances) {
+  const rows = instances
+    .map((i) => {
+      const a = i.activity;
+      const last = a && a.lastRequestAt ? `${ago(Date.parse(a.lastRequestAt))} ago` : '—';
+      return `<tr>
+        <td class="se">${escapeHtml(i.se)}</td>
+        <td class="owner">${escapeHtml((a && a.owner) ?? i.owner ?? '—')}</td>
+        <td>${nowCell(i)}</td>
+        <td class="num">${last}</td>
+        <td class="num">${runCell(a && a.runs, 'last7d')}</td>
+        <td class="num">${runCell(a && a.runs, 'total')}</td>
+      </tr>`;
+    })
+    .join('\n');
+  const running = instances.reduce((n, i) => n + (i.activity ? i.activity.active.length : 0), 0);
+  return `<h2>Activity <span class="muted">· ${running === 0 ? 'nothing running' : `${running} running now`}</span></h2>
+<div class="card"><table>
+<thead><tr><th>SE</th><th>Owner</th><th>Now</th><th>Last active</th><th>Runs 7d</th><th>Runs total</th></tr></thead>
+<tbody>
+${rows}
+</tbody></table></div>`;
 }
 
 function renderPage() {
@@ -353,6 +437,14 @@ function renderPage() {
   .strip i.u{background:var(--up)} .strip i.d{background:var(--down)} .strip i.n{background:var(--line)}
   .errrow td{padding-top:0;border-bottom:1px solid var(--line)}
   .errrow code{display:block;font-size:11.5px;color:var(--mut);white-space:pre-wrap;word-break:break-word}
+  h2{font-size:15px;margin:28px 0 10px} h2 .muted{font-weight:400;font-size:13px}
+  .big{font-weight:600;display:block}
+  .split{display:block;font-size:11.5px;color:var(--mut);line-height:1.45}
+  .op{white-space:nowrap} .op+.op{margin-top:4px}
+  .live{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;background:var(--up);
+        animation:pulse 1.6s ease-in-out infinite}
+  @keyframes pulse{50%{opacity:.35}}
+  @media (prefers-reduced-motion:reduce){.live{animation:none}}
   a{color:inherit} .foot{color:var(--mut);font-size:12px;margin-top:16px;line-height:1.7}
 </style></head><body><div class="wrap">
 <h1>QA tool — fleet status</h1>
@@ -363,11 +455,16 @@ ${banner}
 <tbody>
 ${rows}
 </tbody></table></div>
+${renderActivity(data.instances)}
 <div class="foot">
 <strong>For</strong> is how long it has held its current state as observed from here, not process uptime.
 <strong>Restarts</strong> counts down→up transitions this page actually saw — a healthy instance shows none, and a
 crash-loop that keeps being revived shows many. Read-only by design: no restart controls, because the network
-in front of this has no authentication.
+in front of this has no authentication.<br>
+<strong>Runs</strong> are counted by the name typed into the tool, so they are only as right as that name.
+<strong>Now</strong> is attributed by store — each instance holds only its own SE's stores — and
+<strong>not watched</strong> means no open browser is polling that run, so its status will not advance until someone opens it.
+<strong>Last active</strong> is the instance's last request from a browser; it resets when the instance restarts.
 </div>
 </div></body></html>`;
 }
@@ -402,8 +499,9 @@ const server = http.createServer((req, res) => {
 });
 
 pruneHistory();
-poll();
+poll().then(pollActivity);
 setInterval(poll, POLL_MS);
+setInterval(pollActivity, ACTIVITY_MS);
 setInterval(pruneHistory, 6 * 60 * 60 * 1000);
 
 server.listen(PORT, BIND_ADDR, () => {
