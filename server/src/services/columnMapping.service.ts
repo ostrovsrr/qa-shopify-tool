@@ -39,9 +39,10 @@ const NOTE_SEPARATOR = ' | ';
 /**
  * Apply a column mapping to a single record (CSV-header-keyed → Shopify-column-keyed).
  * Unmapped keys are kept under their original name. Sources mapped to
- * "Add to Tags" / "Add to Note" are appended (in CSV column order) to the
+ * "Add to Tags" / "Add to Note" are appended (in the record's key order) to the
  * Tags / Note fields rather than becoming columns of their own; empty values
- * are skipped.
+ * are skipped. buildTemplateDataset fixes that key order so it survives a
+ * jsonb round trip — see jsonbKeyOrder there.
  */
 export function applyMappingToRecord(
   record: Record<string, string>,
@@ -211,20 +212,35 @@ export function assertValidColumnMapping(
       throw new HttpError(400, `"${target || '(empty)'}" is not a valid column-mapping target.`);
     }
 
-    // Append and Keep are deliberately many-to-one directives. Every real
+    // Append targets are deliberately many-to-one directives. Every real
     // Shopify field is scalar and must have exactly one source owner.
-    if (target === APPEND_TO_TAGS || target === APPEND_TO_NOTE || target === KEEP_COLUMN) {
-      continue;
+    if (target === APPEND_TO_TAGS || target === APPEND_TO_NOTE) continue;
+
+    // "Keep" writes the column under its OWN name, so a kept column called
+    // "Note" owns the Note field just as surely as one mapped to Note does.
+    // Two owners of one field means one silently overwrites the other — and
+    // which one wins would depend on key order.
+    const field = target === KEEP_COLUMN ? source : target;
+    const previous = targetOwners.get(field);
+    if (previous !== undefined) {
+      throw new HttpError(400, collisionMessage(previous, source, field, mapping));
     }
-    const previous = targetOwners.get(target);
-    if (previous) {
-      throw new HttpError(
-        400,
-        `Both "${previous}" and "${source}" are mapped to "${target}". Choose one source column to avoid overwriting customer data.`,
-      );
-    }
-    targetOwners.set(target, source);
+    targetOwners.set(field, source);
   }
+}
+
+function collisionMessage(
+  first: string,
+  second: string,
+  field: string,
+  mapping: Record<string, string>,
+): string {
+  const kept = [first, second].find((s) => mapping[s] === KEEP_COLUMN);
+  if (kept !== undefined) {
+    const other = kept === first ? second : first;
+    return `"${kept}" is set to Keep, which carries it into the template under its own name, "${field}" — and "${other}" is mapped to "${field}" too. Choose one source column for "${field}" to avoid overwriting customer data.`;
+  }
+  return `Both "${first}" and "${second}" are mapped to "${field}". Choose one source column to avoid overwriting customer data.`;
 }
 
 export function suggestMapping(headers: string[]): Record<string, string> {

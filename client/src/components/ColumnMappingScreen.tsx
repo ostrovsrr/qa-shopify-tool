@@ -58,15 +58,13 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
 
   const mappedCount = Object.values(mapping).filter(Boolean).length;
   const targetCounts = new Map<string, number>();
-  for (const target of Object.values(mapping)) {
-    if (
-      !target ||
-      target === KEEP_TARGET ||
-      (APPEND_TARGETS as readonly string[]).includes(target)
-    ) {
-      continue;
-    }
-    targetCounts.set(target, (targetCounts.get(target) ?? 0) + 1);
+  for (const [source, target] of Object.entries(mapping)) {
+    if (!target || (APPEND_TARGETS as readonly string[]).includes(target)) continue;
+    // A kept column is written under its own name, so a kept "Note" owns the
+    // Note field exactly like a column mapped to Note does. Mirrors the server's
+    // assertValidColumnMapping.
+    const field = target === KEEP_TARGET ? source : target;
+    targetCounts.set(field, (targetCounts.get(field) ?? 0) + 1);
   }
   const duplicateTargets = [...targetCounts.entries()]
     .filter(([, count]) => count > 1)
@@ -183,7 +181,8 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
           <h3 className="mapping-section-title">Column Mapping</h3>
           {duplicateTargets.length > 0 && (
             <div className="error-banner">
-              Map only one source column to each Shopify field. Choose a single source for:{' '}
+              Map only one source column to each Shopify field (a column set to Keep counts as
+              the field it is named after). Choose a single source for:{' '}
               {duplicateTargets.join(', ')}.
             </div>
           )}

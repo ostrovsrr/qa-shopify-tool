@@ -1,7 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Prisma } from '@prisma/client';
 import {
-  AffectedRow,
   CustomerCsvRow,
   CustomerValidationIssue,
   CustomerValidationResult,
@@ -13,23 +12,11 @@ import {
 import { customerValidationRules } from '../validators/customer';
 import prisma from '../db/prisma';
 import { CsvParseError } from '../errors';
-import { applyMappingToRecord, assertValidColumnMapping } from './columnMapping.service';
+import { assertValidColumnMapping } from './columnMapping.service';
 import { assertNotProductCsv, parseCsvFile } from './csvParser.service';
 import { buildTemplateDataset } from '../reports/templateDataset';
 import { normalizeRecord } from '../utils/normalize';
 import { deletePreview, getPreview } from './previewStore';
-
-function applyColumnMapping(
-  rows: CustomerCsvRow[],
-  mapping: Record<string, string>,
-): CustomerCsvRow[] {
-  if (Object.keys(mapping).length === 0) return rows;
-  return rows.map((row) => ({
-    ...row,
-    original: applyMappingToRecord(row.original, mapping),
-    normalized: applyMappingToRecord(row.normalized, mapping),
-  }));
-}
 
 /** The operator's choices on the mapping screen. Every one of them changes what
  *  the import sends, so they travel together: stored on the ValidationRun, read
@@ -193,9 +180,6 @@ export async function validateCustomerCsv(
   }
   assertNotProductCsv(headers);
 
-  // Apply mapping only to the rows fed into validators; raw data is preserved separately
-  const rows = applyColumnMapping(rawRows, columnMapping);
-
   const { issues: allIssues, summary, droppedBlankRows } = buildValidationOutcome(rawRows, columnMapping, {
     heliosMigratedTag,
     moveDuplicatesToNotes,
@@ -205,11 +189,6 @@ export async function validateCustomerCsv(
   });
 
   const errors = summary.errorCount;
-
-  const affectedRowNumbers = new Set(allIssues.map((i) => i.rowNumber));
-  const affectedRows: AffectedRow[] = rows
-    .filter((r) => affectedRowNumbers.has(r.rowNumber))
-    .map((r) => ({ rowNumber: r.rowNumber, data: r.original }));
 
   const validationId = uuidv4();
 
@@ -228,7 +207,11 @@ export async function validateCustomerCsv(
           fileType: 'CUSTOMER',
           totalRows: rawRows.length,
           errors,
-          affectedRows: affectedRows as unknown as object[],
+          // Nothing reads affectedRows any more (the rows live in
+          // original_customer_rows). Building it meant a second mapped copy of
+          // every flagged row — PII, and double the peak memory — for nobody.
+          // Written empty, the same value the retention purge leaves behind.
+          affectedRows: [],
           originalColumns: headers,
           columnMapping: Object.keys(columnMapping).length > 0
             ? (columnMapping as unknown as object)

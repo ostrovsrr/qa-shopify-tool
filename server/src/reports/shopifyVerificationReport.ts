@@ -1,14 +1,15 @@
 import { Writable } from 'stream';
 import ExcelJS from 'exceljs';
 import prisma from '../db/prisma';
+import { HttpError } from '../errors';
+import { purgedMessage } from '../services/retention.service';
 import {
-  applyMappingToRecord,
   KEEP_COLUMN,
   resolveMappingTarget,
   SHOPIFY_COLUMNS,
 } from '../services/columnMapping.service';
 import { excelSafeRecord, excelSafeText } from './excelCell';
-import { buildTemplateDataset } from './templateDataset';
+import { buildTemplateDataset, TemplateDataset } from './templateDataset';
 
 // Written with ExcelJS's *streaming* workbook writer: every row is committed
 // (flushed to the output stream and freed) as it's built. This report has four
@@ -70,6 +71,13 @@ export async function streamShopifyVerificationReport(
     originalRows: OriginalRow[];
   };
 
+  // The raw rows this report is built FROM were purged for retention. Say so, as
+  // the prevalidation report does — a 410 with a sentence beats a workbook whose
+  // every CSV cell is blank.
+  if (validationRun.piiPurgedAt) {
+    throw new HttpError(410, purgedMessage(validationRun.piiPurgedAt));
+  }
+
   const originalColumns = Array.isArray(validationRun.originalColumns)
     ? (validationRun.originalColumns as string[])
     : [];
@@ -81,7 +89,10 @@ export async function streamShopifyVerificationReport(
       : {};
 
   const rowResults = importRun.rowResults as ReportRowResult[];
-  const notImported = notImportedReasons(validationRun);
+  // Rebuilt once from the run's own flags with the very function the import used,
+  // so the template sheet shows what was SENT and the reasons agree with it.
+  const sent = sentDataset(validationRun);
+  const notImported = reasonsFromDataset(sent);
   const originalByRow = new Map(
     validationRun.originalRows.map((row) => [row.rowNumber, row.data as Record<string, string>]),
   );
@@ -112,10 +123,50 @@ export async function streamShopifyVerificationReport(
     notImported,
   );
   addFullUploadedFileSheet(workbook, originalColumns, validationRun.originalRows);
-  addShopifyTemplateSheet(workbook, columnMapping, validationRun.originalRows, rowResults, notImported);
+  addShopifyTemplateSheet(workbook, columnMapping, validationRun.originalRows, sent, rowResults, notImported);
 
   await workbook.commit();
 }
+
+type SentRun = {
+  originalRows: OriginalRow[];
+  columnMapping: unknown;
+  moveDuplicatesToNotes?: boolean | null;
+  mergeMatchingDuplicates?: boolean | null;
+  moveInvalidContactToNotes?: boolean | null;
+  fillMissingContactName?: boolean | null;
+};
+
+// The dataset the import sent, built with exactly the arguments the import's
+// buildImportRows passes: the run's cleanup flags, no HeliosMigrated tag and no
+// auto-fixes (the import applies neither).
+function sentDataset(run: SentRun): TemplateDataset {
+  return buildTemplateDataset({
+    originalRows: run.originalRows,
+    columnMapping: run.columnMapping as Record<string, string> | null,
+    moveDuplicatesToNotes: run.moveDuplicatesToNotes ?? false,
+    mergeMatchingDuplicates: run.mergeMatchingDuplicates ?? false,
+    moveInvalidContactToNotes: run.moveInvalidContactToNotes ?? false,
+    fillMissingContactName: run.fillMissingContactName ?? false,
+  });
+}
+
+function reasonsFromDataset(dataset: TemplateDataset): Map<number, string> {
+  const reasons = new Map<number, string>();
+  for (const row of dataset.droppedBlank) reasons.set(row, 'Not imported: blank line');
+  for (const kept of dataset.rows) {
+    for (const absorbed of kept.mergedFrom) reasons.set(absorbed, `Not imported: merged into row ${kept.rowNumber}`);
+  }
+  return reasons;
+}
+
+// Worksheet column keys. ExcelJS keeps ONE column per key, so keying by header
+// text let a CSV column named "Row Number" or "Shopify Result" (natural in a CSV
+// saved from one of these reports and uploaded again) overwrite the tool's own
+// column. The tool's columns use fixed identifiers; CSV and template columns are
+// keyed by position under a prefix no tool key uses, so nothing can collide.
+const csvKey = (index: number) => `csv:${index}`;
+const templateKey = (index: number) => `tpl:${index}`;
 
 // Why a CSV row has no Shopify result. The import sends the template dataset,
 // not the raw file, so a row can be left out on purpose: a blank line dropped by
@@ -130,21 +181,8 @@ export function notImportedReasons(run: {
   moveInvalidContactToNotes?: boolean | null;
   fillMissingContactName?: boolean | null;
 }): Map<number, string> {
-  const reasons = new Map<number, string>();
-  if (!run.mergeMatchingDuplicates && !run.fillMissingContactName) return reasons;
-  const dataset = buildTemplateDataset({
-    originalRows: run.originalRows,
-    columnMapping: run.columnMapping as Record<string, string> | null,
-    moveDuplicatesToNotes: run.moveDuplicatesToNotes ?? false,
-    mergeMatchingDuplicates: run.mergeMatchingDuplicates ?? false,
-    moveInvalidContactToNotes: run.moveInvalidContactToNotes ?? false,
-    fillMissingContactName: run.fillMissingContactName ?? false,
-  });
-  for (const row of dataset.droppedBlank) reasons.set(row, 'Not imported: blank line');
-  for (const kept of dataset.rows) {
-    for (const absorbed of kept.mergedFrom) reasons.set(absorbed, `Not imported: merged into row ${kept.rowNumber}`);
-  }
-  return reasons;
+  if (!run.mergeMatchingDuplicates && !run.fillMissingContactName) return new Map();
+  return reasonsFromDataset(sentDataset(run));
 }
 
 function styleHeader(row: ExcelJS.Row, bgArgb: string) {
@@ -166,32 +204,28 @@ function addRejectedSheet(
 ) {
   const sheet = workbook.addWorksheet('Errors');
   const columns = [
-    'Row Number',
-    'Shopify Result',
-    'Shopify Field',
-    'Shopify Code',
-    'Shopify Message',
-    ...originalColumns,
+    { header: 'Row Number', key: 'rowNumber', width: 22 },
+    { header: 'Shopify Result', key: 'shopifyResult', width: 22 },
+    { header: 'Shopify Field', key: 'shopifyField', width: 22 },
+    { header: 'Shopify Code', key: 'shopifyCode', width: 22 },
+    { header: 'Shopify Message', key: 'shopifyMessage', width: 42 },
+    ...originalColumns.map((col, i) => ({ header: excelSafeText(col), key: csvKey(i), width: 22 })),
   ];
 
-  sheet.columns = columns.map((col) => ({
-    header: excelSafeText(col),
-    key: col,
-    width: col === 'Shopify Message' ? 42 : 22,
-  }));
+  sheet.columns = columns;
   sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(columns.length)}1` };
   styleHeader(sheet.getRow(1), HEADER_COLOURS.Errors);
 
   for (const result of results) {
     const original = originalByRow.get(result.rowNumber) ?? {};
     const rowData: Record<string, string | number | boolean> = {
-      'Row Number': result.rowNumber,
-      'Shopify Result': result.accepted ? 'Accepted' : 'Rejected',
-      'Shopify Field': result.shopifyField ?? '',
-      'Shopify Code': result.shopifyCode ?? '',
-      'Shopify Message': result.message ?? '',
+      rowNumber: result.rowNumber,
+      shopifyResult: result.accepted ? 'Accepted' : 'Rejected',
+      shopifyField: result.shopifyField ?? '',
+      shopifyCode: result.shopifyCode ?? '',
+      shopifyMessage: result.message ?? '',
     };
-    for (const col of originalColumns) rowData[col] = original[col] ?? '';
+    originalColumns.forEach((col, i) => { rowData[csvKey(i)] = original[col] ?? ''; });
     const row = sheet.addRow(excelSafeRecord(rowData));
     row.eachCell((cell) => {
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: RESULT_COLOURS.rejected } };
@@ -212,20 +246,16 @@ function addRowsWithShopifyResultSheet(
   const sheet = workbook.addWorksheet('Rows With Shopify Result');
   const resultByRow = new Map(rowResults.map((r) => [r.rowNumber, r]));
   const columns = [
-    'Row Number',
-    'Shopify Result',
-    'Shopify Customer ID',
-    'Shopify Field',
-    'Shopify Code',
-    'Shopify Message',
-    ...originalColumns,
+    { header: 'Row Number', key: 'rowNumber', width: 22 },
+    { header: 'Shopify Result', key: 'shopifyResult', width: 22 },
+    { header: 'Shopify Customer ID', key: 'shopifyCustomerId', width: 22 },
+    { header: 'Shopify Field', key: 'shopifyField', width: 22 },
+    { header: 'Shopify Code', key: 'shopifyCode', width: 22 },
+    { header: 'Shopify Message', key: 'shopifyMessage', width: 42 },
+    ...originalColumns.map((col, i) => ({ header: excelSafeText(col), key: csvKey(i), width: 22 })),
   ];
 
-  sheet.columns = columns.map((col) => ({
-    header: excelSafeText(col),
-    key: col,
-    width: col === 'Shopify Message' ? 42 : 22,
-  }));
+  sheet.columns = columns;
   sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(columns.length)}1` };
   styleHeader(sheet.getRow(1), HEADER_COLOURS['Rows With Shopify Result']);
 
@@ -233,14 +263,14 @@ function addRowsWithShopifyResultSheet(
     const data = origRow.data as Record<string, string>;
     const result = resultByRow.get(origRow.rowNumber);
     const rowData: Record<string, string | number | boolean> = {
-      'Row Number': origRow.rowNumber,
-      'Shopify Result': result ? (result.accepted ? 'Accepted' : 'Rejected') : notImported.get(origRow.rowNumber) ?? 'Not imported',
-      'Shopify Customer ID': result?.shopifyCustomerId ?? '',
-      'Shopify Field': result?.shopifyField ?? '',
-      'Shopify Code': result?.shopifyCode ?? '',
-      'Shopify Message': result?.message ?? '',
+      rowNumber: origRow.rowNumber,
+      shopifyResult: result ? (result.accepted ? 'Accepted' : 'Rejected') : notImported.get(origRow.rowNumber) ?? 'Not imported',
+      shopifyCustomerId: result?.shopifyCustomerId ?? '',
+      shopifyField: result?.shopifyField ?? '',
+      shopifyCode: result?.shopifyCode ?? '',
+      shopifyMessage: result?.message ?? '',
     };
-    for (const col of originalColumns) rowData[col] = data[col] ?? '';
+    originalColumns.forEach((col, i) => { rowData[csvKey(i)] = data[col] ?? ''; });
     const row = sheet.addRow(excelSafeRecord(rowData));
     if (result) {
       row.getCell(2).fill = {
@@ -268,19 +298,17 @@ function addFullUploadedFileSheet(
     return;
   }
 
-  const allColumns = ['Row Number', ...originalColumns];
-  sheet.columns = allColumns.map((col) => ({
-    header: excelSafeText(col),
-    key: col,
-    width: col === 'Row Number' ? 12 : 22,
-  }));
-  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(allColumns.length)}1` };
+  sheet.columns = [
+    { header: 'Row Number', key: 'rowNumber', width: 12 },
+    ...originalColumns.map((col, i) => ({ header: excelSafeText(col), key: csvKey(i), width: 22 })),
+  ];
+  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(originalColumns.length + 1)}1` };
   styleHeader(sheet.getRow(1), HEADER_COLOURS['Full Uploaded File']);
 
   for (const origRow of originalRows) {
     const data = origRow.data as Record<string, string>;
-    const rowData: Record<string, string | number> = { 'Row Number': origRow.rowNumber };
-    for (const col of originalColumns) rowData[col] = data[col] ?? '';
+    const rowData: Record<string, string | number> = { rowNumber: origRow.rowNumber };
+    originalColumns.forEach((col, i) => { rowData[csvKey(i)] = data[col] ?? ''; });
     sheet.addRow(excelSafeRecord(rowData)).commit();
   }
 
@@ -291,6 +319,7 @@ function addShopifyTemplateSheet(
   workbook: ExcelJS.stream.xlsx.WorkbookWriter,
   columnMapping: Record<string, string>,
   originalRows: OriginalRow[],
+  sent: TemplateDataset,
   rowResults: ReportRowResult[],
   notImported: Map<number, string>,
 ) {
@@ -304,50 +333,54 @@ function addShopifyTemplateSheet(
 
   // Append targets ("Add to Tags"/"Add to Note") count as Tags/Note.
   const mappedTargets = new Set(Object.values(columnMapping).map(resolveMappingTarget));
-  const baseColumns = SHOPIFY_COLUMNS.filter((col) => mappedTargets.has(col));
+  const shopifyColumns: string[] = SHOPIFY_COLUMNS.filter((col) => mappedTargets.has(col));
+
+  // Whatever a cleanup option wrote has to appear as a column, or the sheet would
+  // hide a value the import sent — same rule as the prevalidation report's sheet.
+  const ensure = (...cols: string[]) => {
+    for (const col of cols) if (!shopifyColumns.includes(col)) shopifyColumns.push(col);
+  };
+  if (sent.invalidMoved.size > 0 || sent.duplicatesMoved.size > 0) ensure('Note', 'Tags');
+  if (sent.namesFilled.size > 0) ensure('First Name', 'Tags');
 
   // "Keep" columns pass through as trailing columns under their original names
   const keptColumns = Object.entries(columnMapping)
     .filter(([, tgt]) => tgt === KEEP_COLUMN)
     .map(([src]) => src)
-    .filter((src) => !baseColumns.includes(src as (typeof baseColumns)[number]));
-  const shopifyColumns: string[] = [...baseColumns, ...keptColumns];
+    .filter((src) => !shopifyColumns.includes(src));
+  shopifyColumns.push(...keptColumns);
 
   const resultByRow = new Map(rowResults.map((r) => [r.rowNumber, r]));
   const columns = [
-    'Row Number',
-    'Shopify Result',
-    'Shopify Field',
-    'Shopify Code',
-    'Shopify Message',
-    ...shopifyColumns,
+    { header: 'Row Number', key: 'rowNumber', width: 24 },
+    { header: 'Shopify Result', key: 'shopifyResult', width: 24 },
+    { header: 'Shopify Field', key: 'shopifyField', width: 24 },
+    { header: 'Shopify Code', key: 'shopifyCode', width: 24 },
+    { header: 'Shopify Message', key: 'shopifyMessage', width: 42 },
+    ...shopifyColumns.map((col, i) => ({ header: excelSafeText(col), key: templateKey(i), width: 24 })),
   ];
-  sheet.columns = columns.map((col) => ({
-    header: excelSafeText(col),
-    key: col,
-    width: col === 'Shopify Message' ? 42 : 24,
-  }));
+  sheet.columns = columns;
   sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(columns.length)}1` };
   styleHeader(sheet.getRow(1), HEADER_COLOURS['Shopify Template']);
 
+  // The records the import SENT (mapping plus the run's cleanup options), keyed by
+  // CSV row number — the same numbers Shopify's results are recorded against. A row
+  // the import left out (blank line, merged into another) has no record; it keeps
+  // its line with the reason and empty fields, so the sheet still lines up with
+  // the CSV and with the other sheets.
+  const sentByRow = new Map(sent.rows.map((r) => [r.rowNumber, r.record]));
+
   for (const origRow of originalRows) {
-    const data = origRow.data as Record<string, string>;
     const result = resultByRow.get(origRow.rowNumber);
     const rowData: Record<string, string | number> = {
-      'Row Number': origRow.rowNumber,
-      'Shopify Result': result ? (result.accepted ? 'Accepted' : 'Rejected') : notImported.get(origRow.rowNumber) ?? 'Not imported',
-      'Shopify Field': result?.shopifyField ?? '',
-      'Shopify Code': result?.shopifyCode ?? '',
-      'Shopify Message': result?.message ?? '',
+      rowNumber: origRow.rowNumber,
+      shopifyResult: result ? (result.accepted ? 'Accepted' : 'Rejected') : notImported.get(origRow.rowNumber) ?? 'Not imported',
+      shopifyField: result?.shopifyField ?? '',
+      shopifyCode: result?.shopifyCode ?? '',
+      shopifyMessage: result?.message ?? '',
     };
-    // Only mapped source columns contribute values; unmapped columns are ignored
-    const mappedSources: Record<string, string> = {};
-    for (const src of Object.keys(columnMapping)) mappedSources[src] = data[src] ?? '';
-    const mapped = applyMappingToRecord(mappedSources, columnMapping);
-
-    for (const shopifyCol of shopifyColumns) {
-      rowData[shopifyCol] = mapped[shopifyCol] ?? '';
-    }
+    const record = sentByRow.get(origRow.rowNumber) ?? {};
+    shopifyColumns.forEach((col, i) => { rowData[templateKey(i)] = record[col] ?? ''; });
     sheet.addRow(excelSafeRecord(rowData)).commit();
   }
 
