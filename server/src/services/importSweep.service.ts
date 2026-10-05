@@ -1,6 +1,9 @@
 import prisma from '../db/prisma';
-import { getShopifyStoresConfig, resolveStoreId } from '../config/shopify';
+import { getShopifyStoresConfig } from '../config/shopify';
 import { TERMINAL_BULK_STATUSES } from './shopifyBulk';
+import { instanceOwnsStore } from './importReconcile';
+import { failAbandonedSubmits } from './importResume.service';
+import { STORE_LOCK_TTL_MS } from './storeLock.service';
 import { reconcileImportRun } from './shopifyImport.service';
 import { reconcileProductImportRun } from './productImport.service';
 
@@ -27,34 +30,35 @@ import { reconcileProductImportRun } from './productImport.service';
 // equivalent. This is that, for the customer and product flows, which are twins.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Only touch rows for stores THIS instance holds credentials for.
- *
- * One instance per Solution Engineer against a SHARED database, so this sweep sees
- * every colleague's runs too. Reconciling one we have no token for cannot corrupt
- * anything — reconcile throws and the catch below logs it — but it would mean seven
- * instances logging a failure a minute for every run the eighth owns, which buries
- * the failures that matter.
- *
- * Judged only when there IS a config to judge against: with no usable store list,
- * resolveStoreId returns null for everything alike, and skipping on that basis would
- * turn a misconfiguration into a silent no-op. Then it is better to attempt and fail
- * loudly. Same reasoning as importResume.service.ts.
- */
-function ownsStore(storeId: string | null, canJudge: boolean): boolean {
-  if (!canJudge) return true;
-  if (!storeId) return true; // legacy single-store row — let the normal path speak
-  return Boolean(resolveStoreId(storeId));
+/** One sweepable run: a single-store run, or a batch parent with its jobs' stores. */
+interface SweepRow {
+  id: string;
+  storeId: string | null;
+  batchJobs: { storeId: string | null }[];
 }
 
-async function sweep<T extends { id: string; storeId: string | null }>(
+/**
+ * Only touch runs this instance has a stake in.
+ *
+ * One instance per Solution Engineer against a SHARED database, so this sweep sees
+ * every colleague's runs too. A single-store run is ours when its store is (see
+ * instanceOwnsStore). A batch parent has no store of its own — its stores live on
+ * its jobs — so it is ours when ANY of its jobs' stores is: this instance advances
+ * those jobs, and the reconcile skips the rest (never fails them) and leaves them to
+ * the colleague whose stores they are.
+ */
+function ownsRun(row: SweepRow): boolean {
+  if (row.batchJobs.length > 0) return row.batchJobs.some((j) => instanceOwnsStore(j.storeId));
+  return instanceOwnsStore(row.storeId);
+}
+
+async function sweep(
   label: string,
-  rows: T[],
-  canJudge: boolean,
+  rows: SweepRow[],
   reconcile: (id: string) => Promise<unknown>,
 ): Promise<void> {
   for (const row of rows) {
-    if (!ownsStore(row.storeId, canJudge)) continue;
+    if (!ownsRun(row)) continue;
     // One unreachable store must not stop the rest from being reconciled.
     try {
       await reconcile(row.id);
@@ -65,32 +69,66 @@ async function sweep<T extends { id: string; storeId: string | null }>(
 }
 
 /**
- * Advance every non-terminal import that already has a bulk operation id.
+ * What a run must look like to be swept: non-terminal, and either holding a bulk
+ * operation id (a single-store run Shopify is working on) or being a batch parent.
  *
- * Requires bulkOperationId: a row without one has not reached Shopify yet and
- * belongs to resumePendingImports, not here. Reconciling it would be a no-op at
- * best and a duplicate submit at worst.
+ * A batch parent never has an op id of its own — its ops live on its jobs — so
+ * filtering on bulkOperationId alone skipped every batch, and a batch whose watcher
+ * walked away sat RUNNING holding every one of its stores. Its PENDING jobs are
+ * still left to resume: reconcileBatchRun only polls jobs that have an op id.
+ *
+ * A single-store run without an op id has not reached Shopify yet and belongs to
+ * resumePendingImports, not here. Reconciling it would be a no-op at best and a
+ * duplicate submit at worst.
  */
-export async function sweepRunningImports(): Promise<void> {
-  const storesConfig = getShopifyStoresConfig();
-  const canJudge = storesConfig.ok && storesConfig.stores.length > 0;
+const SWEEPABLE = {
+  status: { notIn: TERMINAL_BULK_STATUSES },
+  OR: [{ bulkOperationId: { not: null } }, { batchJobs: { some: {} } }],
+};
+const SWEEP_SELECT = { id: true, storeId: true, batchJobs: { select: { storeId: true } } };
 
-  const customerRuns = await prisma.importRun.findMany({
-    where: {
-      status: { notIn: TERMINAL_BULK_STATUSES },
-      bulkOperationId: { not: null },
-    },
-    select: { id: true, storeId: true },
-  });
+/** Settles an ambiguous submit once its store lock has run out. */
+const ABANDONED_SUBMIT_ERROR =
+  'Submit outcome unknown: Shopify never confirmed this import was submitted, so it may or ' +
+  'may not have run. Check the store for its qa-import records and run QA cleanup if any ' +
+  'are there before re-running.';
 
-  const productRuns = await prisma.productImportRun.findMany({
-    where: {
-      status: { notIn: TERMINAL_BULK_STATUSES },
-      bulkOperationId: { not: null },
-    },
-    select: { id: true, storeId: true },
-  });
+/**
+ * Fail rows whose submit came back ambiguous (or whose process died mid-submit) and
+ * that nobody has settled since. They are left PENDING on purpose so their store
+ * stays held while an op may be running (see recordAmbiguousSubmit); once the lock's
+ * TTL has passed, the same "outcome unknown" verdict resume-on-boot would give is
+ * recorded here, so a batch parent waiting on such a job can finally roll up.
+ */
+async function failAbandoned(now: number): Promise<void> {
+  // Strictly our own stores. Unlike a reconcile — which cannot fail anything for
+  // want of a client — this writes FAILED, so an instance that cannot judge
+  // ownership (no usable store list) settles nothing and leaves it to the owner.
+  const config = getShopifyStoresConfig();
+  if (!config.ok || config.stores.length === 0) return;
+  const before = new Date(now - STORE_LOCK_TTL_MS);
+  const delegates = [
+    prisma.importRun,
+    prisma.importBatchJob,
+    prisma.productImportRun,
+    prisma.productImportJob,
+  ];
+  for (const delegate of delegates) {
+    try {
+      await failAbandonedSubmits(delegate as never, before, ABANDONED_SUBMIT_ERROR, instanceOwnsStore);
+    } catch (err) {
+      console.error('[import-sweep] settling abandoned submits:', (err as Error).message);
+    }
+  }
+}
 
-  await sweep('customer', customerRuns, canJudge, reconcileImportRun);
-  await sweep('product', productRuns, canJudge, reconcileProductImportRun);
+/** Advance every non-terminal import that has reached Shopify. */
+export async function sweepRunningImports(now: number = Date.now()): Promise<void> {
+  await failAbandoned(now);
+
+  const customerRuns = await prisma.importRun.findMany({ where: SWEEPABLE, select: SWEEP_SELECT });
+  const productRuns = await prisma.productImportRun.findMany({ where: SWEEPABLE, select: SWEEP_SELECT });
+
+  await sweep('customer', customerRuns, reconcileImportRun);
+  await sweep('product', productRuns, reconcileProductImportRun);
 }

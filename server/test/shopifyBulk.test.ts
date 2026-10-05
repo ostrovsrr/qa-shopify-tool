@@ -181,7 +181,8 @@ describe('fetchAndParseBulkResults', () => {
   });
 
   // Shopify's __lineNumber is 0- or 1-based depending on context. The engine
-  // detects the base from the MINIMUM seen, so both map identically.
+  // derives the base from the line numbers and the submitted count (see
+  // resolveLineNumberBase in importEngine.test.ts), so both map identically.
   it('maps 0-based __lineNumber identically (base is detected, not assumed)', async () => {
     okResponse(
       [

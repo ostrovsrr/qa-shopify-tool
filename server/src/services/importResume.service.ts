@@ -288,6 +288,55 @@ export async function claimRow(
   return count === 1;
 }
 
+/**
+ * A live submit came back ambiguous (ShopifyOutcomeUnknownError): the op may or may
+ * not be running on the shop. Leave the row exactly where decideResume puts such a
+ * row — PENDING with submitAttemptedAt set, "outcome unknown" — and only note why.
+ * It stays non-terminal on purpose, so its store lock is NOT freed under a possibly
+ * live op; failAbandonedSubmits settles it once that lock has run out.
+ */
+export async function recordAmbiguousSubmit(
+  delegate: ResumeDelegate,
+  id: string,
+  error: string,
+): Promise<void> {
+  await delegate.updateMany({
+    where: { id, status: 'PENDING' },
+    data: { error: error.slice(0, 500) },
+  });
+}
+
+/**
+ * Fail PENDING rows whose submit was attempted before `attemptedBefore` and never
+ * recorded an op id — the same rows decideResume fails on boot, settled without
+ * waiting for a reboot. Called with a cutoff of the store-lock TTL, so a normal
+ * in-flight submit (seconds between markSubmitAttempt and the id landing) is never
+ * touched, and a row is failed only after its store lock has expired.
+ *
+ * `owns` keeps an instance to its own stores: a colleague's row is theirs to settle.
+ */
+export async function failAbandonedSubmits(
+  delegate: ResumeDelegate,
+  attemptedBefore: Date,
+  error: string,
+  owns: (storeId: string | null) => boolean,
+): Promise<number> {
+  const rows = await delegate.findMany({
+    where: { status: 'PENDING', submitAttemptedAt: { lt: attemptedBefore } },
+    select: { id: true, storeId: true, createdAt: true, submitAttemptedAt: true },
+  });
+  let failed = 0;
+  for (const row of rows) {
+    if (!owns(row.storeId)) continue;
+    const { count } = await delegate.updateMany({
+      where: { id: row.id, status: 'PENDING', submitAttemptedAt: { lt: attemptedBefore } },
+      data: { status: 'FAILED', error: error.slice(0, 500) },
+    });
+    failed += count;
+  }
+  return failed;
+}
+
 export async function failRow(
   delegate: ResumeDelegate,
   id: string,

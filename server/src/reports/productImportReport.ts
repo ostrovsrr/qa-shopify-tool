@@ -5,6 +5,7 @@ import { HttpError } from '../errors';
 import { purgedMessage } from '../services/retention.service';
 import { excelSafeRecord, excelSafeText } from './excelCell';
 import { hintFor } from '../services/productFeedback.service';
+import { storeLabeller } from '../services/importFeedback.service';
 import { FILE_BLOCKING_ISSUE_TYPES } from '../validators/product';
 
 // Product import report (results keyed by Handle):
@@ -89,13 +90,9 @@ export async function streamProductImportReport(
   const results = run.rowResults as ReportResult[];
   const resultByHandle = new Map(results.map((r) => [r.handle, r]));
 
-  // storeId → shopDomain (for the per-store/store columns).
-  const shopByStore = new Map<string, string>();
-  for (const job of run.batchJobs) {
-    if (job.storeId) shopByStore.set(job.storeId, job.shopDomain);
-  }
-  const shopLabel = (storeId: string | null): string =>
-    storeId ? shopByStore.get(storeId) ?? storeId : run.shopDomain;
+  // storeId → shopDomain (for the per-store/store columns). A single-store run
+  // has no jobs, so its own shopDomain labels its store — see storeLabeller.
+  const shopLabel = storeLabeller(run);
 
   // Pass 1: derive the product list (distinct Handles in first-seen order) and
   // each product's Title from its first row. normalizeRecord only trims values,

@@ -17,27 +17,30 @@ import {
   failRow,
   findResumableRows,
   markSubmitAttempt,
+  recordAmbiguousSubmit,
   ResumableStore,
 } from './importResume.service';
 import { getImportFeedback, ImportFeedback } from './importFeedback.service';
 import {
   BuiltJsonl,
+  BulkOperationState,
   BulkResultLine,
+  BulkResultSource,
+  bulkLineErrorMessage,
   fetchAndParseBulkResults,
-  fetchBulkOperationState,
-  MAX_JOB_POLL_ATTEMPTS,
   runBulkMutation,
   splitIntoBatches,
   stagedUpload,
   TERMINAL_BULK_STATUSES,
 } from './shopifyBulk';
-import { qaImportTagForRun } from './shopifyCleanup.service';
+import { QA_IMPORT_TAG, qaImportTagForRun } from './shopifyCleanup.service';
 import { startCleanupRuns } from './cleanupRun.service';
+import { getShopifyClient } from './shopifyClient';
 import {
-  getShopifyClient,
-  ShopifyAuthError,
-  ShopifyConfigError,
-} from './shopifyClient';
+  advanceImportOp,
+  AMBIGUOUS_SUBMIT_MESSAGE,
+  isAmbiguousSubmitError,
+} from './importReconcile';
 
 // Strict create so duplicates surface as TAKEN against the empty test store.
 // userErrors here is plain UserError (no `code`) — we synthesize a stable code
@@ -45,9 +48,16 @@ import {
 const CUSTOMER_CREATE_MUTATION =
   'mutation call($input: CustomerInput!) { customerCreate(input: $input) { customer { id } userErrors { field message } } }';
 
-// Applied to every created customer so the whole import is reversible
-// (batch-delete by tag during teardown).
-const TEARDOWN_TAG = 'qa-import';
+// Every created customer carries QA_IMPORT_TAG plus its run's qaImportTagForRun
+// tag, so the whole import is reversible (batch-delete by tag during teardown).
+// Both come from the cleanup module: the tag the import writes and the tag the
+// cleanup deletes by must be one definition, not two copies that can drift.
+
+// Rows written per createMany inside a result-merge transaction. A single
+// multi-row INSERT of a large run blew the 5s interactive-transaction default.
+const INSERT_CHUNK = 5000;
+// Interactive-transaction budget for writing a large run's results.
+const RESULT_TX_OPTIONS = { timeout: 120_000, maxWait: 10_000 };
 
 export interface ImportRowOutcome {
   rowNumber: number;
@@ -125,7 +135,7 @@ function buildCustomerInput(
     .split(',')
     .map((t) => t.trim())
     .filter(Boolean);
-  const tags = [TEARDOWN_TAG, `qa-import-${importRunId}`, ...csvTags];
+  const tags = [QA_IMPORT_TAG, qaImportTagForRun(importRunId), ...csvTags];
 
   const address = compact({
     address1: val(mapped, 'Default Address Address1'),
@@ -201,8 +211,9 @@ function lastFieldSegment(field: unknown): string | null {
 // ── result-line parser for the generic engine ────────────────────────────────
 
 /** Parse one customerCreate result line into a per-row outcome. customerCreate
- *  userErrors carry no `code`, so we synthesize a stable one from the message. */
-function parseCustomerCreateLine(
+ *  userErrors carry no `code`, so we synthesize a stable one from the message.
+ *  Exported for tests. */
+export function parseCustomerCreateLine(
   line: BulkResultLine<number>,
 ): ImportRowOutcome {
   const rowNumber = line.ref ?? -1;
@@ -216,8 +227,7 @@ function parseCustomerCreateLine(
 
   if (!payload) {
     // Top-level error line (e.g. malformed variables) — treat as rejected.
-    const message =
-      typeof line.raw.message === 'string' ? line.raw.message : 'Unknown bulk error.';
+    const message = bulkLineErrorMessage(line.raw, 'Unknown bulk error.');
     return {
       rowNumber,
       accepted: false,
@@ -333,6 +343,17 @@ export async function startCustomerImport(
     await submitSingleStoreRun(importRunId, client, jsonl);
   } catch (err) {
     const message = (err as Error).message;
+    if (isAmbiguousSubmitError(err)) {
+      // The op may be live on the shop. Do NOT go terminal and do NOT release:
+      // a terminal owner frees the store at once (storeLock's holderIsFinished),
+      // dropping the next colleague's import on top of a possibly-running one.
+      // The row stays PENDING with submitAttemptedAt set — the "outcome unknown"
+      // state importResume already defines — holding the store until the lock's
+      // TTL, after which the sweep fails it with this message.
+      const error = `${AMBIGUOUS_SUBMIT_MESSAGE} (${message})`;
+      await recordAmbiguousSubmit(prisma.importRun as never, importRunId, error);
+      return { ok: false, error };
+    }
     await prisma.importRun.update({
       where: { id: importRunId },
       data: { status: 'FAILED', error: message },
@@ -403,35 +424,55 @@ export async function reconcileImportRun(
     return getImportFeedback(importRunId);
   }
 
-  const client = await getShopifyClient(run.storeId ?? undefined);
-  const state = await fetchBulkOperationState(client, run.bulkOperationId);
+  // Same per-op handling as a batch job: errors isolated, permanent failures
+  // (bad token, vanished op, unreadable results) fail the run and free its store,
+  // transient ones retry within the time bound, and a colleague's run — reopened
+  // from the shared History — is left alone. See advanceImportOp.
+  await advanceImportOp({
+    label: `customer run ${importRunId}`,
+    storeId: run.storeId,
+    bulkOperationId: run.bulkOperationId,
+    startedAt: run.submitAttemptedAt ?? run.createdAt,
+    onCompleted: (state) => finalizeRun(importRunId, 'COMPLETED', null, state.url, { kind: 'complete' }),
+    onEnded: (state, error) => finalizeEndedRun(importRunId, state, error),
+    onFailed: async (error) => {
+      await prisma.importRun.updateMany({
+        where: { id: importRunId, status: 'RUNNING' },
+        data: { status: 'FAILED', error },
+      });
+    },
+    renewLock: () => renewStoreLock(importRunId),
+    releaseLock: () => releaseStoreLock(importRunId),
+  });
 
-  // Still queued/processing — leave it RUNNING.
-  if (!TERMINAL_BULK_STATUSES.includes(state.status)) {
-    // Someone is demonstrably still watching this run, so push the lock's expiry
-    // out. The TTL only exists to free a store nobody is finishing; it must never
-    // pull the store out from under an operation that is plainly still alive.
-    await renewStoreLock(importRunId);
-    return getImportFeedback(importRunId);
-  }
+  return getImportFeedback(importRunId);
+}
 
-  if (state.status === 'COMPLETED') {
-    await finalizeCompletedRun(importRunId, state.url);
-  } else {
-    // FAILED / CANCELED / EXPIRED — record the terminal status + reason.
-    const error = `Bulk operation ${state.status}${
-      state.errorCode ? ` (${state.errorCode})` : ''
-    }.`;
+/**
+ * An op that ended FAILED / CANCELED / EXPIRED may still have created records
+ * before it stopped. Shopify hands those lines back as partialDataUrl; ingesting
+ * them is what lets the report show what is actually in the store (and lets the
+ * run-scoped cleanup be checked against it), instead of "0 imported" over a store
+ * holding thousands of qa-import customers. The run keeps its terminal status and
+ * error either way — partial results are evidence, not success.
+ *
+ * Reading the partial file is best-effort: if it cannot be read, the run is still
+ * recorded as ended, with no rows, exactly as before.
+ */
+async function finalizeEndedRun(
+  importRunId: string,
+  state: BulkOperationState,
+  error: string,
+): Promise<void> {
+  try {
+    await finalizeRun(importRunId, state.status, error, state.partialDataUrl, { kind: 'partial' });
+  } catch (err) {
+    console.warn(`[import] partial results for ${importRunId} unreadable:`, (err as Error).message);
     await prisma.importRun.updateMany({
       where: { id: importRunId, status: 'RUNNING' },
       data: { status: state.status, error },
     });
   }
-
-  // Terminal either way — the store is free.
-  await releaseStoreLock(importRunId);
-
-  return getImportFeedback(importRunId);
 }
 
 // Resume/show the most recent import for a validation run — used when reopening
@@ -482,11 +523,16 @@ export async function cleanupImportRunStores(
 }
 
 // Download + parse results and write rowResults, but only if THIS call wins the
-// RUNNING → COMPLETED transition (updateMany returns count: 0 if another poll
-// already finalized), keeping concurrent reconciles idempotent.
-async function finalizeCompletedRun(
+// RUNNING → terminal transition (updateMany returns count: 0 if another poll
+// already finalized), keeping concurrent reconciles idempotent. `status` is
+// COMPLETED for a finished op, or the op's own FAILED / CANCELED / EXPIRED when
+// ingesting its partial results.
+async function finalizeRun(
   importRunId: string,
+  status: string,
+  error: string | null,
   resultUrl: string | null,
+  source: BulkResultSource,
 ): Promise<void> {
   const run = await prisma.importRun.findUnique({
     where: { id: importRunId },
@@ -502,43 +548,62 @@ async function finalizeCompletedRun(
 
   const lineRefs = lineToRowFromRun(run.validationRun);
   const outcomes = resultUrl
-    ? await fetchAndParseBulkResults(resultUrl, lineRefs, { kind: 'complete' }, parseCustomerCreateLine)
+    ? await fetchAndParseBulkResults(resultUrl, lineRefs, source, parseCustomerCreateLine)
     : [];
 
+  await writeRowResults(
+    outcomes,
+    { importRunId, storeId: run.storeId },
+    (tx, successCount, errorCount) =>
+      tx.importRun.updateMany({
+        where: { id: importRunId, status: 'RUNNING' },
+        data: { status, error, successCount, errorCount },
+      }),
+  );
+}
+
+type Tx = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
+
+/**
+ * Write one op's outcomes as rowResults, in the same transaction that claims the
+ * owning run/job's RUNNING → terminal transition. `claim` returns count 0 when a
+ * concurrent poll got there first, and then nothing is inserted.
+ *
+ * Shared by the single-run and batch-job paths so both chunk the insert and both
+ * get the long transaction budget; the batch path once did neither, and a large
+ * job's single INSERT blew the 5s default and was retried on every poll.
+ */
+async function writeRowResults(
+  outcomes: ImportRowOutcome[],
+  target: { importRunId: string; storeId: string | null },
+  claim: (tx: Tx, successCount: number, errorCount: number) => Promise<{ count: number }>,
+): Promise<void> {
   const successCount = outcomes.filter((o) => o.accepted).length;
   const errorCount = outcomes.length - successCount;
 
-  await prisma.$transaction(
-    async (tx) => {
-      const claimed = await tx.importRun.updateMany({
-        where: { id: importRunId, status: 'RUNNING' },
-        data: { status: 'COMPLETED', successCount, errorCount },
-      });
-      // Another concurrent reconcile already finalized this run — don't double-insert.
-      if (claimed.count === 0) return;
+  await prisma.$transaction(async (tx) => {
+    const claimed = await claim(tx, successCount, errorCount);
+    // Another concurrent reconcile already finalized this — don't double-insert.
+    if (claimed.count === 0) return;
 
-      const rows = outcomes.map((o) => ({
-        id: uuidv4(),
-        importRunId,
-        storeId: run.storeId,
-        rowNumber: o.rowNumber,
-        accepted: o.accepted,
-        shopifyCustomerId: o.shopifyCustomerId,
-        shopifyCode: o.shopifyCode,
-        shopifyField: o.shopifyField,
-        message: o.message,
-      }));
+    const rows = outcomes.map((o) => ({
+      id: uuidv4(),
+      importRunId: target.importRunId,
+      storeId: target.storeId,
+      rowNumber: o.rowNumber,
+      accepted: o.accepted,
+      shopifyCustomerId: o.shopifyCustomerId,
+      shopifyCode: o.shopifyCode,
+      shopifyField: o.shopifyField,
+      message: o.message,
+    }));
 
-      // Chunk the insert so a single multi-row INSERT doesn't dominate the
-      // transaction budget on large runs (66k+ rows blew the 5s default).
-      const CHUNK = 5000;
-      for (let i = 0; i < rows.length; i += CHUNK) {
-        await tx.importRowResult.createMany({ data: rows.slice(i, i + CHUNK) });
-      }
-    },
-    // Large runs need far more than the 5s interactive-transaction default.
-    { timeout: 120_000, maxWait: 10_000 },
-  );
+    // Chunk the insert so a single multi-row INSERT doesn't dominate the
+    // transaction budget on large runs (66k+ rows blew the 5s default).
+    for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
+      await tx.importRowResult.createMany({ data: rows.slice(i, i + INSERT_CHUNK) });
+    }
+  }, RESULT_TX_OPTIONS);
 }
 
 // ── parallel batch import across multiple stores ─────────────────────────────
@@ -725,6 +790,16 @@ async function launchBatchJob(
       },
     });
   } catch (err) {
+    if (isAmbiguousSubmitError(err)) {
+      // The op may be live on this store — keep the job PENDING (outcome unknown)
+      // and its store held. See startCustomerImport.
+      await recordAmbiguousSubmit(
+        prisma.importBatchJob as never,
+        jobId,
+        `${AMBIGUOUS_SUBMIT_MESSAGE} (${(err as Error).message})`,
+      );
+      return;
+    }
     await prisma.importBatchJob.update({
       where: { id: jobId },
       data: { status: 'FAILED', error: (err as Error).message },
@@ -744,71 +819,52 @@ async function reconcileBatchRun(
     if (TERMINAL_BULK_STATUSES.includes(job.status)) continue;
     if (!job.bulkOperationId) continue; // never started → already effectively failed
 
-    // Bound stuck jobs: count this poll and fail the job once it's been checked
-    // too many times without reaching a terminal state.
-    const attempts = job.pollAttempts + 1;
-    if (attempts > MAX_JOB_POLL_ATTEMPTS) {
-      await prisma.importBatchJob.updateMany({
-        where: { id: job.id, status: 'RUNNING' },
-        data: {
-          status: 'FAILED',
-          error: `Timed out: still running after ${MAX_JOB_POLL_ATTEMPTS} status checks.`,
-        },
-      });
-      await releaseStoreLock(job.id);
-      continue;
-    }
-    await prisma.importBatchJob.update({
-      where: { id: job.id },
-      data: { pollAttempts: attempts },
-    });
-
-    // Isolate each job: one store erroring must not abort the others' progress.
-    try {
-      const client = await getShopifyClient(job.storeId ?? undefined);
-      const state = await fetchBulkOperationState(client, job.bulkOperationId);
-      if (!TERMINAL_BULK_STATUSES.includes(state.status)) {
-        // Still alive and still being watched — keep its store held.
-        await renewStoreLock(job.id);
-        continue;
-      }
-
-      if (state.status === 'COMPLETED') {
-        await finalizeCompletedJob(parentId, job, state.url);
-      } else {
+    // Each job is advanced on its own: one store erroring must not abort the
+    // others' progress, and a job on a store this instance has no token for — a
+    // colleague's, seen through the shared History or the sweep — is skipped, never
+    // failed. A stuck job is bounded by time since its submit, not by how often it
+    // was polled, and is never failed while Shopify still reports it RUNNING. See
+    // advanceImportOp. (pollAttempts is no longer read or written here.)
+    await advanceImportOp({
+      label: `customer job ${job.id}`,
+      storeId: job.storeId,
+      bulkOperationId: job.bulkOperationId,
+      startedAt: job.submitAttemptedAt ?? job.createdAt,
+      onCompleted: (state) => finalizeJob(parentId, job, 'COMPLETED', null, state.url, { kind: 'complete' }),
+      onEnded: async (state, error) => {
+        // Partial results are best-effort — see finalizeEndedRun.
+        try {
+          await finalizeJob(parentId, job, state.status, error, state.partialDataUrl, { kind: 'partial' });
+        } catch (err) {
+          console.warn(`[import] partial results for job ${job.id} unreadable:`, (err as Error).message);
+          await prisma.importBatchJob.updateMany({
+            where: { id: job.id, status: 'RUNNING' },
+            data: { status: state.status, error },
+          });
+        }
+      },
+      onFailed: async (error) => {
         await prisma.importBatchJob.updateMany({
           where: { id: job.id, status: 'RUNNING' },
-          data: {
-            status: state.status,
-            error: `Bulk operation ${state.status}${state.errorCode ? ` (${state.errorCode})` : ''}.`,
-          },
+          data: { status: 'FAILED', error },
         });
-      }
+      },
+      renewLock: () => renewStoreLock(job.id),
       // This job is terminal — free ITS store, while the batch's other stores stay
       // locked by their own jobs.
-      await releaseStoreLock(job.id);
-    } catch (err) {
-      // Persistent errors (bad token/config) fail just this job so the batch can
-      // still finish; transient errors are left RUNNING to retry on the next poll.
-      if (err instanceof ShopifyAuthError || err instanceof ShopifyConfigError) {
-        await prisma.importBatchJob.updateMany({
-          where: { id: job.id, status: 'RUNNING' },
-          data: { status: 'FAILED', error: (err as Error).message },
-        });
-        await releaseStoreLock(job.id);
-      }
-    }
+      releaseLock: () => releaseStoreLock(job.id),
+    });
   }
 
-  // Roll up: re-read jobs and recompute parent counts from the merged rowResults.
+  // Roll up: re-read jobs and recompute parent counts from the merged rowResults —
+  // counted in the database, not by loading every row of a large import per poll.
   const fresh = await prisma.importBatchJob.findMany({ where: { importRunId: parentId } });
   const allTerminal = fresh.every((j) => TERMINAL_BULK_STATUSES.includes(j.status));
-  const merged = await prisma.importRowResult.findMany({
-    where: { importRunId: parentId },
-    select: { accepted: true },
-  });
-  const successCount = merged.filter((r) => r.accepted).length;
-  const errorCount = merged.length - successCount;
+  const [successCount, totalCount] = await Promise.all([
+    prisma.importRowResult.count({ where: { importRunId: parentId, accepted: true } }),
+    prisma.importRowResult.count({ where: { importRunId: parentId } }),
+  ]);
+  const errorCount = totalCount - successCount;
 
   if (allTerminal) {
     const failedJobs = fresh.filter((j) => j.status !== 'COMPLETED');
@@ -838,13 +894,17 @@ async function reconcileBatchRun(
   return getImportFeedback(parentId);
 }
 
-// Parses one completed job's results and merges them into the parent's
-// rowResults — guarded by the job's RUNNING → COMPLETED transition so concurrent
-// polls insert exactly once.
-async function finalizeCompletedJob(
+// Parses one finished job's results (complete, or partial for an op that ended
+// FAILED / CANCELED / EXPIRED) and merges them into the parent's rowResults —
+// guarded by the job's RUNNING → terminal transition so concurrent polls insert
+// exactly once.
+async function finalizeJob(
   parentId: string,
   job: ImportBatchJob,
+  status: string,
+  error: string | null,
   resultUrl: string | null,
+  source: BulkResultSource,
 ): Promise<void> {
   const parent = await prisma.importRun.findUnique({
     where: { id: parentId },
@@ -863,32 +923,18 @@ async function finalizeCompletedJob(
     splitIntoBatches(buildImportRows(parent.validationRun), job.batchCount)[job.batchIndex] ?? [];
   const lineRefs = slice.map((r) => r.rowNumber);
   const outcomes = resultUrl
-    ? await fetchAndParseBulkResults(resultUrl, lineRefs, { kind: 'complete' }, parseCustomerCreateLine)
+    ? await fetchAndParseBulkResults(resultUrl, lineRefs, source, parseCustomerCreateLine)
     : [];
 
-  const successCount = outcomes.filter((o) => o.accepted).length;
-  const errorCount = outcomes.length - successCount;
-
-  await prisma.$transaction(async (tx) => {
-    const claimed = await tx.importBatchJob.updateMany({
-      where: { id: job.id, status: 'RUNNING' },
-      data: { status: 'COMPLETED', successCount, errorCount },
-    });
-    if (claimed.count === 0) return; // another poll already merged this job
-    await tx.importRowResult.createMany({
-      data: outcomes.map((o) => ({
-        id: uuidv4(),
-        importRunId: parentId,
-        storeId: job.storeId,
-        rowNumber: o.rowNumber,
-        accepted: o.accepted,
-        shopifyCustomerId: o.shopifyCustomerId,
-        shopifyCode: o.shopifyCode,
-        shopifyField: o.shopifyField,
-        message: o.message,
-      })),
-    });
-  });
+  await writeRowResults(
+    outcomes,
+    { importRunId: parentId, storeId: job.storeId },
+    (tx, successCount, errorCount) =>
+      tx.importBatchJob.updateMany({
+        where: { id: job.id, status: 'RUNNING' },
+        data: { status, error, successCount, errorCount },
+      }),
+  );
 }
 
 // ── crash recovery (resume-on-boot) ──────────────────────────────────────────
@@ -956,7 +1002,19 @@ async function relaunchCustomerRun(runId: string): Promise<void> {
     return;
   }
 
-  await submitSingleStoreRun(runId, client, jsonl);
+  try {
+    await submitSingleStoreRun(runId, client, jsonl);
+  } catch (err) {
+    // An ambiguous relaunch is left PENDING with its store held, like a live
+    // one (see startCustomerImport) — resume's catch would otherwise fail it and
+    // free the store under an op that may be running.
+    if (!isAmbiguousSubmitError(err)) throw err;
+    await recordAmbiguousSubmit(
+      prisma.importRun as never,
+      runId,
+      `${AMBIGUOUS_SUBMIT_MESSAGE} (${(err as Error).message})`,
+    );
+  }
 }
 
 export function customerResumableStores(): ResumableStore[] {

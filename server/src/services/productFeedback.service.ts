@@ -1,4 +1,5 @@
 import prisma from '../db/prisma';
+import { storeLabeller } from './importFeedback.service';
 
 // Without a validator there's nothing to compare against, so there is no
 // four-bucket report. The feedback IS the import truth: total / accepted /
@@ -67,77 +68,98 @@ export function hintFor(field: string | null, code: string | null): string | nul
   );
 }
 
-function aggregateRejections(
-  rows: {
-    handle: string;
-    shopifyField: string | null;
-    shopifyCode: string | null;
-    message: string | null;
-  }[],
-): RejectionGroup[] {
-  const groups = new Map<string, RejectionGroup>();
-  for (const r of rows) {
-    const key = `${r.shopifyField ?? ''}|${r.shopifyCode ?? ''}`;
-    let g = groups.get(key);
-    if (!g) {
-      g = {
-        shopifyField: r.shopifyField,
-        shopifyCode: r.shopifyCode,
-        count: 0,
-        sampleMessages: [],
-        sampleHandles: [],
-        hint: hintFor(r.shopifyField, r.shopifyCode),
+const SAMPLE_MESSAGES = 3;
+const SAMPLE_HANDLES = 10;
+
+/**
+ * Rejections grouped by (field, code), highest-count first, each with up to 3
+ * distinct messages (the most frequent) and up to 10 example Handles.
+ *
+ * Counted and sampled in the database: this runs on every status poll, and a file
+ * Shopify rejects wholesale can have as many rejected rows as products. There are
+ * only ever a handful of (field, code) groups, so two small queries per group stay
+ * cheap where loading every rejected row did not.
+ */
+async function rejectionGroupsFor(importRunId: string): Promise<RejectionGroup[]> {
+  const groups = await prisma.productImportResult.groupBy({
+    by: ['shopifyField', 'shopifyCode'],
+    where: { importRunId, accepted: false },
+    _count: { _all: true },
+  });
+
+  const out = await Promise.all(
+    groups.map(async (g): Promise<RejectionGroup> => {
+      const inGroup = {
+        importRunId,
+        accepted: false,
+        shopifyField: g.shopifyField,
+        shopifyCode: g.shopifyCode,
       };
-      groups.set(key, g);
-    }
-    g.count++;
-    if (r.message && g.sampleMessages.length < 3 && !g.sampleMessages.includes(r.message)) {
-      g.sampleMessages.push(r.message);
-    }
-    if (g.sampleHandles.length < 10 && !g.sampleHandles.includes(r.handle)) {
-      g.sampleHandles.push(r.handle);
-    }
-  }
-  return [...groups.values()].sort((a, b) => b.count - a.count);
+      const [messages, handles] = await Promise.all([
+        prisma.productImportResult.groupBy({
+          by: ['message'],
+          where: { ...inGroup, message: { not: null } },
+          orderBy: { _count: { message: 'desc' } },
+          take: SAMPLE_MESSAGES,
+        }),
+        // A run holds one result per product, so the Handles are already distinct.
+        prisma.productImportResult.findMany({
+          where: inGroup,
+          select: { handle: true },
+          take: SAMPLE_HANDLES,
+        }),
+      ]);
+      return {
+        shopifyField: g.shopifyField,
+        shopifyCode: g.shopifyCode,
+        count: g._count._all,
+        sampleMessages: messages.map((m) => m.message).filter((m): m is string => Boolean(m)),
+        sampleHandles: [...new Set(handles.map((h) => h.handle))],
+        hint: hintFor(g.shopifyField, g.shopifyCode),
+      };
+    }),
+  );
+  return out.sort((a, b) => b.count - a.count);
 }
 
 export async function getProductImportFeedback(
   importRunId: string,
 ): Promise<ProductImportFeedback | null> {
+  // Called on every status poll — aggregate in the database instead of loading
+  // every result row of a large import. See the customer twin.
   const run = await prisma.productImportRun.findUnique({
     where: { id: importRunId },
-    include: { rowResults: true, batchJobs: true },
+    include: { batchJobs: { select: { storeId: true, shopDomain: true } } },
   });
   if (!run) return null;
 
-  const rejectedRows = run.rowResults.filter((r) => !r.accepted);
-  const accepted = run.rowResults.length - rejectedRows.length;
+  const counts = await prisma.productImportResult.groupBy({
+    by: ['storeId', 'accepted'],
+    where: { importRunId },
+    _count: { _all: true },
+  });
 
-  // Per-store split. Label each store via its batch job; fall back to the run's
-  // own shopDomain for the single (null storeId) group.
-  const shopByStore = new Map<string, string>();
-  for (const job of run.batchJobs) {
-    if (job.storeId) shopByStore.set(job.storeId, job.shopDomain);
-  }
+  // Per-store split, labelled with the store's shop domain.
+  const shopLabel = storeLabeller(run);
   const perStoreMap = new Map<string, PerStoreResult>();
-  for (const r of run.rowResults) {
-    const key = r.storeId ?? '';
+  let total = 0;
+  let accepted = 0;
+  for (const c of counts) {
+    const n = c._count._all;
+    total += n;
+    if (c.accepted) accepted += n;
+    const key = c.storeId ?? '';
     let entry = perStoreMap.get(key);
     if (!entry) {
-      entry = {
-        storeId: r.storeId,
-        shopDomain: r.storeId ? shopByStore.get(r.storeId) ?? r.storeId : run.shopDomain,
-        total: 0,
-        accepted: 0,
-        rejected: 0,
-      };
+      entry = { storeId: c.storeId, shopDomain: shopLabel(c.storeId), total: 0, accepted: 0, rejected: 0 };
       perStoreMap.set(key, entry);
     }
-    entry.total++;
-    if (r.accepted) entry.accepted++;
-    else entry.rejected++;
+    entry.total += n;
+    if (c.accepted) entry.accepted += n;
+    else entry.rejected += n;
   }
   const perStore = [...perStoreMap.values()].sort((a, b) => b.total - a.total);
+  const rejected = total - accepted;
 
   return {
     importRunId: run.id,
@@ -148,11 +170,11 @@ export async function getProductImportFeedback(
     error: run.error,
     successCount: run.successCount,
     errorCount: run.errorCount,
-    totalProducts: run.rowResults.length,
+    totalProducts: total,
     accepted,
-    rejected: rejectedRows.length,
+    rejected,
     createdAt: run.createdAt,
-    rejectionGroups: aggregateRejections(rejectedRows),
+    rejectionGroups: rejected > 0 ? await rejectionGroupsFor(importRunId) : [],
     perStore,
   };
 }
