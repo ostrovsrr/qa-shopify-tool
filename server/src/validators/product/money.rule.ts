@@ -1,6 +1,6 @@
 import { ProductGroup, ProductValidationIssue, ProductValidationRule } from '../../types';
 import { variantRowIndexes } from '../../services/productVariants';
-import { parseMoney } from '../../services/productValues';
+import { moneyIsTooLarge, parseMoney } from '../../services/productValues';
 import { productIssue, rawCell } from './issue';
 
 // The admin import reads the first number in a money cell, so "$10.00" or
@@ -29,7 +29,9 @@ export class MoneyRule implements ProductValidationRule {
             column,
             issueType: 'UnreadableMoney',
             currentValue: raw,
-            message: `${column} "${raw.trim()}" has no number in it.`,
+            message: moneyIsTooLarge(raw)
+              ? `${column} holds a number too large to read as an amount.`
+              : `${column} "${raw.trim()}" has no number in it.`,
             shopifySays: `"${raw.trim()}" is not a valid ${noun}`,
             suggestedFix: `Put a number in ${column} (for example 19.99), or leave it blank.`,
           }));
