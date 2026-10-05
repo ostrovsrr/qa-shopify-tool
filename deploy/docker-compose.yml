@@ -115,7 +115,7 @@ services:
 
   # ── One instance per Solution Engineer ─────────────────────────────────────
   #
-  # To add a ninth: copy a block, give it the next port, and add SHOPIFY_STORES_SE9
+  # To add another: copy a block, give it the next port, and add SHOPIFY_STORES_SE<n>
   # to deploy/.env. Nothing else changes.
   se1:
     <<: *app
@@ -197,6 +197,24 @@ services:
       QA_INSTANCE_OWNER: ${QA_OWNER_SE9:-}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:3109:3001"
+
+  se10:
+    <<: *app
+    environment:
+      <<: *app-env
+      SHOPIFY_TEST_STORES: ${SHOPIFY_STORES_SE10:?set SHOPIFY_STORES_SE10 in deploy/.env}
+      QA_INSTANCE_OWNER: ${QA_OWNER_SE10:-}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:3110:3001"
+
+  se11:
+    <<: *app
+    environment:
+      <<: *app-env
+      SHOPIFY_TEST_STORES: ${SHOPIFY_STORES_SE11:?set SHOPIFY_STORES_SE11 in deploy/.env}
+      QA_INSTANCE_OWNER: ${QA_OWNER_SE11:-}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:3111:3001"
 
 
 volumes:
