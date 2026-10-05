@@ -20,21 +20,23 @@ RUN npm run build
 FROM node:20-slim AS server-build
 WORKDIR /app/server
 
-COPY server/package*.json ./
-RUN npm ci
-
-# OpenSSL, in the BUILD stage, before `prisma generate`.
+# OpenSSL, in the BUILD stage, before `npm ci` and `prisma generate`.
 #
-# Not a duplicate of the runtime install below. `prisma generate` picks its query
-# engine by detecting the OpenSSL version present AT GENERATE TIME. With no openssl
-# on the box it does not fail — it guesses, picks debian-openssl-1.1.x, and the
-# image builds green. The runtime stage then installs openssl 3.0.x, and every
-# query dies at runtime with "could not locate the Query Engine for runtime
-# debian-openssl-3.0.x". Both stages must see the same OpenSSL for `native` to mean
-# the same thing in both.
+# Not a duplicate of the runtime install below. Prisma picks its engines by
+# detecting the OpenSSL version present at the time: @prisma/engines' postinstall
+# (during `npm ci`) downloads the schema engine that `migrate deploy` uses, and
+# `prisma generate` picks the query engine. With no openssl on the box neither
+# fails — they guess debian-openssl-1.1.x and the image builds green. The runtime
+# stage then has openssl 3.0.x, and every query dies with "could not locate the
+# Query Engine for runtime debian-openssl-3.0.x" (and `migrate deploy` goes looking
+# on the network for the schema engine it does not have). Installed BEFORE
+# `npm ci`, so both engines are fetched for the OpenSSL the image actually runs.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends openssl \
   && rm -rf /var/lib/apt/lists/*
+
+COPY server/package*.json ./
+RUN npm ci
 
 COPY server/ ./
 # The Prisma client is generated code — it must exist before tsc runs.
@@ -59,8 +61,24 @@ RUN npm ci --omit=dev
 # client, which is NOT reproducible from node_modules alone.
 COPY --from=server-build /app/server/node_modules/.prisma ./node_modules/.prisma
 COPY --from=server-build /app/server/node_modules/@prisma ./node_modules/@prisma
+
+# The Prisma CLI, for `migrate deploy`. It is a devDependency, so `npm ci
+# --omit=dev` leaves it out, and `npx prisma` then DOWNLOADED whatever prisma was
+# latest at container start: no network, no migrations -- and a new major (7)
+# against this 5.x schema. Copied from the build stage instead: exactly the
+# version server/package-lock.json pins, with the schema engine that
+# @prisma/engines (copied above) fetched at build time. Invoke it as
+# `node node_modules/prisma/build/index.js`, never `npx`, so nothing is fetched.
+COPY --from=server-build /app/server/node_modules/prisma ./node_modules/prisma
+# No update-check phone-home from the CLI at container start.
+ENV CHECKPOINT_DISABLE=1
+
 COPY --from=server-build /app/server/dist ./dist
 COPY server/prisma ./prisma
+
+# Builds DATABASE_URL from POSTGRES_PASSWORD with the password percent-encoded, so
+# any password works (see the file). docker-compose.yml runs everything through it.
+COPY deploy/docker/with-db-url.js /app/with-db-url.js
 
 # index.ts resolves the client at ../../client/dist relative to dist/, so it lands
 # at /app/client/dist.
@@ -81,4 +99,7 @@ EXPOSE 3001
 # build. `migrate deploy` is the safe command — it applies pending migrations and
 # CANNOT reset or drop anything. Never `migrate dev` here; its drift check can offer
 # a destructive reset, and this database has intentional drift (crossReferenceData).
-CMD ["sh", "-c", "npx prisma migrate deploy && node dist/index.js"]
+#
+# Single-container use: pass DATABASE_URL, or POSTGRES_PASSWORD (+ POSTGRES_HOST)
+# and let with-db-url.js encode it.
+CMD ["node", "/app/with-db-url.js", "sh", "-c", "node node_modules/prisma/build/index.js migrate deploy && exec node dist/index.js"]

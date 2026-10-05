@@ -34,7 +34,12 @@ x-app: &app
   restart: unless-stopped
   environment: &app-env
     NODE_ENV: production
-    DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}@postgres:5432/shopify_csv_qa
+    # NOT a DATABASE_URL: compose cannot percent-encode, and a password with `/`,
+    # `+` or `=` in it (anything from `openssl rand -base64`) breaks a URL built by
+    # interpolation. /app/with-db-url.js (see `command` below) builds the URL from
+    # these, with the password encoded, at container start.
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
+    POSTGRES_HOST: postgres
     SHOPIFY_API_VERSION: ${SHOPIFY_API_VERSION:-2026-01}
 
     # Seven instances against one Postgres. The app defaults to 10 connections per
@@ -53,7 +58,7 @@ x-app: &app
   # The image's own CMD runs `prisma migrate deploy` before starting. That is right
   # for a single container and wrong for seven: seven concurrent migrations against
   # one database race. The `migrate` service below does it once, and these just run.
-  command: ["node", "dist/index.js"]
+  command: ["node", "/app/with-db-url.js", "node", "dist/index.js"]
 
   # Node is guaranteed present; curl and wget are not in node:20-slim.
   healthcheck:
@@ -107,8 +112,12 @@ services:
       dockerfile: Dockerfile
     restart: "no"
     environment:
-      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}@postgres:5432/shopify_csv_qa
-    command: ["npx", "prisma", "migrate", "deploy"]
+      # Encoded into DATABASE_URL by with-db-url.js -- see x-app above.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
+      POSTGRES_HOST: postgres
+    # The Prisma CLI pinned in server/package-lock.json, baked into the image. Not
+    # `npx prisma`: that downloads whatever prisma is latest when the image lacks it.
+    command: ["node", "/app/with-db-url.js", "node", "node_modules/prisma/build/index.js", "migrate", "deploy"]
     depends_on:
       postgres:
         condition: service_healthy
