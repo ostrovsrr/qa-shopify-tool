@@ -1,6 +1,5 @@
-import axios from 'axios';
-import { attachActorHeader } from './actor';
 import { awaitCleanupRuns, CleanupRun } from './cleanupPoller';
+import { createApiClient, healthFromResponse, storesFromResponse } from './http';
 import {
   ColumnMapping,
   CleanupResult,
@@ -16,21 +15,8 @@ import {
   ValidationSummary,
 } from '../types';
 
-const api = axios.create({
-  baseURL: '/api',
-});
-
-// Every request says who made it — display + audit only, never authorization.
-attachActorHeader(api);
-
-// Surface the server's { error } message instead of Axios's generic
-// "Request failed with status code N".
-api.interceptors.response.use(undefined, (err: unknown) => {
-  if (axios.isAxiosError(err) && typeof err.response?.data?.error === 'string') {
-    err.message = err.response.data.error;
-  }
-  return Promise.reject(err);
-});
+// Actor header + the server's { error } sentence on failures (see http.ts).
+const api = createApiClient();
 
 export async function previewCsv(file: File): Promise<CsvPreview> {
   const formData = new FormData();
@@ -145,11 +131,12 @@ export async function deleteValidation(validationId: string): Promise<void> {
 
 // ── Shopify test-store import + feedback ─────────────────────────────────────
 
+/** Throws the server's error + hint when the instance has no usable stores. */
 export async function fetchShopifyStores(): Promise<ShopifyStore[]> {
-  const { data } = await api.get<{ stores: ShopifyStore[] }>('/shopify/stores', {
+  const { data, status } = await api.get<unknown>('/shopify/stores', {
     validateStatus: () => true,
   });
-  return data.stores ?? [];
+  return storesFromResponse<ShopifyStore>(status, data);
 }
 
 /** Stores busy with an import or cleanup right now (shared with the product
@@ -182,12 +169,12 @@ export async function cleanupQaCustomers(storeId: string): Promise<CleanupResult
 
 export async function checkShopifyHealth(storeId?: string): Promise<ShopifyHealth> {
   // /health returns non-2xx (422/503/401) when misconfigured; surface the body
-  // either way rather than throwing.
-  const { data } = await api.get<ShopifyHealth>('/shopify/health', {
+  // either way rather than throwing. A body without `ok` reads as not ready.
+  const { data, status } = await api.get<unknown>('/shopify/health', {
     params: storeId ? { storeId } : undefined,
     validateStatus: () => true,
   });
-  return data;
+  return healthFromResponse<ShopifyHealth>(status, data);
 }
 
 export async function runImport(

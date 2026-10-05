@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import axios from 'axios';
 import { previewFlagEffects } from '../api/validationApi';
 import type { EffectsPreview, TemplateFlags } from '../api/validationApi';
 import { OptionsPanel } from './OptionsPanel';
@@ -92,14 +93,23 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
   // re-parses the CSV server-side, and an operator flicking three switches
   // should cost one request, not three. A mapping collision is skipped outright:
   // the server would 400 on it, and the screen already says so.
-  const [effects, setEffects] = useState<EffectsPreview | null>(null);
-  const [effectsLoading, setEffectsLoading] = useState(false);
+  //
+  // Effects are stored WITH the mapping + flags they were computed for, and only
+  // shown while those still match. OptionsPanel phrases each figure relative to
+  // the current flags, so new flags over old effects flipped the sign ("+112 rows
+  // would import" became "-112 …") until the response landed.
   const mappingKey = JSON.stringify(filteredMapping());
   const flagsKey = JSON.stringify(flags);
+  const effectsKey = `${mappingKey}|${flagsKey}`;
+  const [effectsFor, setEffectsFor] = useState<{ key: string; data: EffectsPreview } | null>(null);
+  const [effectsLoading, setEffectsLoading] = useState(false);
+  const [effectsError, setEffectsError] = useState('');
+  const effects = effectsFor?.key === effectsKey ? effectsFor.data : null;
 
   useEffect(() => {
     if (duplicateTargets.length > 0) {
-      setEffects(null);
+      setEffectsFor(null);
+      setEffectsLoading(false);
       return;
     }
     let cancelled = false;
@@ -107,12 +117,19 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
     const timer = setTimeout(() => {
       previewFlagEffects(preview.uploadId, JSON.parse(mappingKey), JSON.parse(flagsKey))
         .then((data) => {
-          if (!cancelled) setEffects(data);
+          if (cancelled) return;
+          setEffectsFor({ key: `${mappingKey}|${flagsKey}`, data });
+          setEffectsError('');
         })
-        // A failed preview is not worth an error banner — the numbers simply do
-        // not appear, and Validate still works.
-        .catch(() => {
-          if (!cancelled) setEffects(null);
+        .catch((err: unknown) => {
+          if (cancelled) return;
+          setEffectsFor(null);
+          // A transient failure is not worth a banner — the numbers simply do not
+          // appear, and Validate still works. But an expired upload (404) means
+          // Validate will fail too, so say so now, in the server's words.
+          setEffectsError(
+            axios.isAxiosError(err) && err.response?.status === 404 ? err.message : '',
+          );
         })
         .finally(() => {
           if (!cancelled) setEffectsLoading(false);
@@ -173,6 +190,7 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
         }}
         effects={effects}
         effectsLoading={effectsLoading}
+        effectsError={effectsError}
         disabled={loading}
       />
 
