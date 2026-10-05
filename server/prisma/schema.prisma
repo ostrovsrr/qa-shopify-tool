@@ -182,6 +182,9 @@ model OriginalCustomerRow {
 
   validationRun ValidationRun @relation(fields: [validationRunId], references: [id], onDelete: Cascade)
 
+  // Every read and the cascade delete go by run; the product twin has had this
+  // index (ProductOriginalRow @@index([uploadRunId])) from the start.
+  @@index([validationRunId])
   @@map("original_customer_rows")
 }
 
@@ -199,6 +202,8 @@ model ValidationIssue {
 
   validationRun ValidationRun @relation(fields: [validationRunId], references: [id], onDelete: Cascade)
 
+  // Twin of ProductValidationIssue @@index([uploadRunId]).
+  @@index([validationRunId])
   @@map("validation_issues")
 }
 

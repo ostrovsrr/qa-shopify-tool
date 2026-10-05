@@ -26,7 +26,8 @@ npm run dev              # ts-node-dev with hot reload on port 3001
 npm run build            # tsc → dist/
 npm run start            # run compiled dist/
 npm run prisma:generate  # regenerate Prisma client after schema changes
-npm run prisma:migrate   # apply new migrations (prompts for migration name)
+npm run prisma:migrate   # CREATE a migration (migrate dev --create-only): writes SQL, applies nothing — review it
+npm run prisma:deploy    # APPLY pending migrations (migrate deploy)
 npm run prisma:studio    # open Prisma Studio GUI
 ```
 
@@ -43,7 +44,7 @@ DATABASE_URL="postgresql://postgres:yourpassword@localhost:5432/shopify_csv_qa"
 PORT=3001
 CLIENT_URL=http://localhost:5173
 
-cd server && npm install && npm run prisma:generate && npm run prisma:migrate
+cd server && npm install && npm run prisma:generate && npm run prisma:deploy
 cd ../client && npm install
 ```
 
@@ -76,6 +77,7 @@ The server has vitest tests (`npm run test`, `npm run test:integration`, `npm ru
 - `services/previewStore.ts` — bridges the preview and validate calls. Holds the temp file's **path** (not its bytes) and owns that file: deleting the entry unlinks it.
 - `reports/excelReport.ts` — generates multi-sheet Excel (Errors, Full Uploaded File, Shopify Template)
 - `db/prisma.ts` — singleton Prisma client
+- `loadEnv.ts` — loads `server/.env` (dev only; production injects its env) and must stay the **first** import of `index.ts`, because `db/prisma.ts`, `retention.service.ts` and `uploadFile.ts` read env at module load
 - `validators/customer/` — one file per rule (see below)
 - `validators/product/` — product pre-check rules, same pattern (`ProductValidationRule` takes `ProductGroup[]`); add new ones to `index.ts`. Only add a rule that predicts a real import rejection from the file alone.
 - `services/shopifyBulk.ts`, `services/shopifyClient.ts`, `config/shopify.ts` — shared Shopify bulk-import engine used by both the customer and product flows (client requires customer + product scopes)
@@ -90,7 +92,7 @@ The server has vitest tests (`npm run test`, `npm run test:integration`, `npm ru
 ### Database (Prisma / PostgreSQL)
 One database (`shopify_csv_qa`). Customer models: `ValidationRun`, `ValidationIssue`, `OriginalCustomerRow`, `ImportRun`, `ImportBatchJob`, `ImportRowResult`. Product models: `ProductUploadRun`, `ProductImportRun`, `ProductImportJob`, `ProductImportResult`, `ProductOriginalRow`, `ProductValidationIssue`.
 
-**Migration caveat:** the live DB has intentional drift (`validation_runs.crossReferenceData` exists in the DB but not in `schema.prisma`). Never run bare `prisma migrate dev` — its drift check may offer a destructive reset. Create migrations with `--create-only`, review the SQL, and apply with `prisma migrate deploy`.
+**Migration caveat:** the live DB has intentional drift (`validation_runs.crossReferenceData` exists in the DB but not in `schema.prisma`). Never run bare `prisma migrate dev` — its drift check may offer a destructive reset. Create migrations with `--create-only` (that is what `npm run prisma:migrate` runs), review the SQL, and apply with `prisma migrate deploy` (`npm run prisma:deploy`).
 
 ## Adding a Validation Rule
 

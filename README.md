@@ -71,8 +71,14 @@ cd server
 npm run prisma:generate
 
 # Apply migrations
-npm run prisma:migrate
+npm run prisma:deploy
 ```
+
+To add a migration after editing `prisma/schema.prisma`, run `npm run prisma:migrate`
+(it is `prisma migrate dev --create-only`: it writes the SQL and applies nothing),
+review the SQL, then `npm run prisma:deploy`. Never run bare `prisma migrate dev` —
+the live database has intentional drift and its drift check can offer a destructive
+reset.
 
 ### 4. Start the development servers
 

@@ -63,12 +63,39 @@ function shortId(id: string | undefined): string {
 // So the two identifiers we actually handle in bulk are redacted on the way out.
 // This is a backstop, not a licence: do not log user data on purpose.
 const EMAIL_RE = /[\w.+-]+@[\w-]+\.[\w.-]+/g;
-// Deliberately conservative: 9+ digits with optional separators. Loose enough for
-// international numbers, tight enough not to eat row counts or timestamps.
-const PHONE_RE = /\+?\d[\d\s().-]{8,}\d/g;
+// A phone-SHAPED candidate: an optional +, then 2–7 groups of 1–4 digits (the first
+// may be parenthesised) joined by at most one space, dot or hyphen. It must stand
+// alone: not glued to a word character, a slash, colon or hyphen on either side, so
+// it never starts inside a gid://shopify/Customer/123… path, a UUID, or the middle
+// of an ISO timestamp (2026-10-05T14:58:05 is followed by "T"; "2026-10-05 14:58"
+// by ":"). A trailing sentence period is fine; a decimal point is not.
+//
+// The old pattern (/\+?\d[\d\s().-]{8,}\d/) turned every ISO date and every long
+// numeric id in the log into "[phone]", which made the log useless for exactly the
+// debugging it exists for.
+const PHONE_CANDIDATE_RE =
+  /(?<![\w/:+-]|\d\.)\+?(?:\(\d{1,4}\)|\d{1,4})(?:[\s.-]?(?:\(\d{1,4}\)|\d{1,4})){1,6}(?![\w/:-]|\.\d)/g;
+
+/** Does this phone-shaped candidate carry enough digits to be a phone number? */
+function looksLikePhone(candidate: string): boolean {
+  const digits = candidate.replace(/\D/g, '').length;
+  // E.164 caps a number at 15 digits; anything longer is an id or a list of counts.
+  if (digits > 15) return false;
+  // An explicit + is an international number: as few as 8 digits is real.
+  if (candidate.startsWith('+')) return digits >= 8;
+  // Written with separators (613-555-0104, (613) 555-0104): 9+ digits. An ISO date
+  // (2026-10-05) has 8 and so survives.
+  if (/[\s().-]/.test(candidate)) return digits >= 9;
+  // A bare digit run is ambiguous with ids and epoch timestamps. Shopify ids are
+  // 13+ digits and epoch milliseconds 13; a national number (6135550104) is 10, and
+  // one with its country code but no + (16135550104, 442071234567) 11–12.
+  return digits >= 10 && digits <= 12;
+}
 
 export function scrub(text: string): string {
-  return text.replace(EMAIL_RE, '[email]').replace(PHONE_RE, '[phone]');
+  return text
+    .replace(EMAIL_RE, '[email]')
+    .replace(PHONE_CANDIDATE_RE, (match) => (looksLikePhone(match) ? '[phone]' : match));
 }
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -117,6 +144,25 @@ export function errorHandler(
 
   if (err instanceof HttpError) {
     res.status(err.status).json({ error: err.message, requestId: id });
+    return;
+  }
+
+  // body-parser (express.json) and other http-errors-style failures: malformed JSON
+  // (400 entity.parse.failed), a body over the limit (413 entity.too.large), a bad
+  // charset (415). They are the CLIENT's fault, say so with their own status, and
+  // mark themselves expose:true — their messages are written to be shown. They used
+  // to become a 500 "something went wrong on our end", which is wrong on both counts.
+  // Only a 4xx that explicitly opts in: a 5xx, or anything without expose, is still
+  // treated as unfit to be seen.
+  const clientError = err as Error & { status?: unknown; statusCode?: unknown; expose?: unknown };
+  const status = typeof clientError.status === 'number' ? clientError.status : clientError.statusCode;
+  if (
+    typeof status === 'number' &&
+    status >= 400 &&
+    status < 500 &&
+    clientError.expose === true
+  ) {
+    res.status(status).json({ error: err.message, requestId: id });
     return;
   }
 
