@@ -23,10 +23,27 @@ const submitted: string[] = [];
 /** submitAttemptedAt of every PENDING job/cleanup at the moment each mutation ran. */
 const attemptSeenAtSubmit: (Date | null)[] = [];
 
+/** What a cleanup's tag lookup finds in the (fake) store, and how often it looked. */
+let taggedIds: string[] = [];
+let tagListings = 0;
+
 const fakeClient = {
   shop: 'fake.myshopify.com',
   verifyConnection: async () => ({ ok: true, shop: 'fake.myshopify.com' }),
-  query: async () => ({ locations: { nodes: [{ id: 'gid://shopify/Location/1' }] } }),
+  query: async (q: string) => {
+    // Tag lookup (the `products`/`customers` connection) — cleanup listing its ids.
+    if (q.includes('pageInfo')) {
+      tagListings++;
+      const key = q.includes('products') ? 'products' : 'customers';
+      return {
+        [key]: {
+          nodes: taggedIds.map((id) => ({ id })),
+          pageInfo: { hasNextPage: false, endCursor: null },
+        },
+      };
+    }
+    return { locations: { nodes: [{ id: 'gid://shopify/Location/1' }] } };
+  },
 };
 
 vi.mock('../../src/services/shopifyClient', async (importOriginal) => {
@@ -137,6 +154,8 @@ runIf('resume-on-boot', () => {
   beforeEach(async () => {
     submitted.length = 0;
     attemptSeenAtSubmit.length = 0;
+    taggedIds = [];
+    tagListings = 0;
     await resetDb();
   });
   afterAll(async () => {
@@ -249,6 +268,65 @@ runIf('resume-on-boot', () => {
     const after = await prisma.cleanupRun.findUniqueOrThrow({ where: { id: run.id } });
     expect(after.status).toBe('FAILED');
     expect(after.bulkOperationId).toBeNull();
+  });
+
+  // ── "NEVER LISTED" IS NOT "LISTED, AND EMPTY" ─────────────────────────────
+  // The live path writes the row, THEN lists the tagged ids, THEN saves them. A
+  // crash during the listing leaves submittedIds NULL. Resume used to read that as
+  // an empty list and mark the run COMPLETED with 0 deleted — while every tagged
+  // record was still sitting in the store.
+  const pendingCleanup = (submittedIds?: string[]) =>
+    prisma.cleanupRun.create({
+      data: {
+        entity: 'PRODUCT',
+        storeId: 'store1',
+        shopDomain: 'fake.myshopify.com',
+        tag: 'qa-import',
+        status: 'PENDING',
+        ...(submittedIds ? { found: submittedIds.length, submittedIds } : {}),
+      },
+    });
+
+  it('cleanup: re-lists by tag when the ids were never listed, and deletes them', async () => {
+    taggedIds = ['gid://shopify/Product/1', 'gid://shopify/Product/2'];
+    const run = await pendingCleanup();
+    expect(run.submittedIds).toBeNull();
+
+    const summary = await resumeStore(cleanupStore());
+
+    expect(summary).toMatchObject({ relaunched: 1, failed: 0 });
+    expect(tagListings).toBe(1);
+    const after = await prisma.cleanupRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after).toMatchObject({
+      status: 'RUNNING',
+      bulkOperationId: submitted[0],
+      found: 2,
+      submittedIds: taggedIds,
+    });
+  });
+
+  it('cleanup: never-listed and genuinely nothing tagged → COMPLETED, store freed', async () => {
+    taggedIds = [];
+    const run = await pendingCleanup();
+
+    await resumeStore(cleanupStore());
+
+    expect(tagListings).toBe(1);
+    const after = await prisma.cleanupRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after).toMatchObject({ status: 'COMPLETED', found: 0, deleted: 0 });
+    expect(submitted).toEqual([]);
+    expect(await prisma.storeLock.findUnique({ where: { storeId: 'store1' } })).toBeNull();
+  });
+
+  it('cleanup: listed-and-empty is trusted, not re-listed', async () => {
+    taggedIds = ['gid://shopify/Product/9']; // would be found if it looked
+    const run = await pendingCleanup([]);
+
+    await resumeStore(cleanupStore());
+
+    expect(tagListings).toBe(0);
+    const after = await prisma.cleanupRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after).toMatchObject({ status: 'COMPLETED', deleted: 0 });
   });
 
   // ── THE CLAIM ─────────────────────────────────────────────────────────────

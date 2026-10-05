@@ -3,8 +3,12 @@ import request from 'supertest';
 import { v4 as uuidv4 } from 'uuid';
 import app from '../../src/index';
 import prisma from '../../src/db/prisma';
-import { acquireStoreLock } from '../../src/services/storeLock.service';
+import { acquireStoreLock, StoreLockOwner } from '../../src/services/storeLock.service';
 import { resetDb } from './resetDb';
+
+// acquire must run inside a transaction: its advisory lock is transaction-scoped.
+const lockStore = (storeId: string, owner: StoreLockOwner) =>
+  prisma.$transaction((tx) => acquireStoreLock(tx, storeId, owner));
 
 // GET /api/shopify/stores/busy feeds the "In use" line on both store pickers
 // (TODOS §1 follow-up). A lock only counts while its owner is still running: a
@@ -26,7 +30,7 @@ runIf('GET /api/shopify/stores/busy', () => {
     await prisma.cleanupRun.create({
       data: { id: ownerId, entity: 'PRODUCT', shopDomain: 'fake.myshopify.com', tag: 'qa-import', status: 'RUNNING' },
     });
-    await acquireStoreLock(prisma, 'store2', { ownerType: 'CLEANUP_RUN', ownerId, operation: 'a product cleanup' });
+    await lockStore('store2', { ownerType: 'CLEANUP_RUN', ownerId, operation: 'a product cleanup' });
 
     const busy = await request(app).get('/api/shopify/stores/busy');
     expect(busy.body.busy).toMatchObject([{ storeId: 'store2', operation: 'a product cleanup' }]);

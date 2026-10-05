@@ -1,9 +1,15 @@
 import { v4 as uuidv4 } from 'uuid';
 import prisma from '../db/prisma';
-import { CsvParseError } from '../errors';
+import { CsvParseError, HttpError } from '../errors';
 import { parseProductCsvFile } from './productCsvParser';
 import { ProductHistoryItem, ProductValidationIssue, UpdateUploadMetadata } from '../types';
-import { clampHistoryLimit, HistoryQuery } from './customerValidation.service';
+import {
+  clampHistoryLimit,
+  DELETE_WHILE_CLEANING,
+  DELETE_WHILE_IMPORTING,
+  HistoryQuery,
+} from './customerValidation.service';
+import { TERMINAL_BULK_STATUSES } from './shopifyBulk';
 import { FILE_BLOCKING_ISSUE_TYPES, runProductValidation } from '../validators/product';
 
 // Upload: parse the product CSV, group by Handle, run the file-level pre-check
@@ -239,10 +245,42 @@ export async function updateUploadMetadata(
   return { ...rest, lastImport: importRuns[0] ?? null };
 }
 
+/**
+ * Delete an upload — unless something is still running against it. The twin of
+ * deleteValidationRun (customerValidation.service.ts); see there for why: the delete
+ * cascades to originalRows, importRuns, their results and batch jobs, and deleting a
+ * RUNNING import's row makes its store lock read "free" while Shopify is still
+ * executing the bulk op.
+ *
+ * Throws HttpError(409) when refused; returns false when the upload does not exist.
+ */
 export async function deleteUploadRun(uploadId: string): Promise<boolean> {
-  const exists = await prisma.productUploadRun.findUnique({ where: { id: uploadId } });
-  if (!exists) return false;
-  // Cascades to originalRows, importRuns, their results + batch jobs.
-  await prisma.productUploadRun.delete({ where: { id: uploadId } });
-  return true;
+  return prisma.$transaction(async (tx) => {
+    // FOR UPDATE: an import starting concurrently waits on this row, then fails its
+    // foreign key, instead of slipping in between the check and the delete.
+    const locked = await tx.$queryRaw<{ id: string }[]>`
+      SELECT id FROM product_upload_runs WHERE id = ${uploadId} FOR UPDATE`;
+    if (locked.length === 0) return false;
+
+    const imports = await tx.productImportRun.findMany({
+      where: { uploadId },
+      select: { id: true, status: true, batchJobs: { select: { status: true } } },
+    });
+    const inFlight = (status: string) => !TERMINAL_BULK_STATUSES.includes(status);
+    if (imports.some((i) => inFlight(i.status) || i.batchJobs.some((j) => inFlight(j.status)))) {
+      throw new HttpError(409, DELETE_WHILE_IMPORTING);
+    }
+    if (imports.length > 0) {
+      const cleaning = await tx.cleanupRun.count({
+        where: {
+          importRunId: { in: imports.map((i) => i.id) },
+          status: { notIn: TERMINAL_BULK_STATUSES },
+        },
+      });
+      if (cleaning > 0) throw new HttpError(409, DELETE_WHILE_CLEANING);
+    }
+
+    await tx.productUploadRun.delete({ where: { id: uploadId } });
+    return true;
+  });
 }
