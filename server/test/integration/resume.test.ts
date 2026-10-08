@@ -230,6 +230,9 @@ runIf('resume-on-boot', () => {
       { submitAttemptedAt: new Date() },
     ]);
 
+    // Resume really takes the store's (share) lock here: the attempted sibling is
+    // failed for its unknown outcome, never for "store busy".
+    storesResolve = true;
     const summary = await resumeStore(jobStore());
 
     expect(summary).toMatchObject({ relaunched: 1, failed: 1 });
@@ -238,6 +241,29 @@ runIf('resume-on-boot', () => {
     const failed = await job(attempted);
     expect(failed.status).toBe('FAILED');
     expect(failed.bulkOperationId).toBeNull();
+    expect(failed.error).toContain(SUBMIT_OUTCOME_UNKNOWN.slice(0, 60));
+  });
+
+  // A product store's share runs as several jobs on ONE store, and they hold one
+  // lock between them. Resume re-takes it as the share, so the second sibling is a
+  // re-entrant acquire — not "the store is busy" with its own brother. (Under the
+  // old per-job owner the second acquire met its RUNNING brother's lock and was
+  // failed "store busy": relaunched 1, failed 1.)
+  it('product: two never-submitted PENDING jobs on one store BOTH relaunch under the share lock', async () => {
+    const jobIds = await seedPendingJobs([{}, {}]);
+    const { importRunId } = await job(jobIds[0]);
+
+    storesResolve = true;
+    const summary = await resumeStore(jobStore());
+
+    expect(summary).toMatchObject({ relaunched: 2, failed: 0 });
+    expect(submitted).toHaveLength(2);
+    expect((await Promise.all(jobIds.map(job))).map((j) => j.status)).toEqual(['RUNNING', 'RUNNING']);
+    const lock = await prisma.storeLock.findUniqueOrThrow({ where: { storeId: 'store1' } });
+    expect(lock).toMatchObject({
+      ownerType: 'PRODUCT_IMPORT_STORE_SHARE',
+      ownerId: shareOwner(importRunId, 'store1'),
+    });
   });
 
   // A customer store's share runs as several jobs on ONE store, and they hold one

@@ -716,6 +716,10 @@ async function launchBatchJob(
   batch: TemplateRow[],
   parentId: string,
 ): Promise<void> {
+  // Set the moment Shopify hands back an op id. A throw after that is NOT a refused
+  // submit — the op exists and may be running — so the catch must not treat it as
+  // one (see below).
+  let bulkOpId: string | null = null;
   try {
     const client = await getShopifyClient(storeId);
     const health = await client.verifyConnection();
@@ -737,7 +741,7 @@ async function launchBatchJob(
     // tell us which op is ours. Resume-on-boot sees submitAttemptedAt and fails the
     // job honestly instead of guessing (see decideResume in importResume.service.ts).
     await markSubmitAttempt(prisma.importBatchJob as never, jobId);
-    const bulkOpId = await runBulkMutation(client, CUSTOMER_CREATE_MUTATION, stagedPath);
+    bulkOpId = await runBulkMutation(client, CUSTOMER_CREATE_MUTATION, stagedPath);
 
     await prisma.importBatchJob.update({
       where: { id: jobId },
@@ -748,6 +752,24 @@ async function launchBatchJob(
       },
     });
   } catch (err) {
+    if (bulkOpId) {
+      // Shopify ACCEPTED the op; recording its id is what failed. The op may be
+      // running on the store right now, so this is the outcome-unknown case, not a
+      // refusal: leave the job PENDING with submitAttemptedAt set, and its share
+      // holding the store, exactly as an ambiguous submit does — the sweep settles
+      // it once the lock's TTL has run out. Clearing submitAttemptedAt or releasing
+      // here would hand the store to the next colleague on top of a live op.
+      console.warn(
+        `[import] customer job ${jobId}: bulk op ${bulkOpId} submitted but not recorded:`,
+        (err as Error).message,
+      );
+      await recordAmbiguousSubmit(
+        prisma.importBatchJob as never,
+        jobId,
+        `${AMBIGUOUS_SUBMIT_MESSAGE} (Shopify started ${bulkOpId}; recording it failed: ${(err as Error).message})`,
+      ).catch(() => undefined); // the DB just failed us once; the row is already right
+      return;
+    }
     if (isAmbiguousSubmitError(err)) {
       // The op may be live on this store. Do NOT go terminal and do NOT release:
       // the job stays PENDING with submitAttemptedAt set — the "outcome unknown"

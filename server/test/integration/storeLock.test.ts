@@ -208,18 +208,22 @@ runIf('store busy-lock', () => {
 
     expect(batch).toMatchObject({ ok: true });
 
-    // Each JOB owns its own store's lock — the parent owns none, its storeId being
-    // legitimately NULL. If the lock ever collapsed to one-per-batch, the parallel
-    // import (the entire point of the products flow) would serialize.
+    // Each store's SHARE owns that store's lock — the parent owns none, its storeId
+    // being legitimately NULL. If the lock ever collapsed to one-per-batch, the
+    // parallel import (the entire point of the products flow) would serialize.
+    const parentId = (batch as { importRunId: string }).importRunId;
     const locks = await prisma.storeLock.findMany({ orderBy: { storeId: 'asc' } });
-    expect(locks.map((l) => l.storeId)).toEqual(['store1', 'store2']);
-    expect(locks.every((l) => l.ownerType === 'PRODUCT_IMPORT_JOB')).toBe(true);
+    expect(locks.map((l) => [l.storeId, l.ownerType, l.ownerId])).toEqual([
+      ['store1', 'PRODUCT_IMPORT_STORE_SHARE', shareOwner(parentId, 'store1')],
+      ['store2', 'PRODUCT_IMPORT_STORE_SHARE', shareOwner(parentId, 'store2')],
+    ]);
   });
 
-  // A repeated store id used to plan two jobs on ONE shop under ONE lock (the lock
-  // step dedupes, the plan did not). From API 2026-01 Shopify runs both bulk ops at
-  // once, so that was two half-imports interleaving on the same store.
-  it('a batch naming the same store twice plans ONE job for it (products)', async () => {
+  // A repeated store id used to plan two shares of ONE shop under ONE lock (the
+  // lock step dedupes, the plan did not), each sized as if it had the shop to
+  // itself. A store's share may run as several ops on purpose — but as ONE share,
+  // sized for a single store.
+  it('a batch naming the same store twice plans ONE share for it (products)', async () => {
     const uploadId = await seedUpload();
     const batch = await startBatchProductImport(uploadId, ['store1', 'store1']);
     expect(batch).toMatchObject({ ok: true });
@@ -228,8 +232,14 @@ runIf('store busy-lock', () => {
       where: { id: (batch as { importRunId: string }).importRunId },
       include: { batchJobs: true },
     });
-    expect(parent.batchJobs).toHaveLength(1);
-    expect(parent.batchJobs[0]).toMatchObject({ storeId: 'store1', batchCount: 1, productCount: 2 });
+    // Two products → two ops on store1 (one product each), never four.
+    expect(parent.batchJobs).toHaveLength(2);
+    expect(
+      parent.batchJobs.every((j) => j.storeId === 'store1' && j.batchCount === 2 && j.productCount === 1),
+    ).toBe(true);
+    const locks = await prisma.storeLock.findMany();
+    expect(locks).toHaveLength(1);
+    expect(locks[0].ownerType).toBe('PRODUCT_IMPORT_STORE_SHARE');
   });
 
   // Customers split one store's share across several ops on purpose — but as ONE
@@ -283,8 +293,14 @@ runIf('store busy-lock', () => {
     // transitions across the two flows plus cleanup, and forgetting one must not
     // wedge a store until the TTL expires. An acquirer that finds a lock held by an
     // already-terminal row simply takes it.
+    // The store is held by the run's share of it, so "the run finished" means every
+    // job of that share did.
     await prisma.productImportRun.update({
       where: { id: runId },
+      data: { status: 'COMPLETED' },
+    });
+    await prisma.productImportJob.updateMany({
+      where: { importRunId: runId },
       data: { status: 'COMPLETED' },
     });
     expect(await prisma.storeLock.findUnique({ where: { storeId: 'store1' } })).not.toBeNull();
