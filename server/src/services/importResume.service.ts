@@ -158,9 +158,15 @@ export async function resumeStore(store: ResumableStore): Promise<ResumeSummary>
       // onto a store another colleague is actively using. StoreBusyError is thrown,
       // the catch below fails the row, and the user is told to re-run it — which is
       // the honest outcome, and far better than the collision.
+      //
+      // Inside a transaction, like every other acquire: the advisory lock that
+      // guards acquire's check-then-upsert is transaction-scoped, so on the bare
+      // client it would be released the instant it was taken.
       const lockStoreId = resolveStoreId(row.storeId ?? undefined);
       if (lockStoreId) {
-        await acquireStoreLock(prisma, lockStoreId, store.lockOwner(row));
+        await prisma.$transaction((tx) =>
+          acquireStoreLock(tx, lockStoreId, store.lockOwner(row)),
+        );
       }
 
       // Nothing on the shop is consulted: see decideResume for why the shop

@@ -18,6 +18,10 @@ What differs: scheduled tasks instead of containers, native PostgreSQL instead o
 `postgres:16`, and ports bound per `BIND_ADDR` + a host firewall rule instead of a
 Docker port mapping.
 
+`BIND_ADDR` defaults to `127.0.0.1` when `deploy.env` does not set it — the same
+fail-closed default as the compose stack. A box that serves the LAN (HELIOS-SERVER
+does) must set it explicitly; `Register-Instances.ps1` warns when it is missing.
+
 ## ⚠ There is no authentication
 
 Not "not configured" — it does not exist in the code on `main`. Anyone who can reach
@@ -51,7 +55,7 @@ different deployment shape than this one.
 |---|---|
 | `C:\apps\qa-shopify-tool` | Git checkout + build output. Disposable; `git reset --hard` runs against it. |
 | `C:\ProgramData\qa-shopify-tool\deploy.env` | **Credentials.** Deliberately outside the checkout. |
-| `C:\ProgramData\qa-shopify-tool\logs\se*.log` | Per-instance stdout/stderr, rolled at 20 MB. |
+| `C:\ProgramData\qa-shopify-tool\logs\se*.log` | Per-instance stdout/stderr, rolled to `.1` at 20 MB (checked every 30 s and before every restart). |
 | Task Scheduler `\QA Shopify Tool\` | One `qa-shopify-se*` task per instance. |
 
 `deploy.env` is `deploy/.env` — the same format, the same keys. It sits outside the
@@ -84,6 +88,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Deploy-QaTool.ps1
 
 Pulls `main`, **stops every instance**, rebuilds both halves, runs
 `prisma migrate deploy` once, then starts them again.
+
+**If the deploy fails once the server build has started** (server `npm ci`,
+`prisma generate`, `tsc`, or the migration), the instances are **left stopped and
+their tasks disabled**, with a red banner naming the commit that was running before.
+That is deliberate: restarting them would run new code against an old or partially
+migrated schema. Check `npx.cmd prisma migrate status` from `server\`, then either fix
+forward and re-run, or roll back the code:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Deploy-QaTool.ps1 -Commit <previous sha>
+```
+
+A failure in the client build alone still restarts the instances on the old server
+build, which is untouched at that point.
 
 Everything is down for the whole rebuild — a minute or two, not a rolling restart.
 That is forced: Windows will not let `npm ci` replace
@@ -162,7 +180,8 @@ Get-ScheduledTask -TaskPath '\QA Shopify Tool\' |
 
 # health
 3101..3111 | ForEach-Object {
-  try   { "$_ -> $((Invoke-RestMethod "http://127.0.0.1:$_/api/health").status)" }
+  # /api/health answers {"ok":true}
+  try   { "$_ -> $(if ((Invoke-RestMethod "http://127.0.0.1:$_/api/health").ok) { 'ok' } else { 'NOT OK' })" }
   catch { "$_ -> DOWN" }
 }
 

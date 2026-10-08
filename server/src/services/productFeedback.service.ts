@@ -1,5 +1,5 @@
 import prisma from '../db/prisma';
-import { storeLabeller } from './importFeedback.service';
+import { BatchStore, batchStoresOf, storeLabeller } from './importFeedback.service';
 
 // Without a validator there's nothing to compare against, so there is no
 // four-bucket report. The feedback IS the import truth: total / accepted /
@@ -47,6 +47,9 @@ export interface ProductImportFeedback {
   // Per-store accepted/rejected split (one entry per store for a batch; a single
   // entry for a single-store run).
   perStore: PerStoreResult[];
+  // Twin of ImportFeedback.batchStores: the run's stores from its job rows, known
+  // before any job finishes. Empty for a single-store run.
+  batchStores: BatchStore[];
 }
 
 // Shopify reports a missing metafield DEFINITION as field "type", code
@@ -129,7 +132,7 @@ export async function getProductImportFeedback(
   // every result row of a large import. See the customer twin.
   const run = await prisma.productImportRun.findUnique({
     where: { id: importRunId },
-    include: { batchJobs: { select: { storeId: true, shopDomain: true } } },
+    include: { batchJobs: { select: { storeId: true, shopDomain: true, batchIndex: true } } },
   });
   if (!run) return null;
 
@@ -176,5 +179,6 @@ export async function getProductImportFeedback(
     createdAt: run.createdAt,
     rejectionGroups: rejected > 0 ? await rejectionGroupsFor(importRunId) : [],
     perStore,
+    batchStores: batchStoresOf(run.batchJobs),
   };
 }

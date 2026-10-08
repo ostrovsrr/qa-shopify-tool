@@ -54,7 +54,12 @@ $cfg = & (Join-Path $PSScriptRoot 'Get-DeployConfig.ps1') -Path $ConfigFile
 if ($cfg.Instances.Count -eq 0) { throw "No SHOPIFY_STORES_SE* entries with values in $ConfigFile" }
 
 Write-Host "Instances found in config: $($cfg.Instances -join ', ')"
-if ($cfg.BindAddr -eq '0.0.0.0') {
+if (-not $cfg.BindAddrSet) {
+  # The default is loopback (fail closed). Correct for a box nobody else should
+  # reach, and a surprise on one that serves the LAN: the instances will answer only
+  # on this machine, whatever the firewall rule below allows.
+  Write-Warning "BIND_ADDR is not set in $ConfigFile -- instances and the status page bind to 127.0.0.1 and are reachable from THIS machine only. If teammates connect over the network, set BIND_ADDR explicitly (e.g. this host's LAN address, or 0.0.0.0) and re-run."
+} elseif ($cfg.BindAddr -eq '0.0.0.0') {
   Write-Warning 'BIND_ADDR=0.0.0.0 -- the app itself accepts connections on every interface. The firewall rule below is then the ONLY thing limiting who reaches an app with no authentication.'
 }
 
@@ -123,7 +128,7 @@ foreach ($instance in $cfg.Instances) {
 }
 
 
-# ── The status page ─────────────────────────────────────────────────────────
+# -- The status page ---------------------------------------------------------
 #
 # Read-only fleet view on $MonitorPort, registered exactly like an instance so it
 # comes back on boot and restarts itself. It is the answer to "is it up, and has it
@@ -161,7 +166,7 @@ if (-not $SkipMonitor) {
 }
 
 
-# ── PostgreSQL watchdog ─────────────────────────────────────────────────────
+# -- PostgreSQL watchdog -----------------------------------------------------
 #
 # The database is the dependency all instances share, and nothing restarted it.
 # Windows service recovery does not help: the service runs `pg_ctl runservice`,
@@ -195,7 +200,7 @@ if (-not $SkipPostgresWatchdog) {
   Write-Host 'registered qa-shopify-postgres-watchdog (every 1 min)'
 }
 
-# ── Firewall ────────────────────────────────────────────────────────────────
+# -- Firewall ----------------------------------------------------------------
 if (-not $SkipFirewall) {
   $ruleName = 'QA Shopify Tool (instances)'
   Remove-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue

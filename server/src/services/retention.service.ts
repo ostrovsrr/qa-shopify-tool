@@ -25,10 +25,12 @@ import { TERMINAL_BULK_STATUSES } from './shopifyBulk';
 // would not just lose history, it would lose the ability to tell the truth about an
 // import that is happening right now.
 //
-// So: purge the SOURCE ROWS (which are the PII) and keep the AGGREGATE RESULTS
-// (issue counts, accepted/rejected per row number — no personal data). The QA
-// history stays useful; the personal data does not survive. And a run with any
-// non-terminal import is never touched.
+// So: purge the SOURCE ROWS (which are the PII), strip the values the pre-check
+// findings quote from them (currentValue, and messages like 'Email "..." appears in
+// rows' — see redactCustomerIssues), and keep the AGGREGATE RESULTS: issue counts,
+// each finding's row number, type and column, and accepted/rejected per row number
+// with Shopify's own reason text. The QA history stays useful; the uploaded values do
+// not survive in it. And a run with any non-terminal import is never touched.
 //
 // ── ALIGNMENT, OR THIS IS THEATRE ───────────────────────────────────────────
 //
@@ -66,6 +68,47 @@ export interface PurgeSummary {
   productUploads: number;
   /** Runs that were old enough but are still being imported — deliberately spared. */
   skippedInFlight: number;
+}
+
+/** What a purged finding says instead of its original, value-quoting message. */
+export const REDACTED_ISSUE_NOTE =
+  'The details quoted the uploaded data, so they were removed with it under the data-retention policy.';
+
+// ── THE FINDINGS QUOTE THE DATA ─────────────────────────────────────────────
+//
+// Deleting the source rows is not enough on its own: a finding carries the value
+// it flagged. currentValue is the raw cell (an email, a phone, a Note), and many
+// messages embed it — 'Email "jane@example.com" appears in rows: 2, 9', 'Phone
+// number "..." is too short'. Left alone, the issues table is a second copy of
+// exactly the PII the purge exists to remove.
+//
+// So every finding of a purged run loses currentValue, and its message is
+// rewritten to a value-free form built from its type and column — which is what
+// the history needs ("InvalidEmail in Email") and carries no personal data. The
+// rewrite is uniform rather than "only the messages that quote something": a rule
+// added later that quotes a value must not leak because nobody remembered to list
+// it here. A suggestedFix that quotes anything goes too; the static ones stay.
+//
+// Raw SQL because the new message is computed per row from that row's own columns,
+// which Prisma's updateMany cannot express. It returns a PrismaPromise, so it runs
+// inside the purge's transaction: rows and findings go together or not at all.
+
+function redactCustomerIssues(validationRunId: string) {
+  return prisma.$executeRaw`
+    UPDATE "validation_issues"
+    SET "currentValue" = NULL,
+        "message" = "issueType" || ' in ' || "columnName" || '. ' || ${REDACTED_ISSUE_NOTE},
+        "suggestedFix" = CASE WHEN "suggestedFix" LIKE '%"%' THEN NULL ELSE "suggestedFix" END
+    WHERE "validationRunId" = ${validationRunId}`;
+}
+
+function redactProductIssues(uploadRunId: string) {
+  return prisma.$executeRaw`
+    UPDATE "product_validation_issues"
+    SET "currentValue" = NULL,
+        "message" = "issueType" || ' in ' || "columnName" || '. ' || ${REDACTED_ISSUE_NOTE},
+        "suggestedFix" = CASE WHEN "suggestedFix" LIKE '%"%' THEN NULL ELSE "suggestedFix" END
+    WHERE "uploadRunId" = ${uploadRunId}`;
 }
 
 function cutoff(): Date {
@@ -134,6 +177,9 @@ export async function purgeExpiredPii(): Promise<PurgeSummary> {
         where: { id: run.id },
         data: { piiPurgedAt: new Date(), affectedRows: [] },
       }),
+      // The findings quote the data they flag: currentValue holds the raw email /
+      // phone / field, and messages embed it ('Email "x@y" appears in rows: 2, 9').
+      redactCustomerIssues(run.id),
     ]);
     summary.validationRuns++;
   }
@@ -155,6 +201,8 @@ export async function purgeExpiredPii(): Promise<PurgeSummary> {
         where: { id: upload.id },
         data: { piiPurgedAt: new Date() },
       }),
+      // The twin of the customer redaction: product findings quote cell values too.
+      redactProductIssues(upload.id),
     ]);
     summary.productUploads++;
   }

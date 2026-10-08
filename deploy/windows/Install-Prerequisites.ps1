@@ -33,7 +33,7 @@ $cfg = & (Join-Path $PSScriptRoot 'Get-DeployConfig.ps1') -Path $ConfigFile
 $pgPassword = $cfg.Values['POSTGRES_PASSWORD']
 if ([string]::IsNullOrWhiteSpace($pgPassword)) { throw "POSTGRES_PASSWORD is not set in $ConfigFile" }
 
-# ── Power ───────────────────────────────────────────────────────────────────
+# -- Power -------------------------------------------------------------------
 #
 # This is a desktop OS. Its default power plan sleeps the machine after 30 idle
 # minutes, at which point the box drops off the network and every teammate's tab
@@ -44,7 +44,7 @@ powercfg /change hibernate-timeout-ac 0
 powercfg /change monitor-timeout-ac 15
 Write-Host 'AC standby and hibernate disabled.'
 
-# ── PostgreSQL ──────────────────────────────────────────────────────────────
+# -- PostgreSQL --------------------------------------------------------------
 Write-Step 'PostgreSQL'
 $pgService = Get-Service -Name "postgresql*" -ErrorAction SilentlyContinue | Select-Object -First 1
 
@@ -74,7 +74,7 @@ Set-Service -Name $pgService.Name -StartupType Automatic
 if ($pgService.Status -ne 'Running') { Start-Service -Name $pgService.Name }
 
 
-# ── Keep PostgreSQL off the network ─────────────────────────────────────────
+# -- Keep PostgreSQL off the network -----------------------------------------
 #
 # The EDB installer ships listen_addresses = '*'. On a host whose firewall
 # profile is disabled -- which is the case here -- that puts the superuser
@@ -95,30 +95,58 @@ if (Test-Path -LiteralPath $pgConf) {
   }
 }
 
-# ── Database ────────────────────────────────────────────────────────────────
+# -- Database ----------------------------------------------------------------
 Write-Step "Database '$Database'"
 $psql = "C:\Program Files\PostgreSQL\$PostgresVersion\bin\psql.exe"
 if (-not (Test-Path -LiteralPath $psql)) { throw "psql not found at $psql" }
+
+# psql's stderr must NOT be fatal. Under $ErrorActionPreference = 'Stop', PowerShell
+# turns a native exe's redirected stderr into a terminating NativeCommandError -- so
+# the readiness probe below used to ABORT on its first failed attempt ("connection
+# refused" while the postmaster starts) instead of retrying, and the intended timeout
+# message never appeared. Run psql under a local 'Continue', capture stderr as plain
+# text, and judge by the exit code. Same pattern as Start-Instance.ps1.
+function Invoke-Psql {
+  param([string[]]$Arguments)
+  $previousEap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $out  = @(& $psql @Arguments 2>&1 | ForEach-Object { "$_" })
+    $code = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousEap
+  }
+  [pscustomobject]@{ ExitCode = $code; Output = $out }
+}
+
+$psqlConn = @('-U', 'postgres', '-h', '127.0.0.1', '-p', '5432')
 
 $env:PGPASSWORD = $pgPassword
 try {
   # Wait for the server to accept connections -- the service reports Running before
   # the postmaster is ready, and creating the database a second too early fails.
   $ready = $false
+  $last  = $null
   foreach ($attempt in 1..30) {
-    & $psql -U postgres -h 127.0.0.1 -p 5432 -tAc 'SELECT 1' *> $null
-    if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+    $last = Invoke-Psql ($psqlConn + @('-tAc', 'SELECT 1'))
+    if ($last.ExitCode -eq 0) { $ready = $true; break }
     Start-Sleep -Seconds 2
   }
-  if (-not $ready) { throw 'PostgreSQL did not accept connections within 60s.' }
+  if (-not $ready) {
+    throw "PostgreSQL did not accept connections within 60s. Last psql error: $(($last.Output -join ' ').Trim())"
+  }
 
-  $exists = & $psql -U postgres -h 127.0.0.1 -p 5432 -tAc `
-    "SELECT 1 FROM pg_database WHERE datname = '$Database'"
-  if ($exists -eq '1') {
+  $exists = Invoke-Psql ($psqlConn + @('-tAc', "SELECT 1 FROM pg_database WHERE datname = '$Database'"))
+  if ($exists.ExitCode -ne 0) {
+    throw "Checking for database '$Database' failed (exit $($exists.ExitCode)): $(($exists.Output -join ' ').Trim())"
+  }
+  if ((($exists.Output -join '').Trim()) -eq '1') {
     Write-Host "Database '$Database' already exists -- left alone."
   } else {
-    & $psql -U postgres -h 127.0.0.1 -p 5432 -c "CREATE DATABASE `"$Database`"" | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "CREATE DATABASE failed with exit code $LASTEXITCODE" }
+    $create = Invoke-Psql ($psqlConn + @('-c', "CREATE DATABASE `"$Database`""))
+    if ($create.ExitCode -ne 0) {
+      throw "CREATE DATABASE failed with exit code $($create.ExitCode): $(($create.Output -join ' ').Trim())"
+    }
     Write-Host "Created database '$Database'."
   }
 } finally {

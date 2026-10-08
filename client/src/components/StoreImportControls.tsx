@@ -13,12 +13,16 @@ import {
   runBatchImport,
   runImport,
 } from '../api/productApi';
+import { describeCleanup } from '../api/cleanupPoller';
+import { isTerminal, useImportRunPoll } from '../hooks/useImportRunPoll';
 import {
+  CleanupStoreOutcome,
   ProductImportFeedback,
   ShopifyHealth,
   ShopifyStore,
   StoreProductStats,
 } from '../types';
+import { resolveRunStoreIds } from '../utils/runStores';
 import { shopifyAdminUrl } from '../utils/shopifyAdmin';
 import { ProductResultsView } from './ProductResultsView';
 
@@ -27,11 +31,6 @@ interface Props {
   productCount: number;
 }
 
-// Shopify bulk-op statuses that mean the import has stopped advancing.
-const TERMINAL_STATUSES = ['COMPLETED', 'FAILED', 'CANCELED', 'EXPIRED'];
-const isTerminal = (status: string): boolean => TERMINAL_STATUSES.includes(status);
-
-const POLL_INTERVAL_MS = 3000;
 // How long Shopify's tag-filtered counts take to catch up with a create or delete
 // (seen: several seconds). One re-read after this settles the store card.
 const STATS_SETTLE_MS = 6000;
@@ -88,9 +87,15 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
         : [];
   const displayedRef = useRef<string[]>(displayedStoreIds);
   displayedRef.current = displayedStoreIds;
+  // See the customer twin: the upload on screen now, for discarding late answers.
+  const uploadIdRef = useRef(uploadId);
+  uploadIdRef.current = uploadId;
 
   const storeLabel = (storeId: string): string =>
     stores.find((s) => s.id === storeId)?.label ?? storeId;
+  // A cleanup outcome's display name: the store's label where we know it.
+  const storeLabelFor = (storeId: string | null, shop: string): string =>
+    stores.find((s) => (storeId ? s.id === storeId : s.shop === shop))?.label ?? shop;
 
   // ── load stores ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -103,7 +108,8 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
           current.length > 0 ? current : data[0] ? [data[0].id] : [],
         );
       })
-      .catch(() => active && setError('Could not load Shopify test stores.'));
+      // The server's own reason + hint, not a generic line (see ImportPanel).
+      .catch((err) => active && setError(errMessage(err, 'Could not load Shopify test stores.')));
     return () => {
       active = false;
     };
@@ -145,9 +151,14 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
   useEffect(() => {
     let active = true;
     const load = () =>
-      fetchBusyStores().then(
-        (busy) => active && setStoresInUse(Object.fromEntries(busy.map((b) => [b.storeId, b.operation]))),
-      );
+      fetchBusyStores()
+        .then(
+          (busy) =>
+            active && setStoresInUse(Object.fromEntries(busy.map((b) => [b.storeId, b.operation]))),
+        )
+        // Decoration only: no unhandled rejection every BUSY_POLL_MS while the
+        // server is down. Keep the last known state.
+        .catch(() => undefined);
     void load();
     const timer = window.setInterval(() => void load(), BUSY_POLL_MS);
     return () => {
@@ -172,77 +183,37 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
   }, [uploadId]);
 
   // ── reconcile-on-poll while non-terminal ──────────────────────────────────────
-  const pollStatus = feedback?.status;
-  const pollRunId = feedback?.importRunId;
-  useEffect(() => {
-    if (!pollRunId || !pollStatus || isTerminal(pollStatus)) return;
-    let active = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-
-    const poll = async (): Promise<void> => {
-      try {
-        const next = await fetchImportFeedback(pollRunId);
-        if (!active) return;
-        setFeedback(next);
-        if (isTerminal(next.status)) {
-          // Deliberately NOT gated on `active`: setFeedback above flips pollStatus
-          // to a terminal value, React tears this effect down, and `active` is
-          // already false by the time the stats request resolves. Gating here
-          // silently dropped the refresh, so the card kept the pre-import counts
-          // and the count-driven Clean QA button stayed disabled.
-          for (const id of displayedRef.current) void refreshStoreStats(id);
-        } else {
-          // Schedule only after this request finishes so a slow reconcile never
-          // overlaps another request for the same import run.
-          timer = setTimeout(poll, POLL_INTERVAL_MS);
-        }
-      } catch (err) {
-        if (!active) return;
-        setError(errMessage(err, 'Failed to check import status.'));
-      }
-    };
-
-    timer = setTimeout(poll, POLL_INTERVAL_MS);
-    return () => {
-      active = false;
-      if (timer) clearTimeout(timer);
-    };
-  }, [pollRunId, pollStatus]);
+  // Twin of ImportPanel: a failed poll is retried with backoff instead of ending
+  // polling for good (see useImportRunPoll).
+  const pollError = useImportRunPoll({
+    runId: feedback?.importRunId,
+    status: feedback?.status,
+    fetchFeedback: fetchImportFeedback,
+    onUpdate: setFeedback,
+    // Deliberately not gated on the poll still being active — see ImportPanel.
+    onTerminal: () => {
+      for (const id of displayedRef.current) void refreshStoreStats(id);
+    },
+    describeError: (err) => errMessage(err, 'no response'),
+  });
 
   // ── point selection at the run reopened from History ──────────────────────────
-  const feedbackStoreId = feedback?.storeId ?? null;
-  const feedbackShopDomain = feedback?.shopDomain;
-  const feedbackStoreKey = (feedback?.perStore ?? [])
-    .map((ps) => ps.storeId ?? ps.shopDomain)
-    .join(',');
+  // See resolveRunStoreIds: a RUNNING parallel run has no perStore yet, so its
+  // stores come from the batch jobs.
+  const runStoreKey = resolveRunStoreIds(feedback, stores).join(',');
   useEffect(() => {
-    const resolve = (storeId: string | null, shopDomain?: string) =>
-      storeId ?? stores.find((s) => s.shop === shopDomain)?.id;
-
-    // A parallel run spans several stores, and feedback.shopDomain is their
-    // domains joined with ", " — it matches no single store, so the single-store
-    // branch below silently left the DEFAULT store selected next to results for
-    // stores the run never touched, with a live Clean QA aimed at it. Restore
-    // the real selection from perStore instead.
-    const parallel = (feedback?.perStore ?? [])
-      .map((ps) => resolve(ps.storeId, ps.shopDomain))
-      .filter((id): id is string => !!id);
-    if (parallel.length > 1) {
-      setSelectedStoreIds(parallel);
+    if (!runStoreKey) return;
+    const ids = runStoreKey.split(',');
+    if (ids.length > 1) {
+      setSelectedStoreIds(ids);
       setImportMode('parallel');
       setParallelPhase('review');
-      return;
-    }
-
-    if (!feedbackStoreId && !feedbackShopDomain) return;
-    const target = resolve(feedbackStoreId, feedbackShopDomain);
-    if (target) {
-      setSelectedStoreIds([target]);
+    } else {
+      setSelectedStoreIds(ids);
       setImportMode('single');
       setParallelPhase('select');
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [feedbackStoreId, feedbackShopDomain, feedbackStoreKey, stores]);
+  }, [runStoreKey]);
 
   // ── derived flags ─────────────────────────────────────────────────────────────
   const polling = !!feedback && !isTerminal(feedback.status);
@@ -251,7 +222,8 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
   const busy = running || polling;
   const showResults = !!feedback && isTerminal(feedback.status) && feedback.totalProducts > 0;
 
-  const primaryHealthOk = primaryStoreId ? storeHealth[primaryStoreId]?.ok !== false : false;
+  // Only a store whose health check said ok — pending or unknown is not ready.
+  const primaryHealthOk = primaryStoreId ? storeHealth[primaryStoreId]?.ok === true : false;
   const canImportNow = inParallelReview
     ? selectedStoreIds.length >= 2
     : importMode === 'single' && selectedStoreIds.length === 1 && primaryHealthOk;
@@ -288,6 +260,7 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
 
   const handleRun = async () => {
     if (!canImportNow) return;
+    const startedFor = uploadId;
     setRunning(true);
     setError('');
     setNotice('');
@@ -298,8 +271,11 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
         importMode === 'parallel'
           ? await runBatchImport(uploadId, selectedStoreIds)
           : await runImport(uploadId, selectedStoreIds[0]);
+      // Not keyed by upload: an answer for an upload no longer on screen is dropped.
+      if (data.uploadId !== uploadIdRef.current) return;
       setFeedback(data);
     } catch (err) {
+      if (startedFor !== uploadIdRef.current) return;
       setError(errMessage(err, 'Import failed.'));
     } finally {
       setRunning(false);
@@ -340,7 +316,10 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
     setNotice('');
     try {
       const res = await cleanupQaProducts(storeId);
-      setNotice(`Cleaned ${res.deleted} of ${res.found} qa-import product(s) from ${res.shop}.`);
+      // Per-store wording, "still deleting" rather than "failed" — see ImportPanel.
+      const { notice: n, error: e } = describeCleanup(res.stores, 'product', storeLabelFor);
+      setNotice(n);
+      setError(e);
       await refreshStoreStats(storeId);
     } catch (err) {
       setError(errMessage(err, 'Cleanup failed.'));
@@ -363,14 +342,25 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
     // each store is a separate shop, so their (bulk) deletes run concurrently
     // instead of store-after-store.
     setCleaningStores((prev) => new Set([...prev, ...ids]));
-    const results = await Promise.all(
-      ids.map(async (id) => {
+    const outcomes = await Promise.all(
+      ids.map(async (id): Promise<CleanupStoreOutcome[]> => {
         try {
           const res = await cleanupQaProducts(id);
           await refreshStoreStats(id);
-          return { deleted: res.deleted, error: null as string | null };
+          return res.stores;
         } catch (err) {
-          return { deleted: 0, error: errMessage(err, `Cleanup failed for ${storeLabel(id)}.`) };
+          // This store's own failure, reported next to the stores that were
+          // cleaned — never folded into a "Cleaned N across all" line.
+          return [
+            {
+              storeId: id,
+              shop: storeLabel(id),
+              status: 'failed',
+              found: 0,
+              deleted: 0,
+              error: errMessage(err, 'cleanup failed.'),
+            },
+          ];
         } finally {
           setCleaningStores((prev) => {
             const next = new Set(prev);
@@ -380,10 +370,9 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
         }
       }),
     );
-    const totalDeleted = results.reduce((n, r) => n + r.deleted, 0);
-    const failures = results.map((r) => r.error).filter((e): e is string => e !== null);
-    if (failures.length > 0) setError(failures.join(' | '));
-    setNotice(`Cleaned ${totalDeleted} qa-import product(s) across ${ids.length} store(s).`);
+    const { notice: n, error: e } = describeCleanup(outcomes.flat(), 'product', storeLabelFor);
+    setNotice(n);
+    setError(e);
   };
 
   const handleCleanupImportRun = async () => {
@@ -400,7 +389,10 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
     setNotice('');
     try {
       const res = await cleanupImportRun(feedback.importRunId, primaryStoreId);
-      setNotice(`Deleted ${res.deleted} of ${res.found} product(s) for this import (${res.shop}).`);
+      // Per store: cleaned, still deleting, or failed with the server's reason.
+      const { notice: n, error: e } = describeCleanup(res.stores, 'product', storeLabelFor);
+      setNotice(n);
+      setError(e);
       await Promise.all(displayedStoreIds.map((id) => refreshStoreStats(id)));
     } catch (err) {
       setError(errMessage(err, 'Cleanup failed.'));
@@ -489,11 +481,13 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
               you want to clean up — the count still reads 0 and the button was
               dead for the rest of the session. cleanStore re-reads the store to
               find what to delete and is confirm-gated, so a no-op click is cheap;
-              a stranded user is not. */}
+              a stranded user is not. It IS disabled while an import is running:
+              it deletes by tag across the whole store, including what the
+              running import is creating right now. */}
           <button
             className="btn btn-outline btn-sm"
             onClick={() => cleanStore(storeId)}
-            disabled={cleaning}
+            disabled={cleaning || busy}
           >
             {cleaning ? 'Cleaning…' : 'Clean QA'}
           </button>
@@ -625,7 +619,7 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
                   <button
                     className="btn btn-outline btn-sm"
                     onClick={cleanAllSelected}
-                    disabled={cleaningStores.size > 0}
+                    disabled={cleaningStores.size > 0 || busy}
                   >
                     Clean QA on all selected
                   </button>
@@ -644,6 +638,8 @@ export function StoreImportControls({ uploadId, productCount }: Props) {
       )}
 
       {error && <div className="error-banner">{error}</div>}
+      {/* Kept apart from `error`: it clears itself on the next good poll. */}
+      {polling && pollError && <div className="warning-banner">{pollError}</div>}
       {/* Transient status (cleanup results etc.) — kept lighter than the success
           headline so it doesn't compete with the run's hero number. Dismissible. */}
       {notice && (

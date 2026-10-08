@@ -68,13 +68,37 @@ export class StoreBusyError extends Error {
   }
 }
 
-/** Prisma client or an interactive-transaction handle — acquire runs inside the
- *  caller's transaction so taking the lock and pre-persisting the run are atomic. */
+/** Prisma client or an interactive-transaction handle, for read-only lookups.
+ *  Acquiring takes a transaction handle only — see acquireStoreLock. */
 type Db = Prisma.TransactionClient | typeof prisma;
 
 function ttlFrom(now: number): Date {
   return new Date(now + STORE_LOCK_TTL_MS);
 }
+
+/** What a lock's holder row says about whether anything is still running. */
+interface HolderRow {
+  id: string;
+  status: string;
+  submitAttemptedAt: Date | null;
+  bulkOperationId: string | null;
+}
+
+type HolderVerdict =
+  /** The holder is still working. */
+  | 'live'
+  /** Nothing is running: the holder is terminal or gone, or the lock expired. */
+  | 'finished'
+  /** The holder FAILED while submitting, so its bulk op may or may not be running
+   *  at Shopify. Honoured until the lock's TTL — see judgeHolder. */
+  | 'outcome-unknown';
+
+const HOLDER_SELECT = {
+  id: true,
+  status: true,
+  submitAttemptedAt: true,
+  bulkOperationId: true,
+} as const;
 
 /**
  * Is the row that holds this lock still actually working?
@@ -85,37 +109,75 @@ function ttlFrom(now: number): Date {
  * finds a lock held by an already-terminal (or deleted) row simply takes it. The
  * explicit release is then an optimization — it frees the store immediately and lets
  * us name the holder in the error — not a correctness requirement.
+ *
+ * ONE EXCEPTION. A holder that is FAILED with submitAttemptedAt set and no
+ * bulkOperationId failed WHILE SUBMITTING: the mutation may have reached Shopify and
+ * be running right now, and nothing the shop exposes says which op is ours (see
+ * decideResume in importResume.service.ts). Its row is terminal but the store is not
+ * provably idle, so the lock is honoured until its TTL rather than stolen the moment
+ * the row turned FAILED. The paths that end in that state (an ambiguous cleanup
+ * submit, resume failing an interrupted row) deliberately leave the lock in place.
  */
-async function holderIsFinished(db: Db, lock: StoreLock): Promise<boolean> {
-  if (lock.expiresAt.getTime() <= Date.now()) return true;
-
-  const id = lock.ownerId;
-  const row = await (async (): Promise<{ status: string } | null> => {
-    switch (lock.ownerType as StoreLockOwnerType) {
-      case 'IMPORT_RUN':
-        return db.importRun.findUnique({ where: { id }, select: { status: true } });
-      case 'IMPORT_JOB':
-        return db.importBatchJob.findUnique({ where: { id }, select: { status: true } });
-      case 'PRODUCT_IMPORT_RUN':
-        return db.productImportRun.findUnique({ where: { id }, select: { status: true } });
-      case 'PRODUCT_IMPORT_JOB':
-        return db.productImportJob.findUnique({ where: { id }, select: { status: true } });
-      case 'CLEANUP_RUN':
-        return db.cleanupRun.findUnique({ where: { id }, select: { status: true } });
-      default:
-        // Unknown owner type (an old row from a future/older schema): don't let it
-        // hold a store hostage.
-        return null;
-    }
-  })();
-
-  // Owner row gone (the run was deleted) → nothing is running. Owner terminal →
-  // nothing is running.
-  if (!row) return true;
-  return TERMINAL_BULK_STATUSES.includes(row.status);
+function judgeHolder(lock: StoreLock, row: HolderRow | undefined): HolderVerdict {
+  if (lock.expiresAt.getTime() <= Date.now()) return 'finished';
+  // Owner row gone (the run was deleted, or an unknown owner type from an older or
+  // newer schema) → nothing is running; don't let it hold a store hostage.
+  if (!row) return 'finished';
+  if (!TERMINAL_BULK_STATUSES.includes(row.status)) return 'live';
+  if (row.status === 'FAILED' && row.submitAttemptedAt && !row.bulkOperationId) {
+    return 'outcome-unknown';
+  }
+  return 'finished';
 }
 
-function busyMessage(lock: StoreLock): string {
+const holderKey = (ownerType: string, ownerId: string): string => `${ownerType}:${ownerId}`;
+
+/**
+ * The holder rows of many locks at once: ONE query per owner table, never one per
+ * lock. liveStoreLocks runs on every 15s client poll and every status-page load, so a
+ * per-lock lookup there was an N+1 on the hottest read in the app.
+ */
+async function holderRows(db: Db, locks: StoreLock[]): Promise<Map<string, HolderRow>> {
+  const idsOf = (type: StoreLockOwnerType): string[] =>
+    locks.filter((l) => l.ownerType === type).map((l) => l.ownerId);
+  const lookup = async (
+    type: StoreLockOwnerType,
+    find: (ids: string[]) => Promise<HolderRow[]>,
+  ): Promise<[StoreLockOwnerType, HolderRow[]]> => {
+    const ids = idsOf(type);
+    return [type, ids.length === 0 ? [] : await find(ids)];
+  };
+
+  const groups = await Promise.all([
+    lookup('IMPORT_RUN', (ids) =>
+      db.importRun.findMany({ where: { id: { in: ids } }, select: HOLDER_SELECT }),
+    ),
+    lookup('IMPORT_JOB', (ids) =>
+      db.importBatchJob.findMany({ where: { id: { in: ids } }, select: HOLDER_SELECT }),
+    ),
+    lookup('PRODUCT_IMPORT_RUN', (ids) =>
+      db.productImportRun.findMany({ where: { id: { in: ids } }, select: HOLDER_SELECT }),
+    ),
+    lookup('PRODUCT_IMPORT_JOB', (ids) =>
+      db.productImportJob.findMany({ where: { id: { in: ids } }, select: HOLDER_SELECT }),
+    ),
+    lookup('CLEANUP_RUN', (ids) =>
+      db.cleanupRun.findMany({ where: { id: { in: ids } }, select: HOLDER_SELECT }),
+    ),
+  ]);
+
+  const byKey = new Map<string, HolderRow>();
+  for (const [type, rows] of groups) {
+    for (const row of rows) byKey.set(holderKey(type, row.id), row);
+  }
+  return byKey;
+}
+
+function busyMessage(lock: StoreLock, verdict: HolderVerdict): string {
+  if (verdict === 'outcome-unknown') {
+    const minutes = Math.max(1, Math.ceil((lock.expiresAt.getTime() - Date.now()) / 60_000));
+    return `Store "${lock.storeId}" may still be busy: ${lock.operation} stopped while submitting to Shopify and may still be running there. The store frees itself in ~${minutes} min, or pick another store.`;
+  }
   const minutes = Math.max(1, Math.round((Date.now() - lock.acquiredAt.getTime()) / 60_000));
   return `Store "${lock.storeId}" is busy: ${lock.operation} has been running for ~${minutes} min. Wait for it to finish, or pick another store.`;
 }
@@ -133,21 +195,39 @@ function busyMessage(lock: StoreLock): string {
  * Re-entrant: an owner that already holds the store's lock re-acquires it happily.
  * That is what lets resume-on-boot and a relaunch re-take a lock they may still be
  * holding from before the crash.
+ *
+ * MUST be called with an interactive-transaction client (prisma.$transaction(tx =>
+ * ...)). Called on the bare client, every statement autocommits: the advisory lock
+ * is released the instant it is taken and the check-then-upsert below is unguarded.
+ * The type cannot express that (a PrismaClient is structurally a TransactionClient),
+ * so it is enforced at runtime — the root client has $transaction, a transaction
+ * handle does not.
  */
 export async function acquireStoreLock(
-  db: Db,
+  tx: Prisma.TransactionClient,
   storeId: string,
   owner: StoreLockOwner,
 ): Promise<void> {
-  await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`store-lock:${storeId}`}))`;
+  if (typeof (tx as { $transaction?: unknown }).$transaction === 'function') {
+    throw new Error(
+      'acquireStoreLock must run inside prisma.$transaction: on the bare client the advisory lock guards nothing.',
+    );
+  }
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`store-lock:${storeId}`}))`;
 
-  const existing = await db.storeLock.findUnique({ where: { storeId } });
-  if (existing && existing.ownerId !== owner.ownerId && !(await holderIsFinished(db, existing))) {
-    throw new StoreBusyError(busyMessage(existing), [storeId]);
+  const existing = await tx.storeLock.findUnique({ where: { storeId } });
+  if (existing && existing.ownerId !== owner.ownerId) {
+    const verdict = judgeHolder(
+      existing,
+      (await holderRows(tx, [existing])).get(holderKey(existing.ownerType, existing.ownerId)),
+    );
+    if (verdict !== 'finished') {
+      throw new StoreBusyError(busyMessage(existing, verdict), [storeId]);
+    }
   }
 
   const now = Date.now();
-  await db.storeLock.upsert({
+  await tx.storeLock.upsert({
     where: { storeId },
     create: {
       storeId,
@@ -181,12 +261,12 @@ export async function acquireStoreLock(
  * locks; a consistent global order makes that impossible.
  */
 export async function acquireStoreLocks(
-  db: Db,
+  tx: Prisma.TransactionClient,
   storeIds: string[],
   ownerFor: (storeId: string) => StoreLockOwner,
 ): Promise<void> {
   for (const storeId of [...new Set(storeIds)].sort()) {
-    await acquireStoreLock(db, storeId, ownerFor(storeId));
+    await acquireStoreLock(tx, storeId, ownerFor(storeId));
   }
 }
 
@@ -229,10 +309,11 @@ export async function busyStores(): Promise<
  *  page uses `expiresAt` to tell a watched operation from one nobody is polling. */
 export async function liveStoreLocks(): Promise<StoreLock[]> {
   const locks = await prisma.storeLock.findMany();
-  const live: StoreLock[] = [];
-  for (const lock of locks) {
-    if (await holderIsFinished(prisma, lock)) continue;
-    live.push(lock);
-  }
-  return live;
+  // Expired locks need no lookup at all; the rest are looked up in one query per
+  // owner table (holderRows), not one per lock.
+  const unexpired = locks.filter((lock) => lock.expiresAt.getTime() > Date.now());
+  const holders = await holderRows(prisma, unexpired);
+  return unexpired.filter(
+    (lock) => judgeHolder(lock, holders.get(holderKey(lock.ownerType, lock.ownerId))) !== 'finished',
+  );
 }

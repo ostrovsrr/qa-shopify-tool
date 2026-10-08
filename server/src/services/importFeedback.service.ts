@@ -16,6 +16,12 @@ export interface PerStoreResult {
   rejected: number;
 }
 
+// A store a parallel import was split across, from its batch-job rows.
+export interface BatchStore {
+  storeId: string | null;
+  shopDomain: string;
+}
+
 // What the import actually did. This tool answers one question — will Shopify
 // take this file? — so the payload is accepted, rejected, and Shopify's own
 // reason per rejected row. It deliberately says nothing about how our pre-check
@@ -40,6 +46,11 @@ export interface ImportFeedback {
   // Per-store accepted/rejected split (one entry per store for a batch; a single
   // entry for a single-store run).
   perStore: PerStoreResult[];
+  // Every store a parallel run was split across, in batch order; empty for a
+  // single-store run. Unlike perStore (built from row results, so empty until a
+  // job finishes) this is known from the moment the run starts, which is what
+  // lets the UI restore the parallel selection of a run reopened mid-import.
+  batchStores: BatchStore[];
 }
 
 /**
@@ -54,7 +65,7 @@ export interface ImportFeedback {
 export function storeLabeller(run: {
   storeId: string | null;
   shopDomain: string;
-  batchJobs: { storeId: string | null; shopDomain: string }[];
+  batchJobs: { storeId: string | null; shopDomain: string; batchIndex: number }[];
 }): (storeId: string | null) => string {
   const shopByStore = new Map<string, string>();
   for (const job of run.batchJobs) {
@@ -81,7 +92,7 @@ export async function getImportFeedback(
   // rejected list is read.
   const run = await prisma.importRun.findUnique({
     where: { id: importRunId },
-    include: { batchJobs: { select: { storeId: true, shopDomain: true } } },
+    include: { batchJobs: { select: { storeId: true, shopDomain: true, batchIndex: true } } },
   });
   if (!run) return null;
 
@@ -132,5 +143,14 @@ export async function getImportFeedback(
     createdAt: run.createdAt,
     rejectedRows,
     perStore,
+    batchStores: batchStoresOf(run.batchJobs),
   };
+}
+
+export function batchStoresOf(
+  jobs: { storeId: string | null; shopDomain: string; batchIndex: number }[],
+): BatchStore[] {
+  return [...jobs]
+    .sort((a, b) => a.batchIndex - b.batchIndex)
+    .map((job) => ({ storeId: job.storeId, shopDomain: job.shopDomain }));
 }

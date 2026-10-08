@@ -26,7 +26,11 @@
 #>
 [CmdletBinding()]
 param(
-  [string]$ServiceName = 'postgresql-x64-17',
+  # Empty = discover it the way Install-Prerequisites.ps1 does (the first
+  # postgresql* service), so a different PostgreSQL major version or installer
+  # naming does not leave the watchdog checking a service that does not exist.
+  # Pass an explicit name to pin it.
+  [string]$ServiceName = '',
   [string]$LogDir      = 'C:\ProgramData\qa-shopify-tool\logs',
   [string]$DisableFile = 'C:\ProgramData\qa-shopify-tool\postgres-watchdog.disabled',
   [int]$MaxLogBytes    = 5MB
@@ -47,6 +51,15 @@ if ((Test-Path -LiteralPath $logFile) -and ((Get-Item -LiteralPath $logFile).Len
 # Only ever writes when it DOES something. A heartbeat line every minute would bury
 # the one line that matters under 1,440 lines of "still fine" per day.
 function Write-Log { param($m) "[$(Get-Date -Format o)] $m" | Out-File -FilePath $logFile -Append -Encoding utf8 }
+
+if ([string]::IsNullOrWhiteSpace($ServiceName)) {
+  $found = Get-Service -Name 'postgresql*' -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $found) {
+    Write-Log "no postgresql* service found (pass -ServiceName to name it explicitly)"
+    exit 1
+  }
+  $ServiceName = $found.Name
+}
 
 try {
   $svc = Get-Service -Name $ServiceName -ErrorAction Stop

@@ -1,4 +1,5 @@
 import { ValidationResult, ValidationSummary } from '../types';
+import { rowsSent } from '../utils/rowsSent';
 
 interface Props {
   result: ValidationResult;
@@ -118,7 +119,7 @@ export function SummaryCards({ result, onDownload }: Props) {
           {result.droppedBlankRows.length > 10 ? '…' : ''} {result.droppedBlankRows.length === 1 ? 'is a' : 'are'}{' '}
           blank line{result.droppedBlankRows.length === 1 ? '' : 's'}, not {result.droppedBlankRows.length === 1 ? 'a customer' : 'customers'}, so{' '}
           {result.droppedBlankRows.length === 1 ? 'it is' : 'they are'} left out of the Shopify Template and the import (
-          {result.totalRows - result.droppedBlankRows.length} of {result.totalRows} rows are sent).
+          {rowsSent(result)} of {result.totalRows} rows are sent).
         </p>
       )}
 

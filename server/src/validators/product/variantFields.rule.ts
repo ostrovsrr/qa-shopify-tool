@@ -1,6 +1,6 @@
 import { ProductGroup, ProductValidationIssue, ProductValidationRule } from '../../types';
 import { variantRowIndexes } from '../../services/productVariants';
-import { parseGrams, parseInventoryPolicy } from '../../services/productValues';
+import { gramsIsTooLarge, parseGrams, parseInventoryPolicy } from '../../services/productValues';
 import { productIssue, rawCell } from './issue';
 
 // Variant columns the admin import validates on each variant row (image-only
@@ -29,7 +29,9 @@ export class VariantFieldsRule implements ProductValidationRule {
             column: 'Variant Grams',
             issueType: 'InvalidWeight',
             currentValue: gramsRaw,
-            message: `Variant Grams "${gramsRaw.trim()}" does not start with a number.`,
+            message: gramsIsTooLarge(gramsRaw)
+              ? `Variant Grams "${gramsRaw.trim()}" is a number too large to read as a weight.`
+              : `Variant Grams "${gramsRaw.trim()}" does not start with a number.`,
             shopifySays: "Weight isn't a number.",
             suggestedFix: 'Put the weight in grams as a number (for example 250), or leave it blank.',
           }));

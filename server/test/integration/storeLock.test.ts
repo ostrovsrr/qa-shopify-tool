@@ -59,9 +59,13 @@ const { startCustomerImport, startBatchImport } = await import(
   '../../src/services/shopifyImport.service'
 );
 const { startCleanupRun } = await import('../../src/services/cleanupRun.service');
-const { acquireStoreLock, releaseStoreLock, StoreBusyError, busyStores } = await import(
-  '../../src/services/storeLock.service'
-);
+const { acquireStoreLock, releaseStoreLock, StoreBusyError, busyStores, liveStoreLocks } =
+  await import('../../src/services/storeLock.service');
+type StoreLockOwner = import('../../src/services/storeLock.service').StoreLockOwner;
+
+// acquire must run inside a transaction: its advisory lock is transaction-scoped.
+const lockStore = (storeId: string, owner: StoreLockOwner) =>
+  prisma.$transaction((tx) => acquireStoreLock(tx, storeId, owner));
 
 const runIf = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -276,7 +280,7 @@ runIf('store busy-lock', () => {
   });
 
   it('steals a lock whose owner row no longer exists', async () => {
-    await acquireStoreLock(prisma, 'store1', {
+    await lockStore('store1', {
       ownerType: 'PRODUCT_IMPORT_RUN',
       ownerId: uuidv4(), // never existed — e.g. rolled back after the lock was taken
       operation: 'a product import',
@@ -310,16 +314,16 @@ runIf('store busy-lock', () => {
       ownerId: uuidv4(),
       operation: 'a product import',
     };
-    await acquireStoreLock(prisma, 'store1', owner);
+    await lockStore('store1', owner);
 
     // Resume-on-boot re-takes the lock for a row it may still be holding from
     // before the crash. If acquire were not re-entrant, every resumable row would
     // fail against its own lock.
-    await expect(acquireStoreLock(prisma, 'store1', owner)).resolves.toBeUndefined();
+    await expect(lockStore('store1', owner)).resolves.toBeUndefined();
   });
 
   it('throws StoreBusyError naming the store and what is holding it', async () => {
-    await acquireStoreLock(prisma, 'store1', {
+    await lockStore('store1', {
       ownerType: 'CLEANUP_RUN',
       ownerId: uuidv4(),
       operation: 'a product cleanup',
@@ -338,7 +342,7 @@ runIf('store busy-lock', () => {
     });
 
     await expect(
-      acquireStoreLock(prisma, 'store1', {
+      lockStore('store1', {
         ownerType: 'PRODUCT_IMPORT_RUN',
         ownerId: uuidv4(),
         operation: 'a product import',
@@ -354,7 +358,7 @@ runIf('store busy-lock', () => {
 
   it('releaseStoreLock only releases locks this owner still holds', async () => {
     const loser = uuidv4();
-    await acquireStoreLock(prisma, 'store1', {
+    await lockStore('store1', {
       ownerType: 'PRODUCT_IMPORT_RUN',
       ownerId: loser,
       operation: 'a product import',
@@ -372,5 +376,96 @@ runIf('store busy-lock', () => {
 
     const lock = await prisma.storeLock.findUnique({ where: { storeId: 'store1' } });
     expect(lock?.ownerId).toBe(winner);
+  });
+
+  // ── acquire only means something inside a transaction ────────────────────
+  // pg_advisory_xact_lock is released when its transaction ends. On the bare
+  // client every statement is its own transaction, so the advisory lock was gone
+  // before the check-then-upsert it was meant to guard even started.
+  it('refuses to acquire on the bare client, where the advisory lock guards nothing', async () => {
+    await expect(
+      acquireStoreLock(prisma, 'store1', {
+        ownerType: 'CLEANUP_RUN',
+        ownerId: uuidv4(),
+        operation: 'a product cleanup',
+      }),
+    ).rejects.toThrow(/inside prisma\.\$transaction/);
+    expect(await prisma.storeLock.count()).toBe(0);
+  });
+
+  // ── a FAILED-while-submitting holder may still be running at Shopify ──────
+  async function cleanupHolder(data: { status: string; submitAttemptedAt?: Date }) {
+    const id = uuidv4();
+    await prisma.cleanupRun.create({
+      data: {
+        id,
+        entity: 'PRODUCT',
+        storeId: 'store1',
+        shopDomain: 'fake.myshopify.com',
+        tag: 'qa-import',
+        ...data,
+      },
+    });
+    await lockStore('store1', { ownerType: 'CLEANUP_RUN', ownerId: id, operation: 'a product cleanup' });
+    return id;
+  }
+  const anImport = () => ({
+    ownerType: 'PRODUCT_IMPORT_RUN' as const,
+    ownerId: uuidv4(),
+    operation: 'a product import',
+  });
+
+  it('honours the lock of a holder that FAILED mid-submit, until its TTL', async () => {
+    await cleanupHolder({ status: 'FAILED', submitAttemptedAt: new Date() });
+
+    // Its row is terminal, but the bulk mutation may have reached Shopify and be
+    // deleting right now. Stealing the store here is landing on a live delete.
+    await expect(lockStore('store1', anImport())).rejects.toThrow(/may still be busy/);
+    expect((await busyStores()).map((b) => b.storeId)).toEqual(['store1']);
+
+    // The TTL still bounds it.
+    await prisma.storeLock.update({
+      where: { storeId: 'store1' },
+      data: { expiresAt: new Date(Date.now() - 1000) },
+    });
+    await expect(lockStore('store1', anImport())).resolves.toBeUndefined();
+  });
+
+  it('still steals the lock of a holder that failed BEFORE submitting', async () => {
+    // No submitAttemptedAt: provably nothing reached Shopify.
+    await cleanupHolder({ status: 'FAILED' });
+    await expect(lockStore('store1', anImport())).resolves.toBeUndefined();
+  });
+
+  // ── liveStoreLocks: one query per owner table, not one per lock ───────────
+  it('liveStoreLocks judges many locks with one lookup per owner table', async () => {
+    const live: string[] = [];
+    for (const [storeId, status] of [
+      ['store1', 'RUNNING'],
+      ['store2', 'COMPLETED'],
+      ['store3', 'RUNNING'],
+      ['store4', 'PENDING'],
+    ] as const) {
+      const id = uuidv4();
+      await prisma.cleanupRun.create({
+        data: { id, entity: 'CUSTOMER', storeId, shopDomain: 'x', tag: 'qa-import', status },
+      });
+      await lockStore(storeId, { ownerType: 'CLEANUP_RUN', ownerId: id, operation: 'a cleanup' });
+      if (status !== 'COMPLETED') live.push(storeId);
+    }
+    // One lock whose owner row does not exist at all.
+    await lockStore('store5', anImport());
+
+    const findMany = vi.spyOn(prisma.cleanupRun, 'findMany');
+    const findUnique = vi.spyOn(prisma.cleanupRun, 'findUnique');
+    try {
+      const locks = await liveStoreLocks();
+      expect(locks.map((l) => l.storeId).sort()).toEqual(live);
+      expect(findMany).toHaveBeenCalledTimes(1);
+      expect(findUnique).not.toHaveBeenCalled();
+    } finally {
+      findMany.mockRestore();
+      findUnique.mockRestore();
+    }
   });
 });

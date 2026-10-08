@@ -1,3 +1,6 @@
+// MUST stay the first import: modules below read process.env at load time.
+// See loadEnv.ts.
+import './loadEnv';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import fs from 'fs';
@@ -59,7 +62,11 @@ import { purgeExpiredPii } from './services/retention.service';
 import { sweepRunningCleanups } from './services/cleanupRun.service';
 import { sweepRunningImports } from './services/importSweep.service';
 import { HttpError } from './errors';
+import { singleFlight } from './utils/singleFlight';
 
+// The original, late load. In dev it is a no-op (loadEnv.ts already loaded .env and
+// dotenv never overrides a set key); in production it is kept exactly as it was, so
+// the early load cannot change what a hosted instance sees. See loadEnv.ts.
 dotenv.config();
 
 const app = express();
@@ -233,6 +240,17 @@ app.get('/api/product-import/:id/report', getProductImportReportHandler);
 app.post('/api/product-import/:id/cleanup', cleanupProductImportRunHandler);
 app.get('/api/product-import/:id', getProductImportHandler);
 
+// ── Unmatched /api → JSON 404 ───────────────────────────────────────────────
+//
+// After every API route and before the static client, in dev and production alike.
+// Without it Express answers a typo'd endpoint with an HTML "Cannot GET" page (or,
+// hosted, the SPA's index.html), and the client reports a bewildering JSON parse
+// error instead of "not found". app.use('/api') matches /api itself and /api/...,
+// but not /apixyz.
+app.use('/api', (req, _res, next) => {
+  next(new HttpError(404, `No such API endpoint: ${req.method} ${req.originalUrl.split('?')[0]}`));
+});
+
 // ── Static client (production) ──────────────────────────────────────────────
 //
 // Hosted, the server serves the built React app as well as the API — one container,
@@ -241,15 +259,17 @@ app.get('/api/product-import/:id', getProductImportHandler);
 //
 // The SPA fallback deliberately runs AFTER every /api route: React Router owns
 // /customers and /products, so any non-API path that is not a real file must return
-// index.html rather than a 404. It must NOT swallow unmatched /api/* — those should
-// still 404 as JSON, or a typo'd endpoint would return an HTML page and the client
-// would report a bewildering parse error instead of "not found".
+// index.html rather than a 404. It must NOT swallow unmatched /api or /api/* —
+// those 404 as JSON (the handler above), or a typo'd endpoint would return an HTML
+// page and the client would report a bewildering parse error instead of "not found".
+// The regex excludes bare /api too, not just /api/...; /apix is an ordinary page.
 const CLIENT_DIST = path.resolve(__dirname, '../../client/dist');
+export const SPA_FALLBACK_ROUTE = /^(?!\/api(?:\/|$)).*/;
 
 if (process.env.NODE_ENV === 'production' && fs.existsSync(CLIENT_DIST)) {
   app.use(express.static(CLIENT_DIST));
 
-  app.get(/^(?!\/api\/).*/, (_req, res) => {
+  app.get(SPA_FALLBACK_ROUTE, (_req, res) => {
     res.sendFile(path.join(CLIENT_DIST, 'index.html'));
   });
 }
@@ -289,10 +309,14 @@ if (require.main === module) {
     // crash between multer writing the file and the handler reading it. Nobody is
     // coming back for those, and they are raw merchant PII, so sweep them on boot
     // and then periodically for the ones this process leaks the same way.
+    //
+    // Every periodic job below is singleFlight-wrapped: a tick that fires while the
+    // previous run is still going is skipped rather than run concurrently with it.
+    const sweepOnce = singleFlight(sweepOrphanUploads, (err) => {
+      console.error('[upload] sweep failed:', err.message);
+    });
     const sweep = (): void => {
-      void sweepOrphanUploads().catch((err: Error) => {
-        console.error('[upload] sweep failed:', err.message);
-      });
+      void sweepOnce();
     };
     sweep();
     setInterval(sweep, 30 * 60 * 1000).unref();
@@ -301,10 +325,11 @@ if (require.main === module) {
     // deleted them. Purge the rows of runs past the window — but never a run whose
     // import is still in flight, because those rows are what the reconcile rebuilds
     // the import dataset from. See services/retention.service.ts.
+    const purgeOnce = singleFlight(purgeExpiredPii, (err) => {
+      console.error('[retention] purge failed:', err.message);
+    });
     const purge = (): void => {
-      void purgeExpiredPii().catch((err: Error) => {
-        console.error('[retention] purge failed:', err.message);
-      });
+      void purgeOnce();
     };
     purge();
     setInterval(purge, 24 * 60 * 60 * 1000).unref();
@@ -316,10 +341,11 @@ if (require.main === module) {
     // its store "busy" until the 30-min lock TTL. This backstop advances those
     // orphaned runs server-side so the store is freed within a sweep of Shopify
     // finishing. Covers customers and products (one engine). See sweepRunningCleanups.
+    const reconcileCleanupsOnce = singleFlight(sweepRunningCleanups, (err) => {
+      console.error('[cleanup-sweep] failed:', err.message);
+    });
     const reconcileCleanups = (): void => {
-      void sweepRunningCleanups().catch((err: Error) => {
-        console.error('[cleanup-sweep] failed:', err.message);
-      });
+      void reconcileCleanupsOnce();
     };
     reconcileCleanups();
     setInterval(reconcileCleanups, 60 * 1000).unref();
@@ -330,10 +356,11 @@ if (require.main === module) {
     // import sat RUNNING for two hours and finalized in 3s the moment anything
     // polled it. sweepRunningCleanups already does this for cleanups; imports never
     // got the equivalent. Covers customers and products. See sweepRunningImports.
+    const reconcileImportsOnce = singleFlight(sweepRunningImports, (err) => {
+      console.error('[import-sweep] failed:', err.message);
+    });
     const reconcileImports = (): void => {
-      void sweepRunningImports().catch((err: Error) => {
-        console.error('[import-sweep] failed:', err.message);
-      });
+      void reconcileImportsOnce();
     };
     reconcileImports();
     setInterval(reconcileImports, 60 * 1000).unref();

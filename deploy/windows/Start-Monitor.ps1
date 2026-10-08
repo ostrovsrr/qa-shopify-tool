@@ -35,7 +35,9 @@ if (-not $nodeExe) { $nodeExe = 'C:\Program Files\nodejs\node.exe' }
 if (-not (Test-Path -LiteralPath $nodeExe)) { throw 'node.exe not found' }
 
 # Bind the same way the instances do, so the page is reachable wherever they are.
-$bind = '0.0.0.0'
+# Loopback when nothing says otherwise -- the same fail-closed default as
+# Get-DeployConfig.ps1 and docker-compose.yml.
+$bind = '127.0.0.1'
 if (Test-Path -LiteralPath $ConfigFile) {
   $cfg = & (Join-Path $PSScriptRoot 'Get-DeployConfig.ps1') -Path $ConfigFile
   if ($cfg.BindAddr) { $bind = $cfg.BindAddr }
@@ -51,14 +53,35 @@ $env:BIND_ADDR          = $bind
 New-Item -ItemType Directory -Force -Path $LogDir  | Out-Null
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
 
+# Rolled at start, before every restart, and at most every $RollCheckSeconds while
+# node is writing -- not only at launcher start, because this launcher is
+# long-lived by design. Same scheme as Start-Instance.ps1.
 $logFile = Join-Path $LogDir 'monitor.log'
-if ((Test-Path -LiteralPath $logFile) -and ((Get-Item -LiteralPath $logFile).Length -gt $MaxLogBytes)) {
-  $rolled = "$logFile.1"
-  if (Test-Path -LiteralPath $rolled) { Remove-Item -LiteralPath $rolled -Force }
-  Move-Item -LiteralPath $logFile -Destination $rolled -Force
+$RollCheckSeconds     = 30
+$script:nextRollCheck = [DateTime]::MinValue
+
+function Invoke-LogRoll {
+  $script:nextRollCheck = (Get-Date).AddSeconds($RollCheckSeconds)
+  # Never fatal: this runs inside the pipeline carrying node's output, and an
+  # exception there would take node down. A failed roll waits for the next check.
+  try {
+    $item = Get-Item -LiteralPath $logFile -ErrorAction SilentlyContinue
+    if ($item -and $item.Length -gt $MaxLogBytes) {
+      $rolled = "$logFile.1"
+      if (Test-Path -LiteralPath $rolled) { Remove-Item -LiteralPath $rolled -Force -ErrorAction Stop }
+      Move-Item -LiteralPath $logFile -Destination $rolled -Force -ErrorAction Stop
+    }
+  } catch { }
 }
 
-function Write-Log { param($m) "[$(Get-Date -Format o)] $m" | Out-File -FilePath $logFile -Append -Encoding utf8 }
+function Write-Log {
+  param($m)
+  $now = Get-Date
+  if ($now -ge $script:nextRollCheck) { Invoke-LogRoll }
+  "[$($now.ToString('o'))] $m" | Out-File -FilePath $logFile -Append -Encoding utf8
+}
+
+Invoke-LogRoll
 
 function Test-PortHeld {
   param([int]$P)
@@ -76,6 +99,7 @@ $backoff    = 2
 $maxBackoff = 60
 
 while ($true) {
+  Invoke-LogRoll
   Write-Log "starting monitor on port $Port (bind $bind), watching $FirstPort-$LastPort"
   $started = Get-Date
 

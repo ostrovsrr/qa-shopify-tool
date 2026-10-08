@@ -100,4 +100,18 @@ describe('DuplicateEmailRule', () => {
   it('ignores blank emails', () => {
     expect(rule.validate(makeRows([{ Email: '' }, { Email: '' }]))).toHaveLength(0);
   });
+
+  it('lists every row of a small group', () => {
+    const issues = rule.validate(makeRows([{ Email: 'dup@x.com' }, { Email: 'dup@x.com' }, { Email: 'dup@x.com' }]));
+    expect(issues[0].message).toContain('appears in 3 rows: 2, 3, 4.');
+  });
+
+  // Each repeat gets its own issue, so listing the whole group in every message was
+  // quadratic: 20k rows on one placeholder email meant gigabytes of message text.
+  it('caps the rows listed for a large group, so message size does not grow with it', () => {
+    const issues = rule.validate(makeRows(Array.from({ length: 5000 }, () => ({ Email: 'none@x.com' }))));
+    expect(issues).toHaveLength(4999);
+    expect(issues[0].message).toContain('appears in 5,000 rows: 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 and 4,990 more.');
+    expect(Math.max(...issues.map((i) => i.message.length))).toBeLessThan(300);
+  });
 });

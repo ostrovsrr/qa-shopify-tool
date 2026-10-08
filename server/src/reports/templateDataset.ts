@@ -104,6 +104,16 @@ function buildDuplicateGroups(
   return { groups, repeats };
 }
 
+/** The order Postgres jsonb stores object keys in: shorter first (by UTF-8 byte
+ *  length), then bytewise. A mapping read back from the database is already in
+ *  this order, so sorting by it gives every caller the same order whether its
+ *  mapping came from a request body or from a stored run. */
+export function jsonbKeyOrder(a: string, b: string): number {
+  const ab = Buffer.from(a, 'utf8');
+  const bb = Buffer.from(b, 'utf8');
+  return ab.length - bb.length || Buffer.compare(ab, bb);
+}
+
 export function buildTemplateDataset(options: TemplateDatasetOptions): TemplateDataset {
   const {
     originalRows,
@@ -129,12 +139,23 @@ export function buildTemplateDataset(options: TemplateDatasetOptions): TemplateD
   // both see final values. With a mapping, only mapped source columns
   // contribute; without one the CSV is already Shopify-keyed and passes
   // through as-is.
+  //
+  // Sources are visited in a FIXED order, never the mapping object's own key
+  // order: validation gets the mapping straight from the request body (CSV
+  // column order), while the import and the reports read it back from
+  // validation_runs.columnMapping — jsonb, which re-sorts object keys. Each row's
+  // data comes back from jsonb the same way, so neither object carries the CSV
+  // order on that path. Sorting into jsonb's own order (see jsonbKeyOrder) makes a
+  // round trip a no-op: validation, the Excel template and the import all build
+  // the same Note/Tags append order, and the import — the side that reaches
+  // Shopify — behaves exactly as it always has for every stored run.
+  const mappedSourceOrder = Object.keys(columnMapping).sort(jsonbKeyOrder);
   let templateRows: TemplateRow[] = originalRows.map((origRow) => {
     const data = (origRow.data ?? {}) as Record<string, string>;
     let record: Record<string, string>;
     if (hasMapping) {
       const mappedSources: Record<string, string> = {};
-      for (const src of Object.keys(columnMapping)) mappedSources[src] = data[src] ?? '';
+      for (const src of mappedSourceOrder) mappedSources[src] = data[src] ?? '';
       record = applyMappingToRecord(mappedSources, columnMapping);
     } else {
       record = { ...data };

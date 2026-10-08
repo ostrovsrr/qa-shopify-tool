@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  gramsIsTooLarge,
   isValidImageUrl,
+  MAX_QUANTITY,
+  MIN_QUANTITY,
+  moneyIsTooLarge,
   parseGrams,
   parseInventoryPolicy,
   parseMoney,
@@ -63,6 +67,50 @@ describe('parseQuantity', () => {
     ['ten', 0],
   ])('reads %s as %s', (raw, expected) => {
     expect(parseQuantity(raw)).toBe(expected);
+  });
+});
+
+// Edge cases of the number reading itself. The admin rounds money half-up
+// (10.999 → 11.00, probe price-three-decimals); these hold the same rule on
+// values a double cannot represent exactly, and keep a number too large for a
+// double from passing as a value.
+describe('number reading edge cases', () => {
+  it.each([
+    ['1.005', 1.01],
+    ['10.995', 11],
+    ['2.675', 2.68],
+    ['0.125', 0.13],
+    ['1.004', 1],
+    ['1,005.005', 1005.01],
+    ['-1.005', -1.01],
+  ])('rounds money %s half-up to %s', (raw, expected) => {
+    expect(parseMoney(raw)).toBe(expected);
+  });
+
+  it('does not return a negative zero for money that rounds to nothing', () => {
+    expect(Object.is(parseMoney('-0.001'), 0)).toBe(true);
+  });
+
+  it('treats a money cell too long for a double as unreadable, and says why', () => {
+    const huge = '9'.repeat(400);
+    expect(parseMoney(huge)).toBe('invalid');
+    expect(moneyIsTooLarge(huge)).toBe(true);
+    expect(moneyIsTooLarge('abc')).toBe(false);
+    expect(moneyIsTooLarge('10.00')).toBe(false);
+  });
+
+  it('treats grams too large for a double as unreadable, and says why', () => {
+    expect(parseGrams('1e999')).toBe('invalid');
+    expect(gramsIsTooLarge('1e999')).toBe(true);
+    expect(gramsIsTooLarge('heavy')).toBe(false);
+    expect(gramsIsTooLarge('100')).toBe(false);
+  });
+
+  it('clamps a quantity to what productSet can carry instead of failing the product', () => {
+    expect(parseQuantity('99999999999')).toBe(MAX_QUANTITY);
+    expect(parseQuantity('-99999999999')).toBe(MIN_QUANTITY);
+    expect(parseQuantity('9'.repeat(400))).toBe(MAX_QUANTITY);
+    expect(parseQuantity('2147483647')).toBe(2147483647);
   });
 });
 

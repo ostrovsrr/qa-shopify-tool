@@ -4,9 +4,13 @@ import { v4 as uuidv4 } from 'uuid';
 import app from '../../src/index';
 import prisma from '../../src/db/prisma';
 import { resetShopifyConfigCache } from '../../src/config/shopify';
-import { acquireStoreLock } from '../../src/services/storeLock.service';
+import { acquireStoreLock, StoreLockOwner } from '../../src/services/storeLock.service';
 import { resetActivityTracking } from '../../src/services/instanceActivity.service';
 import { resetDb } from './resetDb';
+
+// acquire must run inside a transaction: its advisory lock is transaction-scoped.
+const lockStore = (storeId: string, owner: StoreLockOwner) =>
+  prisma.$transaction((tx) => acquireStoreLock(tx, storeId, owner));
 
 // GET /api/instance/activity feeds the fleet status page: how much has this
 // instance's SE run, and what is running on their stores right now.
@@ -91,7 +95,7 @@ runIf('GET /api/instance/activity', () => {
     const run = await prisma.productImportRun.create({
       data: { uploadId: upload, shopDomain: 'ours-qa.myshopify.com', storeId: OURS, status: 'RUNNING' },
     });
-    await acquireStoreLock(prisma, OURS, {
+    await lockStore(OURS, {
       ownerType: 'PRODUCT_IMPORT_RUN',
       ownerId: run.id,
       operation: 'a product import',

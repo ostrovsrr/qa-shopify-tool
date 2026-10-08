@@ -1,5 +1,6 @@
 import { CustomerCsvRow, CustomerValidationIssue, CustomerValidationRule } from '../../types';
 import { canonicalPhone } from '../../utils/normalize';
+import { formatRowList } from './rowList';
 
 // Same shape as DuplicateEmailRule: Shopify keeps one customer per phone, so every
 // row after the first in a group is flagged and the first is not.
@@ -33,7 +34,7 @@ export class DuplicatePhoneRule implements CustomerValidationRule {
           severity: 'Error',
           issueType: 'DuplicatePhone',
           currentValue: row.original['Phone'] ?? '',
-          message: `Phone "${phone}" (normalized: ${normalized}) appears in rows: ${duplicateRows.join(', ')}. Shopify keeps one customer per phone, so all but one of these rows will not import.`,
+          message: `Phone "${phone}" (normalized: ${normalized}) appears in ${duplicateRows.length.toLocaleString('en-US')} rows: ${formatRowList(duplicateRows)}. Shopify keeps one customer per phone, so all but one of these rows will not import.`,
           suggestedFix: 'Remove or correct the duplicate phone number, or turn on "Move duplicates to Notes".',
         });
       }

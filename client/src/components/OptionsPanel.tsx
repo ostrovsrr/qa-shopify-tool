@@ -22,8 +22,14 @@ type Setter = (value: boolean) => void;
 interface Props {
   flags: TemplateFlags;
   set: Record<keyof TemplateFlags, Setter>;
+  /** Only ever the effects computed for `flags` as they are now — the caller
+   *  passes null while a response for the current flags is outstanding, because
+   *  effectFor reads them relative to `flags` and stale ones flip the sign. */
   effects: EffectsPreview | null;
   effectsLoading: boolean;
+  /** A preview failure the operator must act on (an expired upload), in the
+   *  server's words. Empty for transient failures, which stay a silent "—". */
+  effectsError?: string;
   disabled: boolean;
 }
 
@@ -92,7 +98,7 @@ const GROUPS: { title: string; hint: (e: ValidationSummary | null) => string; op
 /** Ready + Fixed — the records Shopify would accept. */
 const importable = (s: ValidationSummary) => s.ready + s.fixed;
 
-export function OptionsPanel({ flags, set, effects, effectsLoading, disabled }: Props) {
+export function OptionsPanel({ flags, set, effects, effectsLoading, effectsError, disabled }: Props) {
   const current = effects?.current ?? null;
 
   /** What flipping this option would do, phrased from where the operator is now:
@@ -123,6 +129,7 @@ export function OptionsPanel({ flags, set, effects, effectsLoading, disabled }: 
 
   return (
     <div className="options-panel">
+      {effectsError && <div className="error-banner">{effectsError}</div>}
       {GROUPS.map((group) => (
         <div key={group.title} className="options-group">
           <div className="options-group-head">
@@ -147,7 +154,7 @@ export function OptionsPanel({ flags, set, effects, effectsLoading, disabled }: 
                 </span>
                 {opt.previewable && (
                   <span className="option-effect">
-                    {effectsLoading && !effect ? (
+                    {effectsLoading ? (
                       <span className="option-effect-idle">…</span>
                     ) : effect ? (
                       <>

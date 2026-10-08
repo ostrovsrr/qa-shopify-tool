@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
-import type { CleanupRun } from '@prisma/client';
+import type { CleanupRun, Prisma } from '@prisma/client';
 import prisma from '../db/prisma';
-import { getShopifyConfig } from '../config/shopify';
+import { getShopifyConfig, sweepOwnsStore } from '../config/shopify';
 import { getShopifyClient } from './shopifyClient';
 import {
   acquireStoreLock,
@@ -206,11 +206,29 @@ export async function startCleanupRun(
     });
   } catch (err) {
     const message = (err as Error).message;
+    // Did the failure happen AFTER markSubmitAttempt, i.e. in the bulk mutation call
+    // itself? Then Shopify may have accepted the delete and be running it right now
+    // — a timeout or a dropped connection says nothing about whether the op landed.
+    const attempted = await prisma.cleanupRun.findUnique({
+      where: { id: runId },
+      select: { submitAttemptedAt: true },
+    });
+    const outcomeUnknown = Boolean(attempted?.submitAttemptedAt);
     const failed = await prisma.cleanupRun.update({
       where: { id: runId },
-      data: { status: 'FAILED', error: message.slice(0, 500) },
+      data: {
+        status: 'FAILED',
+        error: (outcomeUnknown
+          ? `The delete may or may not have reached Shopify (${message}). Check the store, and re-run cleanup if tagged records remain.`
+          : message
+        ).slice(0, 500),
+      },
     });
-    await releaseStoreLock(runId);
+    // Only hand the store back when we KNOW nothing is running on it. After an
+    // ambiguous submit the lock stays until its TTL: storeLock treats a FAILED holder
+    // with submitAttemptedAt and no op id as possibly still running, so the next
+    // colleague is told the store may be busy instead of landing on a live delete.
+    if (!outcomeUnknown) await releaseStoreLock(runId);
     return failed;
   }
 }
@@ -245,38 +263,65 @@ export async function reconcileCleanupRun(id: string): Promise<CleanupRun | null
   // PENDING means the submit never landed — resume-on-boot owns that, not the poll.
   if (!run.bulkOperationId) return run;
 
-  // Bound a stuck operation the same way the import reconcile does.
-  const attempts = run.pollAttempts + 1;
-  if (attempts > MAX_JOB_POLL_ATTEMPTS) {
-    const failed = await prisma.cleanupRun.update({
-      where: { id },
-      data: {
-        status: 'FAILED',
-        error: `Timed out: still running after ${MAX_JOB_POLL_ATTEMPTS} status checks.`,
-      },
-    });
-    await releaseStoreLock(id);
-    return failed;
-  }
-  await prisma.cleanupRun.update({ where: { id }, data: { pollAttempts: attempts } });
-
   const adapter = adapterFor(run.entity as CleanupEntity);
+
+  // Build the client BEFORE touching the poll counter. Eleven instances share one
+  // database and each holds tokens for its own stores only; on an instance that does
+  // not own this store getShopifyClient throws "not configured". When the counter was
+  // bumped first, every non-owner's attempt burned the cap, and the run was failed —
+  // and its store released — while Shopify was still deleting.
   const client = await getShopifyClient(run.storeId ?? undefined);
-  const state = await fetchBulkOperationState(client, run.bulkOperationId);
+
+  // Atomic increment: two concurrent polls (a browser and the sweep) must both count,
+  // not both write the same read-modify-write value.
+  const { pollAttempts: attempts } = await prisma.cleanupRun.update({
+    where: { id },
+    data: { pollAttempts: { increment: 1 } },
+    select: { pollAttempts: true },
+  });
+  const overCap = attempts > MAX_JOB_POLL_ATTEMPTS;
+
+  const finish = async (data: Prisma.CleanupRunUpdateManyMutationInput) => {
+    // Guarded on status: a slower concurrent poll must not overwrite a terminal
+    // result (COMPLETED with FAILED, or the other way round). Only the poll that
+    // actually made the transition releases the store.
+    const { count } = await prisma.cleanupRun.updateMany({
+      where: { id, status: { notIn: TERMINAL_BULK_STATUSES } },
+      data,
+    });
+    if (count === 1) await releaseStoreLock(id);
+    return prisma.cleanupRun.findUnique({ where: { id } });
+  };
+
+  let state: Awaited<ReturnType<typeof fetchBulkOperationState>>;
+  try {
+    state = await fetchBulkOperationState(client, run.bulkOperationId);
+  } catch (err) {
+    // Under the cap, a failed status read is just a bad poll: the next one retries.
+    if (!overCap) throw err;
+    // Over it, we have been unable to see this operation for the whole budget. We
+    // cannot say it is still running, and an unreadable run must not sit RUNNING
+    // forever, so it ends — telling the user what to check.
+    return finish({
+      status: 'FAILED',
+      error: `Could not read the bulk delete's status from Shopify after ${MAX_JOB_POLL_ATTEMPTS} checks (${(err as Error).message}). Check the store, and re-run cleanup if tagged records remain.`.slice(0, 500),
+    });
+  }
 
   // Still deleting — leave it RUNNING and let the next poll look again.
   if (!TERMINAL_BULK_STATUSES.includes(state.status)) {
+    // Past the poll budget, but Shopify itself says the delete is still running, so
+    // the honest state is still RUNNING: failing the run here would release the store
+    // under a live delete. The cap bounds runs we cannot SEE, not slow ones.
+    if (overCap) {
+      console.warn(
+        `[cleanup] ${id}: still ${state.status} at Shopify after ${attempts} status checks; keeping the store locked`,
+      );
+    }
     // Still being watched, so keep holding the store.
     await renewStoreLock(id);
     return prisma.cleanupRun.findUnique({ where: { id } });
   }
-
-  const finish = async (data: Parameters<typeof prisma.cleanupRun.update>[0]['data']) => {
-    const done = await prisma.cleanupRun.update({ where: { id }, data });
-    // Terminal — the store is free.
-    await releaseStoreLock(id);
-    return done;
-  };
 
   if (state.status !== 'COMPLETED') {
     return finish({
@@ -322,6 +367,10 @@ export async function reconcileCleanupRun(id: string): Promise<CleanupRun | null
  * operation id yet and belongs to resume-on-boot, not here — the reconcile guard
  * would bounce it anyway.
  *
+ * Only rows for stores THIS instance holds credentials for — see sweepOwnsStore.
+ * The import sweep always did this; this one did not, so one colleague's cleanup
+ * filled every other instance's log with "store is not configured" once a minute.
+ *
  * Serves the customer and product flows alike — one engine, both flows.
  */
 export async function sweepRunningCleanups(): Promise<void> {
@@ -330,10 +379,11 @@ export async function sweepRunningCleanups(): Promise<void> {
       status: { notIn: TERMINAL_BULK_STATUSES },
       bulkOperationId: { not: null },
     },
-    select: { id: true },
+    select: { id: true, storeId: true },
   });
 
-  for (const { id } of stuck) {
+  for (const { id, storeId } of stuck) {
+    if (!sweepOwnsStore(storeId)) continue;
     // One unreachable store must not stop the rest from being reconciled.
     try {
       await reconcileCleanupRun(id);
@@ -363,12 +413,31 @@ async function relaunchCleanupRun(id: string): Promise<void> {
   if (!run) return;
 
   const adapter = adapterFor(run.entity as CleanupEntity);
-  const ids = (run.submittedIds ?? []) as string[];
+
+  // NULL submittedIds means the process died BEFORE the tagged records were listed
+  // (mid-fetchIdsByTag) — "never listed", which is not "listed, and there were
+  // none". Reading it as an empty list marked the run COMPLETED with 0 deleted while
+  // every tagged record was still in the store. List them now, by the run's tag,
+  // exactly as the live path does; this resume already holds the store's lock.
+  let ids: string[];
+  if (run.submittedIds === null) {
+    const listed = await adapter.fetchIdsByTag(run.storeId ?? undefined, run.tag);
+    ids = listed.ids;
+    await prisma.cleanupRun.updateMany({
+      where: { id, status: 'PENDING' },
+      data: { shopDomain: listed.shop, found: ids.length, submittedIds: ids },
+    });
+  } else {
+    ids = run.submittedIds as string[];
+  }
+
   if (ids.length === 0) {
     await prisma.cleanupRun.updateMany({
       where: { id, status: 'PENDING' },
-      data: { status: 'COMPLETED', deleted: 0 },
+      data: { status: 'COMPLETED', deleted: 0, failedCount: 0 },
     });
+    // Done before it started — the store is free.
+    await releaseStoreLock(id);
     return;
   }
 

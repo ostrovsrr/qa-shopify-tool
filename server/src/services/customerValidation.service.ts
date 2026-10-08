@@ -1,7 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Prisma } from '@prisma/client';
 import {
-  AffectedRow,
   CustomerCsvRow,
   CustomerValidationIssue,
   CustomerValidationResult,
@@ -12,24 +11,13 @@ import {
 } from '../types';
 import { customerValidationRules } from '../validators/customer';
 import prisma from '../db/prisma';
-import { CsvParseError } from '../errors';
-import { applyMappingToRecord, assertValidColumnMapping } from './columnMapping.service';
+import { CsvParseError, HttpError } from '../errors';
+import { TERMINAL_BULK_STATUSES } from './shopifyBulk';
+import { assertValidColumnMapping } from './columnMapping.service';
 import { assertNotProductCsv, parseCsvFile } from './csvParser.service';
 import { buildTemplateDataset } from '../reports/templateDataset';
 import { normalizeRecord } from '../utils/normalize';
 import { deletePreview, getPreview } from './previewStore';
-
-function applyColumnMapping(
-  rows: CustomerCsvRow[],
-  mapping: Record<string, string>,
-): CustomerCsvRow[] {
-  if (Object.keys(mapping).length === 0) return rows;
-  return rows.map((row) => ({
-    ...row,
-    original: applyMappingToRecord(row.original, mapping),
-    normalized: applyMappingToRecord(row.normalized, mapping),
-  }));
-}
 
 /** The operator's choices on the mapping screen. Every one of them changes what
  *  the import sends, so they travel together: stored on the ValidationRun, read
@@ -193,9 +181,6 @@ export async function validateCustomerCsv(
   }
   assertNotProductCsv(headers);
 
-  // Apply mapping only to the rows fed into validators; raw data is preserved separately
-  const rows = applyColumnMapping(rawRows, columnMapping);
-
   const { issues: allIssues, summary, droppedBlankRows } = buildValidationOutcome(rawRows, columnMapping, {
     heliosMigratedTag,
     moveDuplicatesToNotes,
@@ -205,11 +190,6 @@ export async function validateCustomerCsv(
   });
 
   const errors = summary.errorCount;
-
-  const affectedRowNumbers = new Set(allIssues.map((i) => i.rowNumber));
-  const affectedRows: AffectedRow[] = rows
-    .filter((r) => affectedRowNumbers.has(r.rowNumber))
-    .map((r) => ({ rowNumber: r.rowNumber, data: r.original }));
 
   const validationId = uuidv4();
 
@@ -228,7 +208,11 @@ export async function validateCustomerCsv(
           fileType: 'CUSTOMER',
           totalRows: rawRows.length,
           errors,
-          affectedRows: affectedRows as unknown as object[],
+          // Nothing reads affectedRows any more (the rows live in
+          // original_customer_rows). Building it meant a second mapped copy of
+          // every flagged row — PII, and double the peak memory — for nobody.
+          // Written empty, the same value the retention purge leaves behind.
+          affectedRows: [],
           originalColumns: headers,
           columnMapping: Object.keys(columnMapping).length > 0
             ? (columnMapping as unknown as object)
@@ -512,14 +496,55 @@ export async function updateValidationMetadata(
   }
 }
 
+/** Why a run cannot be deleted right now. The user can act on it: wait. */
+export const DELETE_WHILE_IMPORTING =
+  'This run has an import still in progress. Wait for it to finish, then delete the run.';
+export const DELETE_WHILE_CLEANING =
+  "A QA cleanup of this run's import is still in progress. Wait for it to finish, then delete the run.";
+
+/**
+ * Delete a validation run — unless something is still running against it.
+ *
+ * The delete cascades to its import runs and batch jobs. Delete a RUNNING one and
+ * its store lock's holder row vanishes, so the lock reads "nothing is running"
+ * (storeLock judgeHolder) and the store is handed to the next colleague while
+ * Shopify is still executing the bulk op — the exact collision the lock exists to
+ * stop. Same companion rule as retention: a run with any non-terminal import (the
+ * single run or any batch job) is not touched. A cleanup still reversing one of its
+ * imports is refused too: deleting the run under it leaves an orphan the user can no
+ * longer find from the run it belonged to.
+ *
+ * The run row is locked FOR UPDATE first, so an import starting concurrently (its
+ * insert needs a key-share lock on this row) waits for us and then fails its foreign
+ * key, rather than slipping in between the check and the delete.
+ *
+ * Throws HttpError(409) when refused; returns false when the run does not exist.
+ */
 export async function deleteValidationRun(validationId: string): Promise<boolean> {
-  try {
-    await prisma.validationRun.delete({ where: { id: validationId } });
-    return true;
-  } catch (err) {
-    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025') {
-      return false;
+  return prisma.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw<{ id: string }[]>`
+      SELECT id FROM validation_runs WHERE id = ${validationId} FOR UPDATE`;
+    if (locked.length === 0) return false;
+
+    const imports = await tx.importRun.findMany({
+      where: { validationId },
+      select: { id: true, status: true, batchJobs: { select: { status: true } } },
+    });
+    const inFlight = (status: string) => !TERMINAL_BULK_STATUSES.includes(status);
+    if (imports.some((i) => inFlight(i.status) || i.batchJobs.some((j) => inFlight(j.status)))) {
+      throw new HttpError(409, DELETE_WHILE_IMPORTING);
     }
-    throw err;
-  }
+    if (imports.length > 0) {
+      const cleaning = await tx.cleanupRun.count({
+        where: {
+          importRunId: { in: imports.map((i) => i.id) },
+          status: { notIn: TERMINAL_BULK_STATUSES },
+        },
+      });
+      if (cleaning > 0) throw new HttpError(409, DELETE_WHILE_CLEANING);
+    }
+
+    await tx.validationRun.delete({ where: { id: validationId } });
+    return true;
+  });
 }

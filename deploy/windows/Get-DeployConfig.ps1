@@ -3,20 +3,54 @@
   Read deploy.env and return the resolved deployment config.
 
 .DESCRIPTION
-  Shared by Deploy-QaTool.ps1 and Register-Instances.ps1 so the DATABASE_URL used
-  for migrations and the instance list used for task registration are derived from
-  exactly one place: the config file.
+  The ONE parser of deploy.env. Used by Deploy-QaTool.ps1, Register-Instances.ps1,
+  Install-Prerequisites.ps1, Start-Instance.ps1 and Start-Monitor.ps1, so the
+  DATABASE_URL used for migrations, the URL every instance connects with, the
+  instance list used for task registration and the bind address are all derived
+  from exactly one place. Start-Instance.ps1 used to carry its own copy; the two
+  drifted (a deploy.env with only DATABASE_URL passed Deploy and Register, then
+  every launcher threw "POSTGRES_PASSWORD is missing"). Do not fork this again.
 
-  Values may span multiple lines when quoted -- the store lists are pretty-printed
-  JSON. A line-at-a-time parser truncates them silently, so this does the
-  open-quote scan properly.
+  Quoted values:
+    - may be single- or double-quoted;
+    - may be followed by trailing whitespace and/or a ` # comment`;
+    - MAY SPAN LINES -- the store lists can be pretty-printed JSON. A line-at-a-time
+      parser truncates them silently.
+
+  A quote closes only where it is followed by nothing but whitespace or a comment.
+  When the value looks like JSON (starts with [ or {), a close is accepted only if
+  the text up to it parses as JSON: a double-quoted, pretty-printed JSON value has
+  inner lines that end in `"`, and closing there would truncate the store list and
+  swallow the next keys. If no JSON-valid close exists before end of file, the first
+  structural close is used, so one SE's malformed JSON fails THAT SE's launcher with
+  "not valid JSON" instead of turning the whole file into one unterminated value.
 #>
 [CmdletBinding()]
 param([Parameter(Mandatory = $true)][string]$Path)
 
 $ErrorActionPreference = 'Stop'
 
-if (-not (Test-Path -LiteralPath $Path)) { throw "Config file not found: $Path" }
+if (-not (Test-Path -LiteralPath $Path)) {
+  throw "Config file not found: $Path (copy deploy/.env there -- it is never in the git checkout)"
+}
+
+# Positions in $Text where $Quote may close a value: followed only by whitespace,
+# optionally then a # comment.
+function Get-CloseCandidates {
+  param([string]$Text, [char]$Quote)
+  $out = New-Object System.Collections.Generic.List[int]
+  for ($p = 0; $p -lt $Text.Length; $p++) {
+    if ($Text[$p] -eq $Quote -and $Text.Substring($p + 1) -match '^\s*(#.*)?$') { $out.Add($p) }
+  }
+  return ,$out
+}
+
+function Test-CompleteValue {
+  param([string]$Value)
+  $t = $Value.Trim()
+  if (-not ($t.StartsWith('[') -or $t.StartsWith('{'))) { return $true }
+  try { $null = $t | ConvertFrom-Json; return $true } catch { return $false }
+}
 
 $map   = @{}
 $lines = [System.IO.File]::ReadAllLines($Path)
@@ -32,17 +66,33 @@ while ($i -lt $lines.Count) {
 
   if ($null -eq $quote) { $map[$key] = ($rest -replace '\s+#.*$', '').Trim(); continue }
 
-  $body = $rest.Substring(1)
-  if ($body.EndsWith($quote)) { $map[$key] = $body.Substring(0, $body.Length - 1); continue }
+  # Scan for the close, starting with the remainder of the key's own line.
+  $acc      = ''            # value text from the lines already consumed
+  $segment  = $rest.Substring(1)
+  $first    = $true
+  $value    = $null
+  $fallback = $null         # first structural close: @{ Value; NextLine }
+  while ($true) {
+    $prefix = if ($first) { '' } else { $acc + "`n" }
+    foreach ($p in (Get-CloseCandidates -Text $segment -Quote $quote)) {
+      $candidate = $prefix + $segment.Substring(0, $p)
+      if ($null -eq $fallback) { $fallback = @{ Value = $candidate; NextLine = $i } }
+      if (Test-CompleteValue -Value $candidate) { $value = $candidate; break }
+    }
+    if ($null -ne $value) { break }
 
-  $sb = [System.Text.StringBuilder]::new(); [void]$sb.Append($body); $closed = $false
-  while ($i -lt $lines.Count) {
-    $next = $lines[$i]; $i++
-    if ($next.EndsWith($quote)) { [void]$sb.Append("`n").Append($next.Substring(0, $next.Length - 1)); $closed = $true; break }
-    [void]$sb.Append("`n").Append($next)
+    $acc   = $prefix + $segment
+    $first = $false
+    if ($i -ge $lines.Count) { break }
+    $segment = $lines[$i]; $i++
   }
-  if (-not $closed) { throw "Unterminated $quote quote for $key in $Path" }
-  $map[$key] = $sb.ToString()
+
+  if ($null -eq $value) {
+    if ($null -eq $fallback) { throw "Unterminated $quote quote for $key in $Path" }
+    $value = $fallback.Value
+    $i     = $fallback.NextLine
+  }
+  $map[$key] = $value
 }
 
 # Which SEs actually have stores. Registering a task for an SE with no credentials
@@ -59,9 +109,17 @@ if ([string]::IsNullOrWhiteSpace($dbUrl)) {
   $dbUrl = "postgresql://postgres:$([uri]::EscapeDataString($pw))@127.0.0.1:5432/shopify_csv_qa"
 }
 
+# Loopback unless deploy.env says otherwise. This app has NO AUTHENTICATION, so a
+# missing key must fail CLOSED (reachable from this box only), never open to every
+# interface. Same default as docker-compose.yml and deploy/.env.example. A box that
+# serves the LAN sets BIND_ADDR explicitly; BindAddrSet lets Register-Instances.ps1
+# warn when it is not.
+$bindSet = -not [string]::IsNullOrWhiteSpace($map['BIND_ADDR'])
+
 [pscustomobject]@{
   Values      = $map
   Instances   = @($instances)
   DatabaseUrl = $dbUrl
-  BindAddr    = $(if ($map['BIND_ADDR']) { $map['BIND_ADDR'] } else { '0.0.0.0' })
+  BindAddr    = $(if ($bindSet) { $map['BIND_ADDR'] } else { '127.0.0.1' })
+  BindAddrSet = $bindSet
 }

@@ -22,7 +22,7 @@ function handleShopifyError(err: unknown, res: Response): boolean {
   if (err instanceof ShopifyConfigError) {
     res.status(503).json({
       error: err.message,
-      hint: 'Set SHOPIFY_SHOP and SHOPIFY_ADMIN_TOKEN in server/.env, then restart the server.',
+      hint: 'Set SHOPIFY_TEST_STORES (or SHOPIFY_SHOP_1 …) in server/.env, then restart the server.',
     });
     return true;
   }
