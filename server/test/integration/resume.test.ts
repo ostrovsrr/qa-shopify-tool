@@ -51,6 +51,17 @@ vi.mock('../../src/services/shopifyClient', async (importOriginal) => {
   return { ...actual, getShopifyClient: async () => fakeClient };
 });
 
+/** When set, every store id resolves to itself, so resume really takes the store's
+ *  lock (with no store configured — setEnv.ts — it resolves nothing and skips it). */
+let storesResolve = false;
+vi.mock('../../src/config/shopify', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/config/shopify')>();
+  return {
+    ...actual,
+    resolveStoreId: (id?: string) => (storesResolve ? (id ?? null) : actual.resolveStoreId(id)),
+  };
+});
+
 async function recordSubmit(attempt: Date | null): Promise<string> {
   attemptSeenAtSubmit.push(attempt);
   const id = `gid://shopify/BulkOperation/relaunched-${submitted.length + 1}`;
@@ -92,11 +103,14 @@ const { resumeStore, SUBMIT_OUTCOME_UNKNOWN } = await import(
 );
 const { productResumableStores } = await import('../../src/services/productImport.service');
 const { cleanupResumableStores } = await import('../../src/services/cleanupRun.service');
+const { customerResumableStores } = await import('../../src/services/shopifyImport.service');
+const { shareOwner } = await import('../../src/services/storeLock.service');
 
 const runIf = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 
 const jobStore = () => productResumableStores().find((s) => s.label === 'product-job')!;
 const cleanupStore = () => cleanupResumableStores()[0];
+const customerJobStore = () => customerResumableStores().find((s) => s.label === 'customer-job')!;
 
 interface JobSeed {
   submitAttemptedAt?: Date | null;
@@ -156,6 +170,7 @@ runIf('resume-on-boot', () => {
     attemptSeenAtSubmit.length = 0;
     taggedIds = [];
     tagListings = 0;
+    storesResolve = false;
     await resetDb();
   });
   afterAll(async () => {
@@ -223,6 +238,61 @@ runIf('resume-on-boot', () => {
     const failed = await job(attempted);
     expect(failed.status).toBe('FAILED');
     expect(failed.bulkOperationId).toBeNull();
+  });
+
+  // A customer store's share runs as several jobs on ONE store, and they hold one
+  // lock between them. Resume re-takes it as the share, so the second sibling is a
+  // re-entrant acquire — not "the store is busy" with its own brother.
+  it('customer: two never-submitted PENDING jobs on one store BOTH relaunch under the share lock', async () => {
+    const validationId = uuidv4();
+    await prisma.validationRun.create({
+      data: {
+        id: validationId,
+        fileName: 'c.csv',
+        fileType: 'CUSTOMER',
+        totalRows: 2,
+        errors: 0,
+        originalRows: {
+          create: [
+            { id: uuidv4(), rowNumber: 2, data: { 'First Name': 'Ann', Email: 'ann@example.com' } },
+            { id: uuidv4(), rowNumber: 3, data: { 'First Name': 'Bob', Email: 'bob@example.com' } },
+          ],
+        },
+      },
+    });
+    const parentId = uuidv4();
+    const jobIds = [uuidv4(), uuidv4()];
+    await prisma.importRun.create({
+      data: {
+        id: parentId,
+        validationId,
+        storeId: null,
+        shopDomain: 'fake.myshopify.com',
+        status: 'RUNNING',
+        batchJobs: {
+          create: jobIds.map((id, i) => ({
+            id,
+            storeId: 'store1',
+            shopDomain: 'fake.myshopify.com',
+            batchIndex: i,
+            batchCount: 2,
+            status: 'PENDING',
+            rowCount: 1,
+          })),
+        },
+      },
+    });
+
+    storesResolve = true;
+    const summary = await resumeStore(customerJobStore());
+
+    // Under a per-job owner the second acquire met its RUNNING brother's lock and
+    // was failed "store busy".
+    expect(summary).toMatchObject({ relaunched: 2, failed: 0 });
+    const jobs = await prisma.importBatchJob.findMany({ where: { importRunId: parentId } });
+    expect(jobs.map((j) => j.status)).toEqual(['RUNNING', 'RUNNING']);
+    const lock = await prisma.storeLock.findUniqueOrThrow({ where: { storeId: 'store1' } });
+    expect(lock).toMatchObject({ ownerType: 'IMPORT_STORE_SHARE', ownerId: shareOwner(parentId, 'store1') });
   });
 
   // ── CLEANUP ───────────────────────────────────────────────────────────────

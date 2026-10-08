@@ -112,14 +112,18 @@ runIf('pre-persist ordering — the row lands before the bulk op is submitted', 
       },
     });
 
+    // A single-store customer import is a one-store batch: the parent and its job
+    // are written first, and the failure lands on the job.
     const result = await startCustomerImport(validationId, 'store1');
-    expect(result).toMatchObject({ ok: false });
+    expect(result).toMatchObject({ ok: true });
 
     const runs = await prisma.importRun.findMany({ where: { validationId } });
     expect(runs).toHaveLength(1);
-    expect(runs[0].status).toBe('FAILED');
-    expect(runs[0].bulkOperationId).toBeNull();
-    expect(runs[0].error).toContain('staged upload exploded');
-    expect(runs[0].submitAttemptedAt).toBeNull();
+    const jobs = await prisma.importBatchJob.findMany({ where: { importRunId: runs[0].id } });
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].status).toBe('FAILED');
+    expect(jobs[0].bulkOperationId).toBeNull();
+    expect(jobs[0].error).toContain('staged upload exploded');
+    expect(jobs[0].submitAttemptedAt).toBeNull();
   });
 });

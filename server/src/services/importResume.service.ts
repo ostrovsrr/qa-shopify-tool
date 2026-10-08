@@ -70,6 +70,9 @@ export interface ResumableRow {
   storeId: string | null;
   createdAt: Date;
   submitAttemptedAt: Date | null;
+  /** A batch job's parent run. Read only for job tables (findResumableRows with
+   *  `withParent`), so a job can re-take its lock as its store's SHARE of that run. */
+  importRunId?: string;
 }
 
 /**
@@ -246,17 +249,25 @@ export interface ResumeDelegate {
   updateMany(args: unknown): Promise<{ count: number }>;
 }
 
-/** PENDING rows that nobody is working (or whose worker died). */
+/** PENDING rows that nobody is working (or whose worker died). `withParent` also
+ *  reads importRunId — only the job tables have that column. */
 export async function findResumableRows(
   delegate: ResumeDelegate,
   staleBefore: Date,
+  options: { withParent?: boolean } = {},
 ): Promise<ResumableRow[]> {
   return delegate.findMany({
     where: {
       status: 'PENDING',
       OR: [{ claimedAt: null }, { claimedAt: { lt: staleBefore } }],
     },
-    select: { id: true, storeId: true, createdAt: true, submitAttemptedAt: true },
+    select: {
+      id: true,
+      storeId: true,
+      createdAt: true,
+      submitAttemptedAt: true,
+      ...(options.withParent ? { importRunId: true } : {}),
+    },
   });
 }
 

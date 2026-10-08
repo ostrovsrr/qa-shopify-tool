@@ -232,7 +232,9 @@ runIf('store busy-lock', () => {
     expect(parent.batchJobs[0]).toMatchObject({ storeId: 'store1', batchCount: 1, productCount: 2 });
   });
 
-  it('a batch naming the same store twice plans ONE job for it (customers)', async () => {
+  // Customers split one store's share across several ops on purpose — but as ONE
+  // share of ONE store, sized for a single store, never as two shares of it.
+  it('a batch naming the same store twice plans ONE share for it (customers)', async () => {
     const validationId = await seedValidation();
     const batch = await startBatchImport(validationId, ['store1', 'store1']);
     expect(batch).toMatchObject({ ok: true });
@@ -241,8 +243,12 @@ runIf('store busy-lock', () => {
       where: { id: (batch as { importRunId: string }).importRunId },
       include: { batchJobs: true },
     });
+    // One row → one op; a doubled store id must not make that two.
     expect(parent.batchJobs).toHaveLength(1);
     expect(parent.batchJobs[0]).toMatchObject({ storeId: 'store1', batchCount: 1 });
+    const locks = await prisma.storeLock.findMany();
+    expect(locks).toHaveLength(1);
+    expect(locks[0].ownerType).toBe('IMPORT_STORE_SHARE');
   });
 
   it('an import into a DIFFERENT store is unaffected', async () => {
