@@ -450,6 +450,30 @@ function opsComplete(done: (opId: string) => boolean): void {
   );
 }
 
+/**
+ * The per-store plan the client previews before an import — a copy of batchSizeFor
+ * in client/src/components/ImportPanel.tsx and StoreImportControls.tsx: store j of
+ * `stores` gets floor(total / stores), plus one for the first total % stores stores.
+ */
+const clientPlan = (total: number, stores: number): number[] =>
+  Array.from({ length: stores }, (_, j) => Math.floor(total / stores) + (j < total % stores ? 1 : 0));
+
+/** Sum a count per store, in the order the stores were selected. */
+function totalsPerStore(storeIds: string[], jobs: { storeId: string | null; count: number }[]): number[] {
+  return storeIds.map((s) => jobs.filter((j) => j.storeId === s).reduce((sum, j) => sum + j.count, 0));
+}
+
+/** [units, stores, BULK_OPS_PER_STORE] — uneven ones on purpose: the +1 remainders
+ *  are where a contiguous slice → store mapping drifts from the client plan. */
+const PLAN_CASES = [
+  [12, 2, '5'],
+  [23, 3, '5'],
+  [20, 2, '5'],
+  [7, 3, '5'], // k capped to 2
+  [11, 2, '3'],
+  [9, 4, '5'], // k capped to 2
+] as const;
+
 const jobsOf = (importRunId: string) =>
   prisma.importBatchJob.findMany({ where: { importRunId }, orderBy: { batchIndex: 'asc' } });
 
@@ -549,13 +573,16 @@ runIf('customer import: k bulk ops per store', () => {
     }
   });
 
-  it('a multi-store start plans stores × k jobs, each block of k on its own store', async () => {
+  it('a multi-store start plans stores × k jobs, dealt round-robin across the stores', async () => {
+    vi.stubEnv('BULK_OPS_PER_STORE', '5');
     const result = await startBatchImport(await seedValidation(20), ['store1', 'store2']);
     const parentId = (result as { importRunId: string }).importRunId;
 
     const jobs = await jobsOf(parentId);
     expect(jobs).toHaveLength(10);
-    expect(jobs.map((j) => j.storeId)).toEqual([...Array(5).fill('store1'), ...Array(5).fill('store2')]);
+    expect(jobs.map((j) => j.storeId)).toEqual(
+      Array.from({ length: 10 }, (_, i) => (i % 2 === 0 ? 'store1' : 'store2')),
+    );
     expect(jobs.every((j) => j.batchCount === 10 && j.rowCount === 2)).toBe(true);
 
     const parent = await prisma.importRun.findUniqueOrThrow({ where: { id: parentId } });
@@ -576,6 +603,22 @@ runIf('customer import: k bulk ops per store', () => {
       ['store2', 1, 2, 10],
     ]);
   });
+
+  // The SE confirms a per-store plan before importing; the per-store results table
+  // afterwards must show the same totals, not ones off by up to k-1.
+  it.each(PLAN_CASES)(
+    '%i rows over %i stores (BULK_OPS_PER_STORE=%s): each store gets what the client plan showed',
+    async (rows, stores, k) => {
+      vi.stubEnv('BULK_OPS_PER_STORE', k);
+      const storeIds = Array.from({ length: stores }, (_, s) => `store${s + 1}`);
+      const result = await startBatchImport(await seedValidation(rows), storeIds);
+      expect(result).toMatchObject({ ok: true });
+      const jobs = await jobsOf((result as { importRunId: string }).importRunId);
+      expect(totalsPerStore(storeIds, jobs.map((j) => ({ storeId: j.storeId, count: j.rowCount })))).toEqual(
+        clientPlan(rows, stores),
+      );
+    },
+  );
 
   it('jobs that fail at launch free the share only once every sibling is terminal', async () => {
     // Two of three submits are refused outright; the third reaches Shopify.
@@ -773,13 +816,16 @@ runIf('product import: k bulk ops per store', () => {
     }
   });
 
-  it('a multi-store start plans stores × k jobs, each block of k on its own store', async () => {
+  it('a multi-store start plans stores × k jobs, dealt round-robin across the stores', async () => {
+    vi.stubEnv('BULK_OPS_PER_STORE', '5');
     const result = await startBatchProductImport(await seedGroupedUpload(20), ['store1', 'store2']);
     const parentId = (result as { importRunId: string }).importRunId;
 
     const jobs = await productJobsOf(parentId);
     expect(jobs).toHaveLength(10);
-    expect(jobs.map((j) => j.storeId)).toEqual([...Array(5).fill('store1'), ...Array(5).fill('store2')]);
+    expect(jobs.map((j) => j.storeId)).toEqual(
+      Array.from({ length: 10 }, (_, i) => (i % 2 === 0 ? 'store1' : 'store2')),
+    );
     expect(jobs.every((j) => j.batchCount === 10 && j.productCount === 2)).toBe(true);
 
     const parent = await prisma.productImportRun.findUniqueOrThrow({ where: { id: parentId } });
@@ -800,6 +846,22 @@ runIf('product import: k bulk ops per store', () => {
       ['store2', 1, 2, 10],
     ]);
   });
+
+  // Customer twin: the per-store plan the SE confirmed (in products) is what each
+  // store receives.
+  it.each(PLAN_CASES)(
+    '%i products over %i stores (BULK_OPS_PER_STORE=%s): each store gets what the client plan showed',
+    async (products, stores, k) => {
+      vi.stubEnv('BULK_OPS_PER_STORE', k);
+      const storeIds = Array.from({ length: stores }, (_, s) => `store${s + 1}`);
+      const result = await startBatchProductImport(await seedGroupedUpload(products), storeIds);
+      expect(result).toMatchObject({ ok: true });
+      const jobs = await productJobsOf((result as { importRunId: string }).importRunId);
+      expect(totalsPerStore(storeIds, jobs.map((j) => ({ storeId: j.storeId, count: j.productCount })))).toEqual(
+        clientPlan(products, stores),
+      );
+    },
+  );
 
   it('jobs that fail at launch free the share only once every sibling is terminal', async () => {
     // Two of three submits are refused outright; the third reaches Shopify.

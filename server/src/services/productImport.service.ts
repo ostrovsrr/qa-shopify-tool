@@ -874,16 +874,22 @@ export async function startBatchProductImport(
   const batchCount = storeIds.length * k;
   const batches = splitIntoBatches(groups, batchCount);
 
-  // ── 2. PLAN the jobs: slice i → store floor(i / k), so each store gets k
-  //       contiguous slices. No side effect yet: every field comes from the CSV,
-  //       env config, or the clients built above.
+  // ── 2. PLAN the jobs: slice i → store i mod stores (round-robin), so each store
+  //       gets k slices. Not k contiguous slices per store: splitIntoBatches gives
+  //       its +1 remainders to the EARLIEST slices, and dealt in blocks of k they
+  //       all land on the first store(s) — off by up to k-1 products from the
+  //       per-store plan the client previews (batchSizeFor). Dealt round-robin,
+  //       store j's total is exactly splitIntoBatches(n, stores)[j]. Finalize and
+  //       resume index by batchIndex alone, so nothing needs a store's products
+  //       contiguous. No side effect yet: every field comes from the CSV, env
+  //       config, or the clients built above.
   const domainOf = new Map(
     storeIds.map((storeId, s) => [storeId, clients[s]?.shop ?? shopDomainFor(storeId)]),
   );
   const contextOf = new Map(storeIds.map((storeId, s) => [storeId, contexts[s]]));
   const planned = batches
     .map((batch, index) => {
-      const storeId = storeIds[Math.floor(index / k)];
+      const storeId = storeIds[index % storeIds.length];
       return { id: uuidv4(), storeId, index, batch, shopDomain: domainOf.get(storeId)! };
     })
     .filter((p) => p.batch.length > 0); // fewer products than slices
