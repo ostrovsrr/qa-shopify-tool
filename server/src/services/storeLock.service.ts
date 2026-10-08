@@ -37,7 +37,26 @@ export type StoreLockOwnerType =
   | 'IMPORT_JOB'
   | 'PRODUCT_IMPORT_RUN'
   | 'PRODUCT_IMPORT_JOB'
+  | 'IMPORT_STORE_SHARE'
+  | 'PRODUCT_IMPORT_STORE_SHARE'
   | 'CLEANUP_RUN';
+
+/**
+ * A store's SHARE of a batch run: the set of that run's jobs aimed at one store.
+ *
+ * Several jobs of one batch run on the same store at once, so no single job can own
+ * the lock — the first to finish would free the store under its still-running
+ * siblings. The share is the owner instead, and it is judged and released as a set.
+ * ownerId is "<parentRunId>:<storeId>". Run ids are uuids (no colon), so the first
+ * colon always splits them; a store id may contain one.
+ */
+export const shareOwner = (parentRunId: string, storeId: string): string =>
+  `${parentRunId}:${storeId}`;
+
+export function parseShareOwner(ownerId: string): { parentRunId: string; storeId: string } {
+  const at = ownerId.indexOf(':');
+  return { parentRunId: ownerId.slice(0, at), storeId: ownerId.slice(at + 1) };
+}
 
 export interface StoreLockOwner {
   ownerType: StoreLockOwnerType;
@@ -130,6 +149,36 @@ function judgeHolder(lock: StoreLock, row: HolderRow | undefined): HolderVerdict
   return 'finished';
 }
 
+/**
+ * One HolderRow standing for a whole share, so judgeHolder (and everything that calls
+ * it) stays unaware of sets. Any non-terminal job makes the share non-terminal; else a
+ * FAILED-while-submitting job makes it the ambiguous kind; else it is simply done. No
+ * jobs → undefined, which judgeHolder reads as "owner row gone".
+ */
+function summarizeShare(ownerId: string, jobs: HolderRow[]): HolderRow | undefined {
+  if (jobs.length === 0) return undefined;
+  const open = jobs.find((j) => !TERMINAL_BULK_STATUSES.includes(j.status));
+  if (open) {
+    return { id: ownerId, status: open.status, submitAttemptedAt: null, bulkOperationId: null };
+  }
+  const ambiguous = jobs.find(
+    (j) => j.status === 'FAILED' && j.submitAttemptedAt && !j.bulkOperationId,
+  );
+  if (ambiguous) {
+    return {
+      id: ownerId,
+      status: 'FAILED',
+      submitAttemptedAt: ambiguous.submitAttemptedAt,
+      bulkOperationId: null,
+    };
+  }
+  return { id: ownerId, status: 'COMPLETED', submitAttemptedAt: null, bulkOperationId: null };
+}
+
+type ShareWhere = { OR: { importRunId: string; storeId: string }[] };
+type ShareJob = HolderRow & { importRunId: string; storeId: string | null };
+const SHARE_SELECT = { ...HOLDER_SELECT, importRunId: true, storeId: true } as const;
+
 const holderKey = (ownerType: string, ownerId: string): string => `${ownerType}:${ownerId}`;
 
 /**
@@ -170,6 +219,31 @@ async function holderRows(db: Db, locks: StoreLock[]): Promise<Map<string, Holde
   for (const [type, rows] of groups) {
     for (const row of rows) byKey.set(holderKey(type, row.id), row);
   }
+
+  // Share owners: still ONE query per owner table (the jobs of every share at once),
+  // then folded to one synthetic row per share.
+  const shares: [StoreLockOwnerType, (where: ShareWhere) => Promise<ShareJob[]>][] = [
+    ['IMPORT_STORE_SHARE', (where) => db.importBatchJob.findMany({ where, select: SHARE_SELECT })],
+    [
+      'PRODUCT_IMPORT_STORE_SHARE',
+      (where) => db.productImportJob.findMany({ where, select: SHARE_SELECT }),
+    ],
+  ];
+  await Promise.all(
+    shares.map(async ([type, find]) => {
+      const ids = idsOf(type);
+      if (ids.length === 0) return;
+      const parsed = ids.map((id) => ({ id, ...parseShareOwner(id) }));
+      const jobs = await find({
+        OR: parsed.map((p) => ({ importRunId: p.parentRunId, storeId: p.storeId })),
+      });
+      for (const p of parsed) {
+        const mine = jobs.filter((j) => j.importRunId === p.parentRunId && j.storeId === p.storeId);
+        const row = summarizeShare(p.id, mine);
+        if (row) byKey.set(holderKey(type, p.id), row);
+      }
+    }),
+  );
   return byKey;
 }
 
@@ -279,6 +353,33 @@ export async function acquireStoreLocks(
  */
 export async function releaseStoreLock(ownerId: string): Promise<void> {
   await prisma.storeLock.deleteMany({ where: { ownerId } });
+}
+
+/**
+ * Release a store's share of a batch run once the share is finished.
+ *
+ * Called as each job of the share ends; only the LAST one frees the store. Refuses
+ * (returns false) while any sibling is non-terminal, and while any is
+ * outcome-unknown — that one's bulk op may still be running at Shopify, so the lock
+ * is left to its TTL exactly like a single job's. Scoped by the share's ownerId.
+ */
+export async function releaseShareIfDone(
+  flow: 'customer' | 'product',
+  parentRunId: string,
+  storeId: string,
+): Promise<boolean> {
+  const where = { importRunId: parentRunId, storeId };
+  const jobs =
+    flow === 'customer'
+      ? await prisma.importBatchJob.findMany({ where, select: HOLDER_SELECT })
+      : await prisma.productImportJob.findMany({ where, select: HOLDER_SELECT });
+  const owner = shareOwner(parentRunId, storeId);
+  const row = summarizeShare(owner, jobs);
+  if (row && (!TERMINAL_BULK_STATUSES.includes(row.status) || row.submitAttemptedAt)) {
+    return false;
+  }
+  await releaseStoreLock(owner);
+  return true;
 }
 
 /**
