@@ -99,6 +99,13 @@ describe('DuplicatePhoneRule', () => {
     expect(issues.every((i) => i.issueType === 'DuplicatePhone')).toBe(true);
   });
 
+  it('caps the rows listed for a large group, so message size does not grow with it', () => {
+    const issues = rule.validate(makeRows(Array.from({ length: 3000 }, () => ({ Phone: '5551234567' }))));
+    expect(issues).toHaveLength(2999);
+    expect(issues[0].message).toContain('appears in 3,000 rows: 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 and 2,990 more.');
+    expect(Math.max(...issues.map((i) => i.message.length))).toBeLessThan(300);
+  });
+
   it('does not merge a genuine 11-digit non-NANP number with a 10-digit one', () => {
     // 11 digits but not starting with "1", so nothing is stripped → not a match
     expect(rule.validate(makeRows([{ Phone: '42898851714' }, { Phone: '2898851714' }]))).toHaveLength(0);

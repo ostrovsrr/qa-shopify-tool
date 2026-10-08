@@ -23,6 +23,15 @@ describe('TagsRule', () => {
     expect(issues.some((i) => i.issueType === 'TagTooLong')).toBe(true);
   });
 
+  // Same counting as FieldLengthRule: characters (code points), not UTF-16 units.
+  // 200 emoji are 200 characters but 400 UTF-16 units.
+  it('counts tag length in characters, so emoji are not double-counted', () => {
+    expect(rule.validate(makeRows([{ Tags: '\u{1F600}'.repeat(200) }]))).toHaveLength(0);
+    const issues = rule.validate(makeRows([{ Tags: '\u{1F600}'.repeat(256) }]));
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('is 256 characters long');
+  });
+
   it('errors when there are more than 250 tags', () => {
     const tags = Array.from({ length: 251 }, (_, i) => `t${i}`).join(',');
     const issues = rule.validate(makeRows([{ Tags: tags }]));

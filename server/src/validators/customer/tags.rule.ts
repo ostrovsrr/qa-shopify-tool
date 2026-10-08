@@ -29,15 +29,18 @@ export class TagsRule implements CustomerValidationRule {
         });
       }
 
+      // Counted in characters (code points), as FieldLengthRule does and as Shopify
+      // counts: an emoji is one character, not the two UTF-16 units .length sees.
       for (const tag of nonEmptyTags) {
-        if (tag.length > 255) {
+        const length = [...tag].length;
+        if (length > 255) {
           issues.push({
             rowNumber: row.rowNumber,
             column: 'Tags',
             severity: 'Error',
             issueType: 'TagTooLong',
             currentValue: tag.length > 60 ? `${tag.substring(0, 60)}...` : tag,
-            message: `Tag "${tag.length > 40 ? tag.substring(0, 40) + '...' : tag}" is ${tag.length} characters long (maximum 255).`,
+            message: `Tag "${tag.length > 40 ? tag.substring(0, 40) + '...' : tag}" is ${length} characters long (maximum 255).`,
             suggestedFix: 'Shorten the tag to 255 characters or fewer.',
           });
         }

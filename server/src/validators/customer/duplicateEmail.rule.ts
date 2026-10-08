@@ -1,4 +1,5 @@
 import { CustomerCsvRow, CustomerValidationIssue, CustomerValidationRule } from '../../types';
+import { formatRowList } from './rowList';
 
 // Shopify keeps ONE customer per email and loses the rest: the test import accepts
 // the first row and rejects the others ("Email has already been taken"); a CSV
@@ -30,7 +31,7 @@ export class DuplicateEmailRule implements CustomerValidationRule {
           severity: 'Error',
           issueType: 'DuplicateEmail',
           currentValue: row.original['Email'] ?? '',
-          message: `Email "${email}" appears in rows: ${duplicateRows.join(', ')}. Shopify keeps one customer per email, so all but one of these rows will not import.`,
+          message: `Email "${email}" appears in ${duplicateRows.length.toLocaleString('en-US')} rows: ${formatRowList(duplicateRows)}. Shopify keeps one customer per email, so all but one of these rows will not import.`,
           suggestedFix: 'Remove or correct the duplicate email address, or turn on "Move duplicates to Notes".',
         });
       }
