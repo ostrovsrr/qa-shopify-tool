@@ -5,9 +5,10 @@ import { PrismaClient } from '@prisma/client';
 //
 // Prisma's default pool size is `num_cpus * 2 + 1`. On the 1-vCPU container this
 // app is destined for, that is THREE connections — and this app holds connections
-// for a very long time. Five code paths open interactive transactions with a
-// 120-second timeout (the bulk-result merges, the validate persist, the product
-// upload), because a large CSV genuinely takes that long to write.
+// for a very long time. Several code paths open interactive transactions with a
+// 120-second timeout (the four bulk-result merges — single run and batch job, for
+// customers and products — the validate persist, the product upload), because a
+// large CSV genuinely takes that long to write.
 //
 // Three connections against 120-second transactions means three concurrent uploads
 // exhaust the pool outright. Everyone else — including the status polls of imports

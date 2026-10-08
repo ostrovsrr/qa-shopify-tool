@@ -53,6 +53,33 @@ export interface ImportFeedback {
   batchStores: BatchStore[];
 }
 
+/**
+ * Label a result's store with its shop domain, for the per-store breakdown and the
+ * report's Store column. Shared by both flows (customers and products are twins).
+ *
+ * A batch knows each store's domain from its jobs. A single-store run has no jobs
+ * — its domain is the run's own shopDomain — and looking it up among the jobs used
+ * to find nothing and print the raw store id ("store3") where every batch printed
+ * "acme-qa.myshopify.com".
+ */
+export function storeLabeller(run: {
+  storeId: string | null;
+  shopDomain: string;
+  batchJobs: { storeId: string | null; shopDomain: string; batchIndex: number }[];
+}): (storeId: string | null) => string {
+  const shopByStore = new Map<string, string>();
+  for (const job of run.batchJobs) {
+    if (job.storeId) shopByStore.set(job.storeId, job.shopDomain);
+  }
+  return (storeId) => {
+    if (!storeId) return run.shopDomain; // legacy row with no store recorded
+    const fromJob = shopByStore.get(storeId);
+    if (fromJob) return fromJob;
+    if (storeId === run.storeId) return run.shopDomain;
+    return storeId;
+  };
+}
+
 // Rejections are the highest-value detail, so surface a good number of them
 // before truncating (the UI shows the overflow count).
 const REJECTED_LIMIT = 200;
@@ -60,46 +87,46 @@ const REJECTED_LIMIT = 200;
 export async function getImportFeedback(
   importRunId: string,
 ): Promise<ImportFeedback | null> {
+  // Called on every status poll, so it must not load a large import's every
+  // result row: the counts are aggregated in the database and only the capped
+  // rejected list is read.
   const run = await prisma.importRun.findUnique({
     where: { id: importRunId },
-    include: { rowResults: true, batchJobs: true },
+    include: { batchJobs: { select: { storeId: true, shopDomain: true, batchIndex: true } } },
   });
   if (!run) return null;
 
-  const rejectedRows: RejectedRow[] = run.rowResults
-    .filter((r) => !r.accepted)
-    .sort((a, b) => a.rowNumber - b.rowNumber)
-    .slice(0, REJECTED_LIMIT)
-    .map((r) => ({
-      rowNumber: r.rowNumber,
-      shopifyField: r.shopifyField,
-      shopifyCode: r.shopifyCode,
-      message: r.message,
-    }));
+  const [rejected, counts] = await Promise.all([
+    prisma.importRowResult.findMany({
+      where: { importRunId, accepted: false },
+      orderBy: { rowNumber: 'asc' },
+      take: REJECTED_LIMIT,
+      select: { rowNumber: true, shopifyField: true, shopifyCode: true, message: true },
+    }),
+    prisma.importRowResult.groupBy({
+      by: ['storeId', 'accepted'],
+      where: { importRunId },
+      _count: { _all: true },
+    }),
+  ]);
+  const rejectedRows: RejectedRow[] = rejected;
 
-  // Per-store split. Label each store via its batch job; fall back to the run's
-  // own shopDomain for the single/legacy (null storeId) group.
-  const shopByStore = new Map<string, string>();
-  for (const job of run.batchJobs) {
-    if (job.storeId) shopByStore.set(job.storeId, job.shopDomain);
-  }
+  // Per-store split, labelled with the store's shop domain.
+  const shopLabel = storeLabeller(run);
   const perStoreMap = new Map<string, PerStoreResult>();
-  for (const r of run.rowResults) {
-    const key = r.storeId ?? '';
+  let totalRows = 0;
+  for (const c of counts) {
+    const n = c._count._all;
+    totalRows += n;
+    const key = c.storeId ?? '';
     let entry = perStoreMap.get(key);
     if (!entry) {
-      entry = {
-        storeId: r.storeId,
-        shopDomain: r.storeId ? shopByStore.get(r.storeId) ?? r.storeId : run.shopDomain,
-        total: 0,
-        accepted: 0,
-        rejected: 0,
-      };
+      entry = { storeId: c.storeId, shopDomain: shopLabel(c.storeId), total: 0, accepted: 0, rejected: 0 };
       perStoreMap.set(key, entry);
     }
-    entry.total++;
-    if (r.accepted) entry.accepted++;
-    else entry.rejected++;
+    entry.total += n;
+    if (c.accepted) entry.accepted += n;
+    else entry.rejected += n;
   }
   const perStore = [...perStoreMap.values()].sort((a, b) => b.total - a.total);
 
@@ -112,7 +139,7 @@ export async function getImportFeedback(
     error: run.error,
     successCount: run.successCount,
     errorCount: run.errorCount,
-    totalRows: run.rowResults.length,
+    totalRows,
     createdAt: run.createdAt,
     rejectedRows,
     perStore,

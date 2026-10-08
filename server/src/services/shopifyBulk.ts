@@ -15,10 +15,37 @@ import type { ShopifyClient } from './shopifyClient';
 // Shopify bulk-op statuses that mean the operation has stopped advancing.
 export const TERMINAL_BULK_STATUSES = ['COMPLETED', 'FAILED', 'CANCELED', 'EXPIRED'];
 
-// A batch job is failed once the reconcile poll has checked it this many times
-// while still non-terminal — bounds a stuck job (perma-RUNNING or repeatedly
+// A cleanup run is failed once its reconcile poll has checked it this many times
+// while still non-terminal — bounds a stuck op (perma-RUNNING or repeatedly
 // erroring). At the client's ~3s poll cadence this is ~15 minutes of watching.
+// The import flows no longer use it: see MAX_IMPORT_RUNTIME_MS.
 export const MAX_JOB_POLL_ATTEMPTS = 300;
+
+// The import flows bound a stuck operation by TIME since submit, not by how often
+// someone polled it: a count of polls trips after ~15 minutes at the client's 3s
+// cadence, while a real bulk import of a large file runs far longer, and failing
+// it then released the store under a live op and threw its results away. Even
+// past this bound an import is only failed when Shopify can no longer tell us its
+// state; one Shopify still reports RUNNING is left running (see importReconcile.ts).
+export const MAX_IMPORT_RUNTIME_MS = 24 * 60 * 60 * 1000;
+
+/** Shopify has no bulk operation with this id (deleted, or never this shop's).
+ *  Permanent: polling again will not make it appear. */
+export class BulkOperationNotFoundError extends Error {
+  constructor(id: string) {
+    super(`Bulk operation ${id} not found while polling.`);
+    this.name = 'BulkOperationNotFoundError';
+  }
+}
+
+/** The result file downloaded but cannot be read or mapped back to the submitted
+ *  lines. Permanent: downloading the same file again gives the same answer. */
+export class BulkResultParseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'BulkResultParseError';
+  }
+}
 
 // ── staged upload → run → poll ───────────────────────────────────────────────
 
@@ -105,6 +132,11 @@ export async function runBulkMutation(
       }
     }`,
     { mutation, path: stagedUploadPath },
+    // NOT idempotent: a re-send after a dropped connection or a 5xx can start a
+    // second bulk op over the same file, importing every record twice. The client
+    // then throws ShopifyOutcomeUnknownError instead of retrying, and the caller
+    // must treat the submit's outcome as unknown.
+    { idempotent: false },
   );
 
   const errs = data.bulkOperationRunMutation.userErrors;
@@ -149,7 +181,7 @@ export async function fetchBulkOperationState(
     }`,
     { id },
   );
-  if (!data.node) throw new Error(`Bulk operation ${id} not found while polling.`);
+  if (!data.node) throw new BulkOperationNotFoundError(id);
   return data.node;
 }
 
@@ -174,13 +206,79 @@ export interface BulkResultLine<R> {
 }
 
 /**
- * Completed result files start at their first input line, so their 0/1 base can
- * be detected safely. Partial files may start anywhere and must state the true
- * base explicitly or every result can shift to the wrong source row.
+ * Where a result file came from. A completed op's file answers every submitted
+ * line; a partial one (partialDataUrl of an op that ended FAILED / CANCELED /
+ * EXPIRED) answers only the lines Shopify got to. Either way the 0/1 base of
+ * __lineNumber is derived from the line numbers AND the submitted line count (see
+ * resolveLineNumberBase), unless the caller states it.
  */
 export type BulkResultSource =
   | { kind: 'complete' }
-  | { kind: 'partial'; lineNumberBase: 0 | 1 };
+  | { kind: 'partial'; lineNumberBase?: 0 | 1 };
+
+/**
+ * Work out whether __lineNumber counts from 0 or 1, from what the file shows and
+ * how many lines were submitted — never from the smallest number alone.
+ *
+ * Taking the minimum as the base is right only while line 0 is present. A
+ * completed file of a 0-based op that is missing its first line starts at 1, reads
+ * as 1-based, and every result silently shifts onto the row above it — nothing
+ * throws, because every shifted number still maps to SOME submitted line. The
+ * submitted count closes that: with n lines, a 0-based file can never contain n
+ * and a 1-based one can never contain 0.
+ *
+ *   contains 0     → base 0
+ *   contains n     → base 1 (a complete 1-based file always contains n; a
+ *                    completed file must also start at 1)
+ *   anything else  → ambiguous, and a guess would misattribute rows. Throw.
+ */
+export function resolveLineNumberBase(
+  lineNumbers: number[],
+  submitted: number,
+  source: BulkResultSource,
+): 0 | 1 {
+  if (source.kind === 'partial' && source.lineNumberBase !== undefined) {
+    return source.lineNumberBase;
+  }
+  // Fold rather than spreading a 100k+ line result as function arguments.
+  let min = Infinity;
+  let max = -Infinity;
+  for (const n of lineNumbers) {
+    if (n < min) min = n;
+    if (n > max) max = n;
+  }
+  if (min === 0) return 0;
+  // (max > submitted fits neither base; returning 1 lets the mapping below reject
+  // the out-of-range line by name.) A completed file must also start at its first
+  // line — one starting further in is partial data, whatever its last line says.
+  if (max >= submitted && (source.kind === 'partial' || min === 1)) return 1;
+  throw new BulkResultParseError(
+    source.kind === 'complete'
+      ? `Completed bulk result starts at __lineNumber ${min} with ${lineNumbers.length} of ${submitted} lines; ` +
+          'refusing to infer a base from what may be partial data.'
+      : `Partial bulk result spans __lineNumber ${min}..${max} of ${submitted} submitted lines; ` +
+          'cannot tell whether it counts from 0 or 1.',
+  );
+}
+
+/**
+ * The reason on a result line that carries no mutation payload. Shopify writes
+ * these two ways: a top-level `message`, or — for a line whose variables failed
+ * GraphQL validation (an unknown input field, a wrong type) — an `errors` array of
+ * `{ message }`, exactly like a GraphQL error response. Reading only `message`
+ * reported the second kind as "Unknown bulk error." while Shopify had said exactly
+ * what was wrong.
+ */
+export function bulkLineErrorMessage(raw: Record<string, unknown>, fallback: string): string {
+  if (typeof raw.message === 'string' && raw.message !== '') return raw.message;
+  if (Array.isArray(raw.errors)) {
+    const messages = raw.errors
+      .map((e) => (e && typeof (e as { message?: unknown }).message === 'string' ? (e as { message: string }).message : ''))
+      .filter(Boolean);
+    if (messages.length > 0) return messages.join('; ');
+  }
+  return fallback;
+}
 
 /** Download a completed bulk operation's result file and parse it line by line,
  *  mapping each line back to its source ref via __lineNumber, then delegating the
@@ -196,43 +294,42 @@ export async function fetchAndParseBulkResults<R, O>(
     throw new Error(`Failed to download bulk results (HTTP ${res.status}).`);
   }
   const text = await res.text();
+  // Everything below is a property of the file itself, so it throws
+  // BulkResultParseError: re-downloading cannot fix it, and a reconcile must fail
+  // the run rather than retry it forever.
   const parsed = text
     .split('\n')
     .map((l) => l.trim())
     .filter(Boolean)
-    .map((l) => JSON.parse(l) as Record<string, unknown>);
+    .map((l, index) => {
+      try {
+        return JSON.parse(l) as Record<string, unknown>;
+      } catch {
+        throw new BulkResultParseError(`Bulk result line ${index + 1} is not valid JSON.`);
+      }
+    });
 
   if (parsed.length === 0) return [];
 
   const numbered = parsed.map((line, index) => {
     const lineNumber = Number(line.__lineNumber);
     if (!Number.isSafeInteger(lineNumber) || lineNumber < 0) {
-      throw new Error(`Bulk result line ${index + 1} has an invalid __lineNumber.`);
+      throw new BulkResultParseError(`Bulk result line ${index + 1} has an invalid __lineNumber.`);
     }
     return { line, lineNumber };
   });
 
-  let base: number;
-  if (source.kind === 'partial') {
-    base = source.lineNumberBase;
-  } else {
-    // Fold rather than spreading a 100k+ line result as function arguments.
-    base = Infinity;
-    for (const item of numbered) {
-      if (item.lineNumber < base) base = item.lineNumber;
-    }
-    if (base !== 0 && base !== 1) {
-      throw new Error(
-        `Completed bulk result starts at __lineNumber ${base}; refusing to infer a base from what may be partial data.`,
-      );
-    }
-  }
+  const base = resolveLineNumberBase(
+    numbered.map((n) => n.lineNumber),
+    lineRefs.length,
+    source,
+  );
 
   return numbered.map(({ line, lineNumber }) => {
     const idx = lineNumber - base;
     const ref = lineRefs[idx];
     if (idx < 0 || idx >= lineRefs.length || ref === undefined) {
-      throw new Error(
+      throw new BulkResultParseError(
         `Bulk result __lineNumber ${lineNumber} does not map to one of the ${lineRefs.length} submitted lines.`,
       );
     }
@@ -249,7 +346,7 @@ export async function fetchAndParseBulkResults<R, O>(
 // fine on localhost, but a hosted platform proxy times out around 100s, so the
 // cleanup routes CANNOT work hosted in this shape. The import services already
 // solved this: they persist the bulk-op id and advance one step per reconcile
-// call (see `MAX_JOB_POLL_ATTEMPTS` and the `pollAttempts` column). Cleanup
+// call (see importReconcile.ts). Cleanup
 // should be converted to that same model — these constants disappear when it is.
 export const BULK_POLL_INTERVAL_MS = 2000;
 export const MAX_BULK_POLL_ATTEMPTS = 150;
@@ -361,8 +458,7 @@ export async function parseBulkDeleteResults(
 
       if (!payload) {
         // Top-level error line (e.g. malformed input) — no mutation payload.
-        const message =
-          typeof raw.message === 'string' ? raw.message : 'Unknown bulk delete error.';
+        const message = bulkLineErrorMessage(raw, 'Unknown bulk delete error.');
         return { ok: false, id: ref ?? 'unknown', message };
       }
 

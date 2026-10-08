@@ -42,6 +42,38 @@ export class ShopifyApiError extends Error {
   }
 }
 
+/**
+ * A NON-IDEMPOTENT request failed in a way that does not say whether Shopify
+ * acted on it: the connection dropped after the request may have been sent, or
+ * a 5xx / gateway error came back. Re-sending could run the mutation twice (for
+ * bulkOperationRunMutation: a second bulk op importing every record again), and
+ * not re-sending could leave one running that nobody tracks. The only honest
+ * answer is "outcome unknown", so the caller must not retry blindly and must not
+ * treat the operation as definitely not started either.
+ *
+ * Extends ShopifyApiError so every existing `instanceof ShopifyApiError` check
+ * still sees it as an API failure.
+ */
+export class ShopifyOutcomeUnknownError extends ShopifyApiError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ShopifyOutcomeUnknownError';
+  }
+}
+
+/** Per-call behaviour of ShopifyClient.query. */
+export interface QueryOptions {
+  /**
+   * Whether this operation is safe to send twice. Defaults to true: queries,
+   * stagedUploadsCreate and the like can simply be repeated after a transient
+   * failure. Pass false for a mutation whose repeat would duplicate a side effect
+   * (bulkOperationRunMutation). Then only a 429 is retried — Shopify throttled the
+   * request without running it — and every ambiguous failure throws
+   * ShopifyOutcomeUnknownError instead of re-sending.
+   */
+  idempotent?: boolean;
+}
+
 /** Config missing/invalid (env not set). */
 export class ShopifyConfigError extends Error {
   constructor(message: string) {
@@ -128,13 +160,25 @@ export class ShopifyClient {
   /** Run a GraphQL operation. Throws ShopifyAuthError / ShopifyApiError.
    *  Transient gateway errors (429/5xx, network blips, non-JSON 5xx bodies) are
    *  retried with exponential backoff so a brief Shopify hiccup mid-poll doesn't
-   *  fail the whole import. */
+   *  fail the whole import.
+   *
+   *  Only for idempotent operations, though. A non-idempotent one (see
+   *  QueryOptions.idempotent) is retried on 429 alone; a network error or 5xx
+   *  throws ShopifyOutcomeUnknownError, because it may already have run. */
   async query<T = unknown>(
     query: string,
     variables: Record<string, unknown> = {},
+    options: QueryOptions = {},
   ): Promise<T> {
+    const idempotent = options.idempotent ?? true;
     const accessToken = await getAccessToken(this.config);
     let lastError: Error = new ShopifyApiError('Shopify request failed.');
+
+    // The non-idempotent exit: say plainly that we cannot know what happened.
+    const outcomeUnknown = (cause: string): ShopifyOutcomeUnknownError =>
+      new ShopifyOutcomeUnknownError(
+        `${cause} Shopify may or may not have acted on the request, so it was not re-sent.`,
+      );
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       let res: Response;
@@ -148,10 +192,13 @@ export class ShopifyClient {
           body: JSON.stringify({ query, variables }),
         });
       } catch (err) {
-        // Network/transport failure — transient, retry.
+        // Network/transport failure — transient, retry. Unless the request may
+        // already have reached Shopify and must not run twice: fetch cannot tell
+        // "never connected" from "connection dropped after the body was sent".
         lastError = new ShopifyApiError(
           `Could not reach Shopify at ${this.config.shop}: ${(err as Error).message}`,
         );
+        if (!idempotent) throw outcomeUnknown(`${lastError.message}.`);
         if (attempt < MAX_ATTEMPTS) {
           await sleep(backoffMs(attempt));
           continue;
@@ -170,6 +217,10 @@ export class ShopifyClient {
         lastError = new ShopifyApiError(
           `Shopify returned a transient HTTP ${res.status} from ${this.config.shop}.`,
         );
+        // 429 is Shopify refusing the request BEFORE running it, so it is safe to
+        // send again whatever the operation. A 5xx is not: the gateway can time
+        // out on a request the shop went on to process.
+        if (!idempotent && res.status !== 429) throw outcomeUnknown(lastError.message);
         if (attempt < MAX_ATTEMPTS) {
           await sleep(backoffMs(attempt));
           continue;
@@ -186,6 +237,7 @@ export class ShopifyClient {
           `Shopify returned a non-JSON response (HTTP ${res.status}): ${text.slice(0, 200)}`,
         );
         // A non-JSON 5xx is a gateway error page — retry; non-JSON 2xx/4xx is not.
+        if (res.status >= 500 && !idempotent) throw outcomeUnknown(lastError.message);
         if (res.status >= 500 && attempt < MAX_ATTEMPTS) {
           await sleep(backoffMs(attempt));
           continue;
