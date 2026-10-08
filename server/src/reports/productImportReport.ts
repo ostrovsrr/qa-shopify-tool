@@ -5,7 +5,8 @@ import { HttpError } from '../errors';
 import { purgedMessage } from '../services/retention.service';
 import { excelSafeRecord, excelSafeText } from './excelCell';
 import { hintFor } from '../services/productFeedback.service';
-import { FILE_BLOCKING_ISSUE_TYPES } from '../validators/product';
+import { compareProductIssues, FILE_BLOCKING_ISSUE_TYPES } from '../validators/product';
+import { productHandleTracker } from '../services/productCsvParser';
 
 // Product import report (results keyed by Handle):
 //   • Products With Shopify Result — one row per product, in CSV order
@@ -103,10 +104,11 @@ export async function streamProductImportReport(
   const seen = new Set<string>();
   const orderedHandles: string[] = [];
   const titleByHandle = new Map<string, string>();
+  const productOf = productHandleTracker();
   for await (const batch of iterOriginalRows(run.uploadId)) {
     for (const r of batch) {
       const data = (r.data ?? {}) as Record<string, string>;
-      const handle = (data['Handle'] ?? '').trim();
+      const handle = productOf(data);
       if (!handle || seen.has(handle)) continue;
       seen.add(handle);
       orderedHandles.push(handle);
@@ -177,26 +179,30 @@ export async function streamProductPrecheckReport(
   if (originalColumns.length === 0) {
     sheet.addRow(['No uploaded file data available.']).commit();
   } else {
-    const allColumns = ['Row Number', 'Expected Result', 'Pre-check Errors', ...originalColumns];
-    sheet.columns = allColumns.map((col) => ({
-      header: excelSafeText(col),
-      key: col,
-      width: col === 'Row Number' ? 12 : col === 'Expected Result' ? 22 : col === 'Pre-check Errors' ? 30 : 22,
-    }));
-    sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(allColumns.length)}1` };
+    const toolColumns: ToolColumn[] = [
+      { header: 'Row Number', key: 'tool:row', width: 12 },
+      { header: 'Expected Result', key: 'tool:expected', width: 22 },
+      { header: 'Pre-check Errors', key: 'tool:errors', width: 30 },
+    ];
+    const columnCount = setUploadedFileColumns(sheet, toolColumns, originalColumns);
+    sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(columnCount)}1` };
     styleHeader(sheet.getRow(1), HEADER_COLOURS.Uploaded);
 
+    // Rows are labelled by the product groupByHandle puts them in, so a
+    // continuation row with a blank Handle carries its product's verdict.
+    const productOf = productHandleTracker();
     for await (const batch of iterOriginalRows(uploadId)) {
       for (const origRow of batch) {
         const data = (origRow.data ?? {}) as Record<string, string>;
-        const handle = (data['Handle'] ?? '').trim();
+        const handle = productOf(data);
         const rejected = rejectedHandles.has(handle);
         // Per product, so the fine ones stay visible even when the file has a
         // blocker; the blocker's own product says so.
         // An upload made before the pre-check existed has no issues because it
         // was never checked — not because it is clean.
-        const expected =
-          upload.precheckErrors === null
+        const expected = !handle
+          ? NO_PRODUCT
+          : upload.precheckErrors === null
             ? 'Not checked'
             : blockingHandles.has(handle)
               ? 'Rejected (blocks file)'
@@ -204,13 +210,13 @@ export async function streamProductPrecheckReport(
                 ? 'Rejected'
                 : 'Imports';
         const rowData: Record<string, string | number> = {
-          'Row Number': origRow.rowNumber,
-          'Expected Result': expected,
-          'Pre-check Errors': [...(typesByRow.get(origRow.rowNumber) ?? [])].join(', '),
+          'tool:row': origRow.rowNumber,
+          'tool:expected': expected,
+          'tool:errors': [...(typesByRow.get(origRow.rowNumber) ?? [])].join(', '),
+          ...uploadedCells(originalColumns, data),
         };
-        for (const col of originalColumns) rowData[col] = data[col] ?? '';
         const row = sheet.addRow(excelSafeRecord(rowData));
-        if (expected !== 'Not checked') {
+        if (expected !== 'Not checked' && expected !== NO_PRODUCT) {
           row.getCell(2).fill = {
             type: 'pattern',
             pattern: 'solid',
@@ -321,10 +327,18 @@ async function addPrecheckSheet(
   sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(columns.length)}1` };
   styleHeader(sheet.getRow(1), HEADER_COLOURS.Precheck);
 
-  const issues = await prisma.productValidationIssue.findMany({
-    where: { uploadRunId },
-    orderBy: [{ rowNumber: 'asc' }, { issueType: 'asc' }],
-  });
+  // Same order as the upload response and the upload detail.
+  const issues = (
+    await prisma.productValidationIssue.findMany({
+      where: { uploadRunId },
+      orderBy: [{ rowNumber: 'asc' }, { issueType: 'asc' }],
+    })
+  ).sort((a, b) =>
+    compareProductIssues(
+      { rowNumber: a.rowNumber, issueType: a.issueType, column: a.columnName },
+      { rowNumber: b.rowNumber, issueType: b.issueType, column: b.columnName },
+    ),
+  );
   if (issues.length === 0) sheet.addRow(['No pre-check errors.']).commit();
   for (const issue of issues) {
     sheet.addRow(excelSafeRecord({
@@ -355,30 +369,38 @@ async function addFullUploadedFileSheet(
     return;
   }
 
-  const allColumns = ['Row Number', 'Result', 'Shopify Code', 'Shopify Message', ...originalColumns];
-  sheet.columns = allColumns.map((col) => ({
-    header: excelSafeText(col),
-    key: col,
-    width: col === 'Row Number' ? 12 : col === 'Result' ? 14 : col === 'Shopify Message' ? 50 : 22,
-  }));
-  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(allColumns.length)}1` };
+  const toolColumns: ToolColumn[] = [
+    { header: 'Row Number', key: 'tool:row', width: 12 },
+    { header: 'Result', key: 'tool:result', width: 14 },
+    { header: 'Shopify Code', key: 'tool:code', width: 22 },
+    { header: 'Shopify Message', key: 'tool:message', width: 50 },
+  ];
+  const columnCount = setUploadedFileColumns(sheet, toolColumns, originalColumns);
+  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(columnCount)}1` };
   styleHeader(sheet.getRow(1), HEADER_COLOURS.Uploaded);
 
   // Page the rows so only BATCH of them are ever resident at once.
   let wrote = false;
+  const productOf = productHandleTracker();
   for await (const batch of iterOriginalRows(uploadRunId)) {
     for (const origRow of batch) {
       const data = (origRow.data ?? {}) as Record<string, string>;
       // Results are per product (Handle); every CSV row of a product — variant
-      // and image rows included — carries its product's verdict.
-      const result = resultByHandle.get((data['Handle'] ?? '').trim());
+      // and image rows included, and continuation rows whose Handle is blank —
+      // carries its product's verdict. The grouping is groupByHandle's.
+      const handle = productOf(data);
+      const result = handle ? resultByHandle.get(handle) : undefined;
       const rowData: Record<string, string | number> = {
-        'Row Number': origRow.rowNumber,
-        Result: result ? (result.accepted ? 'Accepted' : 'Rejected') : 'Not imported',
-        'Shopify Code': result?.shopifyCode ?? '',
-        'Shopify Message': result?.message ?? '',
+        'tool:row': origRow.rowNumber,
+        'tool:result': !handle
+          ? NO_PRODUCT
+          : result
+            ? (result.accepted ? 'Accepted' : 'Rejected')
+            : 'Not imported',
+        'tool:code': result?.shopifyCode ?? '',
+        'tool:message': result?.message ?? '',
+        ...uploadedCells(originalColumns, data),
       };
-      for (const col of originalColumns) rowData[col] = data[col] ?? '';
       const row = sheet.addRow(excelSafeRecord(rowData));
       if (result) {
         row.getCell(2).fill = {
@@ -394,6 +416,45 @@ async function addFullUploadedFileSheet(
   if (!wrote) sheet.addRow(['No uploaded file data available.']).commit();
 
   sheet.commit();
+}
+
+// A row before the first Handle: groupByHandle drops it (there is no product to
+// attach it to), so nothing imports it and no verdict applies to it.
+const NO_PRODUCT = 'Not a product (no Handle)';
+
+interface ToolColumn {
+  header: string;
+  key: string;
+  width: number;
+}
+
+// ExcelJS keeps one column per key, so keying the file's own columns by their
+// header text let a CSV header named like a tool column ("Row Number",
+// "Result", ...) overwrite the tool's column. Tool columns use `tool:` keys and
+// the file's columns are keyed by position (`csv:<i>`): the two can never meet,
+// and the headers people see are unchanged.
+function setUploadedFileColumns(
+  sheet: ExcelJS.Worksheet,
+  toolColumns: ToolColumn[],
+  originalColumns: string[],
+): number {
+  sheet.columns = [
+    ...toolColumns,
+    ...originalColumns.map((col, i) => ({ header: excelSafeText(col), key: csvKey(i), width: 22 })),
+  ];
+  return toolColumns.length + originalColumns.length;
+}
+
+function csvKey(index: number): string {
+  return `csv:${index}`;
+}
+
+function uploadedCells(originalColumns: string[], data: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  originalColumns.forEach((col, i) => {
+    out[csvKey(i)] = data[col] ?? '';
+  });
+  return out;
 }
 
 function columnIndexToLetter(index: number): string {

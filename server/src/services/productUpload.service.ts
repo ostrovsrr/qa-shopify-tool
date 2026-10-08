@@ -4,7 +4,7 @@ import { CsvParseError } from '../errors';
 import { parseProductCsvFile } from './productCsvParser';
 import { ProductHistoryItem, ProductValidationIssue, UpdateUploadMetadata } from '../types';
 import { clampHistoryLimit, HistoryQuery } from './customerValidation.service';
-import { FILE_BLOCKING_ISSUE_TYPES, runProductValidation } from '../validators/product';
+import { compareProductIssues, FILE_BLOCKING_ISSUE_TYPES, runProductValidation } from '../validators/product';
 
 // Upload: parse the product CSV, group by Handle, run the file-level pre-check
 // (validators/product), and persist the run, its raw rows and its findings. No
@@ -155,7 +155,9 @@ export async function getUploadRun(uploadId: string): Promise<UploadDetail | nul
     productCount: upload.productCount,
     rowCount: upload._count.originalRows,
     precheckErrors: upload.precheckErrors,
-    issues: upload.validationIssues.map(toApiIssue),
+    // Re-sorted in JS so the order is exactly the upload response's, whatever
+    // the database's collation does with ties.
+    issues: upload.validationIssues.map(toApiIssue).sort(compareProductIssues),
     ticketNumber: upload.ticketNumber,
     ticketName: upload.ticketName,
     comments: upload.comments,
