@@ -9,8 +9,18 @@ vi.mock('../src/services/shopifyClient', () => ({
     throw new Error('resume must not consult the shop');
   },
 }));
+// The lock must be taken through a TRANSACTION handle: pg_advisory_xact_lock is
+// transaction-scoped, so on the bare client it is released the instant it is taken
+// and acquire's check-then-upsert is unguarded. Record what acquire was handed.
+const TX = { isTransactionHandle: true };
+const acquiredWith: unknown[] = [];
+vi.mock('../src/db/prisma', () => ({
+  default: { $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(TX) },
+}));
 vi.mock('../src/services/storeLock.service', () => ({
-  acquireStoreLock: async () => undefined,
+  acquireStoreLock: async (db: unknown) => {
+    acquiredWith.push(db);
+  },
 }));
 
 const { decideResume, resumeStore, STALE_CLAIM_MS, SUBMIT_OUTCOME_UNKNOWN } = await import(
@@ -116,6 +126,7 @@ const THEIRS = 'theirs-qa';
 
 beforeEach(() => {
   shopifyClientCalls.length = 0;
+  acquiredWith.length = 0;
   process.env.SHOPIFY_TEST_STORES = JSON.stringify([
     { id: OURS, label: 'Ours', shop: 'ours-qa.myshopify.com', adminToken: 'shpat_ours' },
   ]);
@@ -188,6 +199,14 @@ describe('resumeStore — concurrent bulk operations on one shop', () => {
     expect(summary.relaunched).toBe(5);
     expect(calls.relaunched).toHaveLength(5);
     expect(calls.failed).toEqual([]);
+  });
+
+  it('re-takes the store lock inside a transaction, never on the bare client', async () => {
+    const { store } = fakeStore([row({ id: 'job-a' })]);
+
+    await resumeStore(store);
+
+    expect(acquiredWith).toEqual([TX]);
   });
 });
 

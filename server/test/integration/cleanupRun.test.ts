@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ASYNC CLEANUP.
@@ -45,28 +45,56 @@ const fakeClient = {
   },
 };
 
+/** When set, getShopifyClient throws it — an instance with no token for the store. */
+let clientError: Error | null = null;
+/** How the bulk-delete submit fails, if it does: before the mutation call (nothing
+ *  reached Shopify) or after markSubmitAttempt (outcome unknown). */
+let submitFailure: 'before-mutation' | 'during-mutation' | null = null;
+/** When set, fetchBulkOperationState throws it. */
+let fetchError: Error | null = null;
+/** Runs inside fetchBulkOperationState — lets a test stage a concurrent poll. */
+let onFetch: (() => Promise<void>) | null = null;
+
 vi.mock('../../src/services/shopifyClient', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/services/shopifyClient')>();
-  return { ...actual, getShopifyClient: async () => fakeClient };
+  return {
+    ...actual,
+    getShopifyClient: async () => {
+      if (clientError) throw clientError;
+      return fakeClient;
+    },
+  };
 });
 
 vi.mock('../../src/services/shopifyBulk', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/services/shopifyBulk')>();
   return {
     ...actual,
-    submitBulkDelete: async () => {
+    submitBulkDelete: async (
+      _client: unknown,
+      _ids: string[],
+      _spec: unknown,
+      beforeRun?: () => Promise<void>,
+    ) => {
+      if (submitFailure === 'before-mutation') throw new Error('staged upload failed');
+      if (beforeRun) await beforeRun();
+      if (submitFailure === 'during-mutation') throw new Error('socket hang up');
       const id = `gid://shopify/BulkOperation/del-${submittedOps.length + 1}`;
       submittedOps.push(id);
       return id;
     },
-    fetchBulkOperationState: async (_c: unknown, id: string) => ({
-      id,
-      status: opStatus,
-      errorCode: null,
-      objectCount: String(taggedIds.length),
-      url: opUrl,
-      partialDataUrl: null,
-    }),
+    fetchBulkOperationState: async (_c: unknown, id: string) => {
+      if (onFetch) await onFetch();
+      if (fetchError) throw fetchError;
+      return {
+        id,
+        status: opStatus,
+        errorCode: null,
+        objectCount: String(taggedIds.length),
+        url: opUrl,
+        partialDataUrl: null,
+      };
+    },
     parseBulkDeleteResults: async (_url: string, ids: string[]) => ({
       deleted: ids.length - 1,
       errors: [{ id: ids[ids.length - 1], message: 'Product is referenced by an order' }],
@@ -79,6 +107,11 @@ const { resetDb } = await import('./resetDb');
 const { startCleanupRun, reconcileCleanupRun, sweepRunningCleanups } = await import(
   '../../src/services/cleanupRun.service'
 );
+const { MAX_JOB_POLL_ATTEMPTS } = await import('../../src/services/shopifyBulk');
+const { resetShopifyConfigCache } = await import('../../src/config/shopify');
+const { busyStores } = await import('../../src/services/storeLock.service');
+
+const lockOn = (storeId: string) => prisma.storeLock.findUnique({ where: { storeId } });
 
 const runIf = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 
@@ -92,7 +125,15 @@ runIf('async cleanup', () => {
     opUrl = null;
     submittedOps.length = 0;
     serialDeletes = 0;
+    clientError = null;
+    submitFailure = null;
+    fetchError = null;
+    onFetch = null;
     await resetDb();
+  });
+  afterEach(() => {
+    process.env.SHOPIFY_TEST_STORES = '[]';
+    resetShopifyConfigCache();
   });
   afterAll(async () => {
     await prisma.$disconnect();
@@ -265,5 +306,154 @@ runIf('async cleanup', () => {
     const run = await startCleanupRun('PRODUCT', 'store1', 'qa-import-abc', 'abc');
     expect(run.importRunId).toBe('abc');
     expect(run.tag).toBe('qa-import-abc');
+  });
+
+  // ── SHARED DATABASE: ONLY THE OWNING INSTANCE ADVANCES A CLEANUP ──────────
+  // Eleven instances share one database, each with tokens for its own stores. A
+  // non-owner's reconcile used to bump pollAttempts BEFORE discovering it could not
+  // build a client, so ten instances' sweeps burned the cap and the run was failed
+  // — store released — while Shopify was still deleting.
+  async function runningCleanup(storeId: string, pollAttempts = 0) {
+    const run = await prisma.cleanupRun.create({
+      data: {
+        entity: 'CUSTOMER',
+        storeId,
+        shopDomain: `${storeId}.myshopify.com`,
+        tag: 'qa-import',
+        status: 'RUNNING',
+        bulkOperationId: `gid://shopify/BulkOperation/${storeId}`,
+        submittedIds: ['gid://shopify/Customer/1'],
+        pollAttempts,
+      },
+    });
+    await prisma.storeLock.create({
+      data: {
+        storeId,
+        ownerType: 'CLEANUP_RUN',
+        ownerId: run.id,
+        operation: 'a customer cleanup',
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000),
+      },
+    });
+    return run;
+  }
+
+  it("the sweep leaves another instance's cleanups alone", async () => {
+    process.env.SHOPIFY_TEST_STORES = JSON.stringify([
+      // apiVersion explicitly: setEnv blanks SHOPIFY_API_VERSION, which would fail it.
+      { id: 'mine', shop: 'mine.myshopify.com', adminToken: 'shpat_test', apiVersion: '2026-01' },
+    ]);
+    resetShopifyConfigCache();
+    const mine = await runningCleanup('mine');
+    const theirs = await runningCleanup('theirs');
+    opStatus = 'COMPLETED';
+
+    await sweepRunningCleanups();
+
+    expect((await prisma.cleanupRun.findUniqueOrThrow({ where: { id: mine.id } })).status).toBe(
+      'COMPLETED',
+    );
+    const untouched = await prisma.cleanupRun.findUniqueOrThrow({ where: { id: theirs.id } });
+    expect(untouched).toMatchObject({ status: 'RUNNING', pollAttempts: 0 });
+    expect(await lockOn('theirs')).not.toBeNull();
+  });
+
+  it('a reconcile that cannot build a client does not spend the poll budget', async () => {
+    const run = await runningCleanup('store1', MAX_JOB_POLL_ATTEMPTS);
+    clientError = new Error('Store "store1" is not configured.');
+
+    await expect(reconcileCleanupRun(run.id)).rejects.toThrow('not configured');
+
+    const after = await prisma.cleanupRun.findUniqueOrThrow({ where: { id: run.id } });
+    // Not failed, not counted, store still held.
+    expect(after).toMatchObject({ status: 'RUNNING', pollAttempts: MAX_JOB_POLL_ATTEMPTS });
+    expect(await lockOn('store1')).not.toBeNull();
+  });
+
+  it('counts concurrent polls atomically', async () => {
+    const run = await runningCleanup('store1');
+
+    await Promise.all([reconcileCleanupRun(run.id), reconcileCleanupRun(run.id)]);
+
+    expect((await prisma.cleanupRun.findUniqueOrThrow({ where: { id: run.id } })).pollAttempts).toBe(2);
+  });
+
+  // ── THE CAP MUST NOT FREE A STORE UNDER A LIVE DELETE ─────────────────────
+  it('past the poll cap, a delete Shopify still reports RUNNING stays RUNNING and locked', async () => {
+    const run = await runningCleanup('store1', MAX_JOB_POLL_ATTEMPTS);
+    opStatus = 'RUNNING';
+
+    const after = await reconcileCleanupRun(run.id);
+
+    expect(after?.status).toBe('RUNNING');
+    expect(await lockOn('store1')).not.toBeNull();
+
+    // And once Shopify finishes, it finalizes normally.
+    opStatus = 'COMPLETED';
+    expect((await reconcileCleanupRun(run.id))?.status).toBe('COMPLETED');
+    expect(await lockOn('store1')).toBeNull();
+  });
+
+  it('past the poll cap, a delete whose status cannot be read is failed and the store freed', async () => {
+    const run = await runningCleanup('store1', MAX_JOB_POLL_ATTEMPTS);
+    fetchError = new Error('Bulk operation not found while polling.');
+
+    const after = await reconcileCleanupRun(run.id);
+
+    expect(after?.status).toBe('FAILED');
+    expect(after?.error).toContain('Could not read');
+    expect(await lockOn('store1')).toBeNull();
+  });
+
+  it('under the cap, an unreadable status is just a bad poll', async () => {
+    const run = await runningCleanup('store1');
+    fetchError = new Error('network down');
+
+    await expect(reconcileCleanupRun(run.id)).rejects.toThrow('network down');
+    expect((await prisma.cleanupRun.findUniqueOrThrow({ where: { id: run.id } })).status).toBe(
+      'RUNNING',
+    );
+  });
+
+  // ── A SLOWER POLL MUST NOT OVERWRITE A TERMINAL RESULT ────────────────────
+  it('does not overwrite a result another poll already finalized', async () => {
+    const run = await runningCleanup('store1');
+    // While this poll is waiting on Shopify, a faster one finalizes the run.
+    onFetch = async () => {
+      await prisma.cleanupRun.update({
+        where: { id: run.id },
+        data: { status: 'COMPLETED', deleted: 1 },
+      });
+    };
+    opStatus = 'FAILED';
+
+    const after = await reconcileCleanupRun(run.id);
+
+    expect(after).toMatchObject({ status: 'COMPLETED', deleted: 1, error: null });
+  });
+
+  // ── AN AMBIGUOUS SUBMIT DOES NOT HAND THE STORE BACK ──────────────────────
+  it('keeps the store locked when the bulk delete may have reached Shopify', async () => {
+    taggedIds = manyIds(100);
+    submitFailure = 'during-mutation';
+
+    const run = await startCleanupRun('PRODUCT', 'store1', 'qa-import');
+
+    expect(run.status).toBe('FAILED');
+    expect(run.error).toContain('may or may not have reached Shopify');
+    expect((await lockOn('store1'))?.ownerId).toBe(run.id);
+    // And the store reads busy, not free: a FAILED-mid-submit holder is honoured.
+    expect((await busyStores()).map((b) => b.storeId)).toEqual(['store1']);
+  });
+
+  it('frees the store when the submit provably never reached Shopify', async () => {
+    taggedIds = manyIds(100);
+    submitFailure = 'before-mutation';
+
+    const run = await startCleanupRun('PRODUCT', 'store1', 'qa-import');
+
+    expect(run.status).toBe('FAILED');
+    expect(run.error).toBe('staged upload failed');
+    expect(await lockOn('store1')).toBeNull();
   });
 });

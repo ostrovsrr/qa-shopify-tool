@@ -1,5 +1,4 @@
 import { getShopifyClient } from './shopifyClient';
-import { bulkDeleteByIds } from './shopifyBulk';
 
 // The base teardown tag applied to every QA-imported product (alongside the
 // per-run qa-import-<importRunId> tag). Cleanup deletes by tag so an import is
@@ -110,33 +109,6 @@ export async function getStoreProductStats(
   };
 }
 
-export async function cleanupProductsByTag(
-  storeId: string | undefined,
-  tag: string,
-): Promise<CleanupResult> {
-  const { shop, ids } = await fetchProductIdsByTag(storeId, tag);
-
-  if (ids.length === 0) {
-    return { storeId, shop, tag, found: 0, deleted: 0, failed: 0, errors: [] };
-  }
-
-  const client = await getShopifyClient(storeId);
-  const { deleted, errors } =
-    ids.length <= BULK_DELETE_THRESHOLD
-      ? await serialDeleteProducts(client, ids)
-      : await bulkDeleteProducts(client, ids);
-
-  return {
-    storeId,
-    shop,
-    tag,
-    found: ids.length,
-    deleted,
-    failed: errors.length,
-    errors,
-  };
-}
-
 /**
  * The product half of the entity-agnostic cleanup engine (cleanupRun.service.ts).
  * The twin of customerCleanupAdapter — everything cleanup does is identical across
@@ -202,24 +174,4 @@ async function serialDeleteProducts(
   }
 
   return { deleted, errors };
-}
-
-// Bulk delete via a single bulkOperationRunMutation over a staged JSONL. The
-// staging / polling / result-folding is the entity-agnostic engine (shopifyBulk);
-// only the mutation and its payload key names are product-specific.
-async function bulkDeleteProducts(
-  client: Awaited<ReturnType<typeof getShopifyClient>>,
-  ids: string[],
-): Promise<DeleteOutcome> {
-  const { deleted, errors } = await bulkDeleteByIds(client, ids, {
-    mutation: PRODUCT_DELETE_MUTATION,
-    filename: 'bulk_product_delete.jsonl',
-    payloadKey: 'productDelete',
-    deletedIdKey: 'deletedProductId',
-  });
-
-  return {
-    deleted,
-    errors: errors.map((e) => ({ productId: e.id, message: e.message })),
-  };
 }

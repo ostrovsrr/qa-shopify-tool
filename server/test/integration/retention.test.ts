@@ -1,7 +1,12 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
 import prisma from '../../src/db/prisma';
-import { purgeExpiredPii, RETENTION_DAYS } from '../../src/services/retention.service';
+import {
+  purgeExpiredPii,
+  REDACTED_ISSUE_NOTE,
+  RETENTION_DAYS,
+} from '../../src/services/retention.service';
+import { getValidationResult } from '../../src/services/customerValidation.service';
 import { resetDb } from './resetDb';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -227,5 +232,78 @@ runIf('PII retention', () => {
     expect(summary.productUploads).toBe(1);
     expect(await prisma.productOriginalRow.count({ where: { uploadRunId: inFlight } })).toBe(1);
     expect(await prisma.productOriginalRow.count({ where: { uploadRunId: done } })).toBe(0);
+  });
+
+  // ── THE FINDINGS QUOTE THE DATA ───────────────────────────────────────────
+  // Deleting the rows is not enough if the issues table keeps a copy: currentValue
+  // is the raw cell, and messages embed it ('Email "..." appears in rows: 2, 3').
+
+  it('strips the values the findings quote, for customers', async () => {
+    const id = await seedValidation(ancient());
+    await prisma.validationIssue.create({
+      data: {
+        validationRunId: id,
+        rowNumber: 3,
+        columnName: 'Email',
+        severity: 'Error',
+        issueType: 'DuplicateEmail',
+        currentValue: 'jane@acme.com',
+        message: 'Email "jane@acme.com" appears in rows: 2, 3. Shopify keeps one customer per email.',
+        suggestedFix: 'Remove or correct the duplicate email address.',
+      },
+    });
+
+    await purgeExpiredPii();
+
+    const result = await getValidationResult(id);
+    expect(JSON.stringify(result)).not.toContain('jane@acme.com');
+    const dup = result!.issues.find((i) => i.issueType === 'DuplicateEmail')!;
+    // What the history still needs survives: where, and what kind of problem.
+    expect(dup).toMatchObject({ rowNumber: 3, column: 'Email', currentValue: '' });
+    expect(dup.message).toBe(`DuplicateEmail in Email. ${REDACTED_ISSUE_NOTE}`);
+    // A static fix quotes nothing, so it stays.
+    expect(dup.suggestedFix).toBe('Remove or correct the duplicate email address.');
+  });
+
+  it('strips the values the findings quote, for products (the twin)', async () => {
+    const id = await seedUpload(ancient());
+    await prisma.productValidationIssue.create({
+      data: {
+        uploadRunId: id,
+        rowNumber: 1,
+        handle: 'alpha',
+        columnName: 'Option2 Name',
+        severity: 'Error',
+        issueType: 'OptionGap',
+        currentValue: 'Secret Option',
+        message: 'Option2 Name is "Secret Option" but Option1 Name is blank.',
+        suggestedFix: 'Move "Secret Option" into Option1 Name.',
+      },
+    });
+
+    await purgeExpiredPii();
+
+    const issue = await prisma.productValidationIssue.findFirstOrThrow({ where: { uploadRunId: id } });
+    expect(JSON.stringify(issue)).not.toContain('Secret Option');
+    expect(issue).toMatchObject({
+      currentValue: null,
+      message: `OptionGap in Option2 Name. ${REDACTED_ISSUE_NOTE}`,
+      suggestedFix: null,
+      issueType: 'OptionGap',
+      rowNumber: 1,
+    });
+  });
+
+  it('leaves the findings of an in-flight run untouched', async () => {
+    const id = await seedValidation(ancient(), 'RUNNING');
+    await prisma.validationIssue.updateMany({
+      where: { validationRunId: id },
+      data: { currentValue: 'jane@acme.com' },
+    });
+
+    await purgeExpiredPii();
+
+    const issue = await prisma.validationIssue.findFirstOrThrow({ where: { validationRunId: id } });
+    expect(issue.currentValue).toBe('jane@acme.com');
   });
 });
