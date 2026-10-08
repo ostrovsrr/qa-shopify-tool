@@ -78,6 +78,8 @@ $env:SHOPIFY_TEST_STORES       = $stores
 $env:BIND_ADDR                 = $deployCfg.BindAddr
 $env:SHOPIFY_API_VERSION       = $cfg['SHOPIFY_API_VERSION']
 $env:DATABASE_CONNECTION_LIMIT = if ($cfg['DATABASE_CONNECTION_LIMIT']) { $cfg['DATABASE_CONNECTION_LIMIT'] } else { '5' }
+# Unset = the app default (5). 1 is the kill switch: one bulk op per store.
+if ($cfg['BULK_OPS_PER_STORE']) { $env:BULK_OPS_PER_STORE = $cfg['BULK_OPS_PER_STORE'] }
 $env:UPLOAD_DIR                = Join-Path $env:TEMP "qa-uploads-$($Instance.ToLower())"
 
 # Whose instance this is. Serves the default display name to the browser so nobody

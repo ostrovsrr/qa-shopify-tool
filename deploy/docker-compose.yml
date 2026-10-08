@@ -47,6 +47,9 @@ x-app: &app
     # workable, but it leaves nothing for psql, backups, or an eighth instance.
     DATABASE_CONNECTION_LIMIT: ${DATABASE_CONNECTION_LIMIT:-5}
 
+    # Bulk ops per store for imports and QA cleanup (1-5); 1 = kill switch.
+    BULK_OPS_PER_STORE: ${BULK_OPS_PER_STORE:-5}
+
     # RETENTION_DAYS is deliberately NOT set here.
     #
     # It defaults to 0 (off). All seven containers run the purge against the SAME

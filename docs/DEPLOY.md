@@ -32,6 +32,7 @@ VPN, or a Cloudflare Tunnel with Access already in front of it.
 | `UPLOAD_DIR` | no | Defaults to `/tmp/qa-uploads` in the image. |
 | `RETENTION_DAYS` | no | Days raw uploaded rows are kept. Default 30. `0` disables the purge. |
 | `DATABASE_CONNECTION_LIMIT` | no | Default 10. Lower it if your Postgres has a small `max_connections`. |
+| `BULK_OPS_PER_STORE` | no | Bulk operations one store's import or QA cleanup is split across, 1-5. Default 5; `1` is the kill switch (one op per store). |
 
 ## Build and run
 
