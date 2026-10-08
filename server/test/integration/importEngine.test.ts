@@ -885,3 +885,169 @@ runIf('product import: k bulk ops per store', () => {
     expect(await prisma.storeLock.findUnique({ where: { storeId: 'store1' } })).toBeNull();
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ROWS WRITTEN BY THE PREVIOUS CODE STILL DRAIN (both flows).
+//
+// New imports never write these shapes, so nothing else exercises them — yet they
+// are the only paths that run for whatever is in flight across a deploy:
+//
+//   • a single-store run with its own storeId + bulkOperationId, holding the
+//     store as IMPORT_RUN / PRODUCT_IMPORT_RUN (owned by the run itself);
+//   • a batch job holding its store as IMPORT_JOB / PRODUCT_IMPORT_JOB (owned by
+//     the job id, from before shares existed).
+//
+// Each must be renewed while Shopify reports its op RUNNING, and freed — the run
+// rolled up COMPLETED — when the op completes.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A lock about to lapse, so a renewal shows as a later expiresAt. */
+async function seedLegacyLock(ownerType: string, ownerId: string): Promise<Date> {
+  const expiresAt = new Date(Date.now() + 60_000);
+  await prisma.storeLock.create({
+    data: { storeId: 'store1', ownerType, ownerId, operation: 'an import', expiresAt },
+  });
+  return expiresAt;
+}
+
+const lockOf = () => prisma.storeLock.findUnique({ where: { storeId: 'store1' } });
+
+/** A RUNNING batch job of one slice on store1, as the previous code wrote it. */
+const legacyJob = (jobId: string) => ({
+  id: jobId,
+  storeId: 'store1',
+  shopDomain: 'qa1.example.com',
+  batchIndex: 0,
+  batchCount: 1,
+  bulkOperationId: 'gid://shopify/BulkOperation/legacy',
+  status: 'RUNNING',
+  submitAttemptedAt: new Date(),
+});
+
+/** A RUNNING single-store run, as the previous code wrote it. */
+const legacyRun = (runId: string) => ({
+  id: runId,
+  storeId: 'store1',
+  shopDomain: 'qa1.example.com',
+  status: 'RUNNING',
+  bulkOperationId: 'gid://shopify/BulkOperation/legacy',
+  submitAttemptedAt: new Date(),
+});
+
+runIf('legacy rows drain', () => {
+  beforeEach(async () => {
+    await resetDb();
+    runBulkMutation.mockReset();
+    fetchBulkOperationState.mockReset();
+    staged.clear();
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+  afterAll(async () => {
+    await resetDb();
+    await prisma.$disconnect();
+  });
+
+  it('customer: a RUNNING single-store run holding IMPORT_RUN is renewed, then COMPLETES and frees the store', async () => {
+    const runId = uuidv4();
+    await prisma.importRun.create({ data: { ...legacyRun(runId), validationId: await seedValidation(2) } });
+    const seededExpiry = await seedLegacyLock('IMPORT_RUN', runId);
+
+    fetchBulkOperationState.mockResolvedValue(opState('RUNNING'));
+    expect(await reconcileImportRun(runId)).toMatchObject({ status: 'RUNNING' });
+    const held = await lockOf();
+    expect(held).toMatchObject({ ownerType: 'IMPORT_RUN', ownerId: runId });
+    expect(held!.expiresAt.getTime()).toBeGreaterThan(seededExpiry.getTime());
+
+    fetchBulkOperationState.mockResolvedValue(opState('COMPLETED', { url: 'https://example.com/r' }));
+    serveResults([customerOk(0), customerTaken(1)]);
+    const feedback = await reconcileImportRun(runId);
+
+    expect(feedback).toMatchObject({ status: 'COMPLETED', successCount: 1, errorCount: 1 });
+    expect(await prisma.importRowResult.count({ where: { importRunId: runId } })).toBe(2);
+    expect(await lockOf()).toBeNull();
+  });
+
+  it('product: a RUNNING single-store run holding PRODUCT_IMPORT_RUN is renewed, then COMPLETES and frees the store', async () => {
+    const runId = uuidv4();
+    await prisma.productImportRun.create({
+      data: { ...legacyRun(runId), uploadId: await seedUpload(['alpha', 'beta']) },
+    });
+    const seededExpiry = await seedLegacyLock('PRODUCT_IMPORT_RUN', runId);
+
+    fetchBulkOperationState.mockResolvedValue(opState('RUNNING'));
+    expect(await reconcileProductImportRun(runId)).toMatchObject({ status: 'RUNNING' });
+    const held = await lockOf();
+    expect(held).toMatchObject({ ownerType: 'PRODUCT_IMPORT_RUN', ownerId: runId });
+    expect(held!.expiresAt.getTime()).toBeGreaterThan(seededExpiry.getTime());
+
+    fetchBulkOperationState.mockResolvedValue(opState('COMPLETED', { url: 'https://example.com/r' }));
+    serveResults([productOk(0), productRejected(1, 'Title is too long')]);
+    const feedback = await reconcileProductImportRun(runId);
+
+    expect(feedback).toMatchObject({ status: 'COMPLETED', totalProducts: 2, accepted: 1, rejected: 1 });
+    expect(await lockOf()).toBeNull();
+  });
+
+  it('customer: a batch job holding its store as IMPORT_JOB is renewed while running and released at terminal', async () => {
+    const parentId = uuidv4();
+    const jobId = uuidv4();
+    await prisma.importRun.create({
+      data: {
+        id: parentId,
+        validationId: await seedValidation(2),
+        storeId: null,
+        shopDomain: 'qa1.example.com',
+        status: 'RUNNING',
+        batchJobs: { create: [{ ...legacyJob(jobId), rowCount: 2 }] },
+      },
+    });
+    const seededExpiry = await seedLegacyLock('IMPORT_JOB', jobId);
+
+    fetchBulkOperationState.mockResolvedValue(opState('RUNNING'));
+    expect(await reconcileImportRun(parentId)).toMatchObject({ status: 'RUNNING' });
+    const held = await lockOf();
+    expect(held).toMatchObject({ ownerType: 'IMPORT_JOB', ownerId: jobId });
+    expect(held!.expiresAt.getTime()).toBeGreaterThan(seededExpiry.getTime());
+
+    fetchBulkOperationState.mockResolvedValue(opState('COMPLETED', { url: 'https://example.com/r' }));
+    serveResults([customerOk(0), customerOk(1)]);
+    const feedback = await reconcileImportRun(parentId);
+
+    expect(feedback).toMatchObject({ status: 'COMPLETED', successCount: 2, errorCount: 0 });
+    expect(await lockOf()).toBeNull();
+  });
+
+  it('product: a batch job holding its store as PRODUCT_IMPORT_JOB is renewed while running and released at terminal', async () => {
+    const parentId = uuidv4();
+    const jobId = uuidv4();
+    await prisma.productImportRun.create({
+      data: {
+        id: parentId,
+        uploadId: await seedUpload(['alpha', 'beta']),
+        storeId: null,
+        shopDomain: 'qa1.example.com',
+        status: 'RUNNING',
+        batchJobs: { create: [{ ...legacyJob(jobId), productCount: 2 }] },
+      },
+    });
+    const seededExpiry = await seedLegacyLock('PRODUCT_IMPORT_JOB', jobId);
+
+    fetchBulkOperationState.mockResolvedValue(opState('RUNNING'));
+    expect(await reconcileProductImportRun(parentId)).toMatchObject({ status: 'RUNNING' });
+    const held = await lockOf();
+    expect(held).toMatchObject({ ownerType: 'PRODUCT_IMPORT_JOB', ownerId: jobId });
+    expect(held!.expiresAt.getTime()).toBeGreaterThan(seededExpiry.getTime());
+
+    fetchBulkOperationState.mockResolvedValue(opState('COMPLETED', { url: 'https://example.com/r' }));
+    serveResults([productOk(0), productOk(1)]);
+    const feedback = await reconcileProductImportRun(parentId);
+
+    expect(feedback).toMatchObject({ status: 'COMPLETED', totalProducts: 2, accepted: 2, rejected: 0 });
+    expect(await lockOf()).toBeNull();
+  });
+});

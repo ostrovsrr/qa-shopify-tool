@@ -332,6 +332,66 @@ runIf('resume-on-boot', () => {
     expect(lock).toMatchObject({ ownerType: 'IMPORT_STORE_SHARE', ownerId: shareOwner(parentId, 'store1') });
   });
 
+  // ── SINGLE-STORE RUNS FROM BEFORE THE BATCH PATH ──────────────────────────
+  // New imports are always batch parents, so a PENDING single-store run can only be
+  // one the previous code wrote and a deploy interrupted. Its relaunch still goes
+  // through submitSingleStoreRun, under the run's own lock.
+  it('customer: a PENDING legacy single-store run that never attempted its submit is relaunched', async () => {
+    const validationId = uuidv4();
+    await prisma.validationRun.create({
+      data: {
+        id: validationId,
+        fileName: 'c.csv',
+        fileType: 'CUSTOMER',
+        totalRows: 1,
+        errors: 0,
+        originalRows: {
+          create: [{ id: uuidv4(), rowNumber: 2, data: { 'First Name': 'Ann', Email: 'ann@example.com' } }],
+        },
+      },
+    });
+    const run = await prisma.importRun.create({
+      data: { validationId, storeId: 'store1', shopDomain: 'fake.myshopify.com', status: 'PENDING' },
+    });
+
+    storesResolve = true;
+    const summary = await resumeStore(customerResumableStores().find((s) => s.label === 'customer-run')!);
+
+    expect(summary).toMatchObject({ relaunched: 1, failed: 0 });
+    expect(submitted).toHaveLength(1);
+    const after = await prisma.importRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after).toMatchObject({ status: 'RUNNING', bulkOperationId: submitted[0] });
+    expect(after.submitAttemptedAt).toBeInstanceOf(Date);
+    const lock = await prisma.storeLock.findUniqueOrThrow({ where: { storeId: 'store1' } });
+    expect(lock).toMatchObject({ ownerType: 'IMPORT_RUN', ownerId: run.id });
+  });
+
+  it('product: a PENDING legacy single-store run that never attempted its submit is relaunched', async () => {
+    const uploadId = uuidv4();
+    await prisma.productUploadRun.create({
+      data: {
+        id: uploadId,
+        fileName: 'p.csv',
+        productCount: 1,
+        originalRows: { create: [{ id: uuidv4(), rowNumber: 1, data: { Handle: 'alpha', Title: 'Alpha' } }] },
+      },
+    });
+    const run = await prisma.productImportRun.create({
+      data: { uploadId, storeId: 'store1', shopDomain: 'fake.myshopify.com', status: 'PENDING' },
+    });
+
+    storesResolve = true;
+    const summary = await resumeStore(productResumableStores().find((s) => s.label === 'product-run')!);
+
+    expect(summary).toMatchObject({ relaunched: 1, failed: 0 });
+    expect(submitted).toHaveLength(1);
+    const after = await prisma.productImportRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after).toMatchObject({ status: 'RUNNING', bulkOperationId: submitted[0] });
+    expect(after.submitAttemptedAt).toBeInstanceOf(Date);
+    const lock = await prisma.storeLock.findUniqueOrThrow({ where: { storeId: 'store1' } });
+    expect(lock).toMatchObject({ ownerType: 'PRODUCT_IMPORT_RUN', ownerId: run.id });
+  });
+
   // ── CLEANUP ───────────────────────────────────────────────────────────────
   it('cleanup: relaunches a never-attempted delete and marks intent before submitting', async () => {
     const run = await prisma.cleanupRun.create({
