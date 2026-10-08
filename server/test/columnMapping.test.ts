@@ -114,6 +114,26 @@ describe('mapping targets', () => {
     ).not.toThrow();
   });
 
+  // A kept column is written under its own name, so a column called "Note" set to
+  // Keep owns the Note field. With another column also mapped to Note, one would
+  // silently overwrite the other — and which one depended on key order.
+  it('rejects a Keep column whose name is another column\'s Shopify target, in either order', () => {
+    for (const mapping of [
+      { Comments: 'Note', Note: KEEP_COLUMN },
+      { Note: KEEP_COLUMN, Comments: 'Note' },
+    ]) {
+      expect(() => assertValidColumnMapping(['Comments', 'Note'], mapping)).toThrow(
+        /"Note" is set to Keep.*"Comments" is mapped to "Note" too/,
+      );
+    }
+  });
+
+  it('still allows a kept column to be appended to (Add to Note feeds the kept Note)', () => {
+    expect(() =>
+      assertValidColumnMapping(['Note', 'Comments'], { Note: KEEP_COLUMN, Comments: APPEND_TO_NOTE }),
+    ).not.toThrow();
+  });
+
   it('rejects unknown sources and targets supplied outside the mapping UI', () => {
     expect(() => assertValidColumnMapping(['Email'], { Missing: 'Email' })).toThrow(
       /unknown source column/i,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildTemplateDataset } from '../src/reports/templateDataset';
+import { buildTemplateDataset, jsonbKeyOrder } from '../src/reports/templateDataset';
 
 function orig(rowNumber: number, data: Record<string, string>) {
   return { rowNumber, data };
@@ -78,6 +78,44 @@ describe('buildTemplateDataset', () => {
       columnMapping: { 'E-mail': 'Email' },
     });
     expect(rows[0].record).toEqual({ Email: 'a@x.com' });
+  });
+
+  // Validation sees the mapping in request-body (CSV) order; the import and the
+  // reports read it back from jsonb, which re-sorts keys. The dataset must not
+  // depend on which one it got, or validation and import disagree on what is sent.
+  it('does not depend on the mapping key order (a jsonb round trip changes nothing)', () => {
+    const data = { 'Segment Name': 'wholesale', Rep: 'Ann', Comments: 'call first', 'Customer Email': 'a@x.com' };
+    const csvOrder = {
+      'Segment Name': 'Add to Note',
+      Rep: 'Add to Note',
+      Comments: 'Add to Note',
+      'Customer Email': 'Email',
+    };
+    const reversed = Object.fromEntries(Object.entries(csvOrder).reverse());
+    // What Postgres hands back for a jsonb object: shortest keys first.
+    const fromJsonb = JSON.parse(JSON.stringify({
+      Rep: 'Add to Note',
+      Comments: 'Add to Note',
+      'Segment Name': 'Add to Note',
+      'Customer Email': 'Email',
+    }));
+    const build = (columnMapping: Record<string, string>, rowData: Record<string, string>) =>
+      buildTemplateDataset({ originalRows: [orig(2, rowData)], columnMapping }).rows[0].record;
+
+    const expected = build(fromJsonb, data);
+    expect(expected.Note).toBe('Ann | call first | wholesale');
+    expect(build(csvOrder, data)).toEqual(expected);
+    expect(build(reversed, data)).toEqual(expected);
+    // The row data's own key order does not matter either.
+    expect(build(csvOrder, Object.fromEntries(Object.entries(data).reverse()))).toEqual(expected);
+  });
+});
+
+describe('jsonbKeyOrder', () => {
+  it('sorts like Postgres jsonb: shorter UTF-8 byte length first, then bytewise', () => {
+    expect(['Comments', 'Note', 'Rep', 'Notes', 'Éa', 'Zz', 'b', 'B'].sort(jsonbKeyOrder)).toEqual([
+      'B', 'b', 'Zz', 'Rep', 'Éa', 'Note', 'Notes', 'Comments',
+    ]);
   });
 });
 

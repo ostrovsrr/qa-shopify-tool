@@ -13,24 +13,24 @@ import {
   runBatchImport,
   runImport,
 } from '../api/validationApi';
+import { describeCleanup } from '../api/cleanupPoller';
+import { isTerminal, useImportRunPoll } from '../hooks/useImportRunPoll';
 import {
+  CleanupStoreOutcome,
   ImportFeedback,
   ShopifyHealth,
   ShopifyStore,
   StoreCustomerStats,
   ValidationResult,
 } from '../types';
+import { resolveRunStoreIds } from '../utils/runStores';
+import { rowsSent } from '../utils/rowsSent';
 import { shopifyAdminUrl } from '../utils/shopifyAdmin';
 
 interface Props {
   result: ValidationResult;
 }
 
-// Shopify bulk-op statuses that mean the import has stopped advancing.
-const TERMINAL_STATUSES = ['COMPLETED', 'FAILED', 'CANCELED', 'EXPIRED'];
-const isTerminal = (status: string): boolean => TERMINAL_STATUSES.includes(status);
-
-const POLL_INTERVAL_MS = 3000;
 // How long Shopify's tag-filtered counts take to catch up with a create or delete
 // (seen: several seconds). One re-read after this settles the store card.
 const STATS_SETTLE_MS = 6000;
@@ -93,9 +93,16 @@ export function ImportPanel({ result }: Props) {
   // Avoid stale closures / interval churn when refreshing stats on terminal poll.
   const displayedRef = useRef<string[]>(displayedStoreIds);
   displayedRef.current = displayedStoreIds;
+  // The run on screen right now, for discarding answers that arrive after the
+  // user opened a different one (this component is reused across runs).
+  const validationIdRef = useRef(result.validationId);
+  validationIdRef.current = result.validationId;
 
   const storeLabel = (storeId: string): string =>
     stores.find((s) => s.id === storeId)?.label ?? storeId;
+  // A cleanup outcome's display name: the store's label where we know it.
+  const storeLabelFor = (storeId: string | null, shop: string): string =>
+    stores.find((s) => (storeId ? s.id === storeId : s.shop === shop))?.label ?? shop;
 
   // ── load stores ─────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -108,7 +115,9 @@ export function ImportPanel({ result }: Props) {
           current.length > 0 ? current : data[0] ? [data[0].id] : [],
         );
       })
-      .catch(() => active && setError('Could not load Shopify test stores.'));
+      // The server's own reason + hint (e.g. "no stores configured — set
+      // SHOPIFY_TEST_STORES …"), not a generic line with no way forward.
+      .catch((err) => active && setError(errMessage(err, 'Could not load Shopify test stores.')));
     return () => {
       active = false;
     };
@@ -157,9 +166,14 @@ export function ImportPanel({ result }: Props) {
   useEffect(() => {
     let active = true;
     const load = () =>
-      fetchBusyStores().then(
-        (busy) => active && setStoresInUse(Object.fromEntries(busy.map((b) => [b.storeId, b.operation]))),
-      );
+      fetchBusyStores()
+        .then(
+          (busy) =>
+            active && setStoresInUse(Object.fromEntries(busy.map((b) => [b.storeId, b.operation]))),
+        )
+        // Decoration only: a server that is down must not raise an unhandled
+        // rejection every BUSY_POLL_MS. Keep the last known state.
+        .catch(() => undefined);
     void load();
     const timer = window.setInterval(() => void load(), BUSY_POLL_MS);
     return () => {
@@ -184,77 +198,40 @@ export function ImportPanel({ result }: Props) {
   }, [result.validationId]);
 
   // ── reconcile-on-poll while non-terminal ──────────────────────────────────────
-  const pollStatus = feedback?.status;
-  const pollRunId = feedback?.importRunId;
-  useEffect(() => {
-    if (!pollRunId || !pollStatus || isTerminal(pollStatus)) return;
-    let active = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-
-    const poll = async (): Promise<void> => {
-      try {
-        const next = await fetchImportFeedback(pollRunId);
-        if (!active) return;
-        setFeedback(next);
-        if (isTerminal(next.status)) {
-          // Deliberately NOT gated on `active`: setFeedback above flips pollStatus
-          // to a terminal value, React tears this effect down, and `active` is
-          // already false by the time the stats request resolves. Gating here
-          // silently dropped the refresh, so the card kept the pre-import counts
-          // and the count-driven Clean QA button stayed disabled.
-          for (const id of displayedRef.current) void refreshStoreStats(id);
-        } else {
-          // Schedule only after this request finishes. setInterval could overlap
-          // slow Shopify reconciliations and advance the same run concurrently.
-          timer = setTimeout(poll, POLL_INTERVAL_MS);
-        }
-      } catch (err) {
-        if (!active) return;
-        setError(errMessage(err, 'Failed to check import status.'));
-      }
-    };
-
-    timer = setTimeout(poll, POLL_INTERVAL_MS);
-    return () => {
-      active = false;
-      if (timer) clearTimeout(timer);
-    };
-  }, [pollRunId, pollStatus]);
+  // A failed poll is retried with backoff (see useImportRunPoll) — it used to end
+  // polling for good and strand the panel on "Importing…" until a reload.
+  const pollError = useImportRunPoll({
+    runId: feedback?.importRunId,
+    status: feedback?.status,
+    fetchFeedback: fetchImportFeedback,
+    onUpdate: setFeedback,
+    // Deliberately not gated on the poll still being active: the update above
+    // flips the status to terminal, React tears the poll down, and a gated
+    // refresh was silently dropped — the card kept the pre-import counts.
+    onTerminal: () => {
+      for (const id of displayedRef.current) void refreshStoreStats(id);
+    },
+    describeError: (err) => errMessage(err, 'no response'),
+  });
 
   // ── point selection at the run reopened from History ──────────────────────────
-  const feedbackStoreId = feedback?.storeId ?? null;
-  const feedbackShopDomain = feedback?.shopDomain;
-  const feedbackStoreKey = (feedback?.perStore ?? [])
-    .map((ps) => ps.storeId ?? ps.shopDomain)
-    .join(',');
+  // See resolveRunStoreIds: a RUNNING parallel run has no perStore yet, so its
+  // stores come from the batch jobs. Keyed on the resolved ids so the per-poll
+  // feedback refresh does not re-fire this.
+  const runStoreKey = resolveRunStoreIds(feedback, stores).join(',');
   useEffect(() => {
-    const resolve = (storeId: string | null, shopDomain?: string) =>
-      storeId ?? stores.find((s) => s.shop === shopDomain)?.id;
-
-    // A parallel run spans several stores, and feedback.shopDomain is their
-    // domains joined with ", " — it matches no single store, so the single-store
-    // branch below silently left the DEFAULT store selected next to results for
-    // stores the run never touched, with a live Clean QA aimed at it. Restore
-    // the real selection from perStore instead.
-    const parallel = (feedback?.perStore ?? [])
-      .map((ps) => resolve(ps.storeId, ps.shopDomain))
-      .filter((id): id is string => !!id);
-    if (parallel.length > 1) {
-      setSelectedStoreIds(parallel);
+    if (!runStoreKey) return;
+    const ids = runStoreKey.split(',');
+    if (ids.length > 1) {
+      setSelectedStoreIds(ids);
       setImportMode('parallel');
       setParallelPhase('review');
-      return;
-    }
-
-    if (!feedbackStoreId && !feedbackShopDomain) return;
-    const target = resolve(feedbackStoreId, feedbackShopDomain);
-    if (target) {
-      setSelectedStoreIds([target]);
+    } else {
+      setSelectedStoreIds(ids);
       setImportMode('single');
       setParallelPhase('select');
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [feedbackStoreId, feedbackShopDomain, feedbackStoreKey, stores]);
+  }, [runStoreKey]);
 
   // ── derived flags ─────────────────────────────────────────────────────────────
   const polling = !!feedback && !isTerminal(feedback.status);
@@ -262,8 +239,13 @@ export function ImportPanel({ result }: Props) {
   const failed = !!feedback && isTerminal(feedback.status) && !completed;
   const busy = running || polling;
   const showResults = !!feedback && isTerminal(feedback.status) && feedback.totalRows > 0;
+  // What the import actually sends (and splits across stores): the template
+  // dataset after merges and blank-line removal, not the raw file's row count.
+  const sendRows = rowsSent(result);
 
-  const primaryHealthOk = primaryStoreId ? storeHealth[primaryStoreId]?.ok !== false : false;
+  // Only a store whose health check said ok. A health answer still pending, or
+  // one without `ok` (a 500, a proxy's HTML 502), is not "ready".
+  const primaryHealthOk = primaryStoreId ? storeHealth[primaryStoreId]?.ok === true : false;
   const canImportNow = inParallelReview
     ? selectedStoreIds.length >= 2
     : importMode === 'single' && selectedStoreIds.length === 1 && primaryHealthOk;
@@ -300,6 +282,7 @@ export function ImportPanel({ result }: Props) {
 
   const handleRun = async () => {
     if (!canImportNow) return;
+    const startedFor = result.validationId;
     setRunning(true);
     setError('');
     setNotice('');
@@ -310,8 +293,12 @@ export function ImportPanel({ result }: Props) {
         importMode === 'parallel'
           ? await runBatchImport(result.validationId, selectedStoreIds)
           : await runImport(result.validationId, selectedStoreIds[0]);
+      // This panel is not keyed by run: if another run was opened while the
+      // POST was in flight, this answer belongs to a run no longer on screen.
+      if (data.validationId !== validationIdRef.current) return;
       setFeedback(data);
     } catch (err) {
+      if (startedFor !== validationIdRef.current) return;
       setError(errMessage(err, 'Import failed.'));
     } finally {
       setRunning(false);
@@ -355,7 +342,11 @@ export function ImportPanel({ result }: Props) {
     setNotice('');
     try {
       const res = await cleanupQaCustomers(storeId);
-      setNotice(`Cleaned ${res.deleted} of ${res.found} qa-import customer(s) from ${res.shop}.`);
+      // Per-store wording: "still deleting in the background" when the client
+      // stopped watching before the server finished, never "failed".
+      const { notice: n, error: e } = describeCleanup(res.stores, 'customer', storeLabelFor);
+      setNotice(n);
+      setError(e);
       await refreshStoreStats(storeId);
     } catch (err) {
       setError(errMessage(err, 'Cleanup failed.'));
@@ -374,24 +365,40 @@ export function ImportPanel({ result }: Props) {
     if (!window.confirm(`Delete all qa-import customers from ${ids.length} store(s)?`)) return;
     setError('');
     setNotice('');
-    let totalDeleted = 0;
-    for (const id of ids) {
-      setCleaningStores((prev) => new Set(prev).add(id));
-      try {
-        const res = await cleanupQaCustomers(id);
-        totalDeleted += res.deleted;
-        await refreshStoreStats(id);
-      } catch (err) {
-        setError(errMessage(err, `Cleanup failed for ${storeLabel(id)}.`));
-      } finally {
-        setCleaningStores((prev) => {
-          const next = new Set(prev);
-          next.delete(id);
-          return next;
-        });
-      }
-    }
-    setNotice(`Cleaned ${totalDeleted} qa-import customer(s) across ${ids.length} store(s).`);
+    // Every store at once, like the product twin: each is a separate shop with
+    // its own lock, so there is no reason to clean them one after another.
+    setCleaningStores((prev) => new Set([...prev, ...ids]));
+    const outcomes = await Promise.all(
+      ids.map(async (id): Promise<CleanupStoreOutcome[]> => {
+        try {
+          const res = await cleanupQaCustomers(id);
+          await refreshStoreStats(id);
+          return res.stores;
+        } catch (err) {
+          // Busy store (409), all-failed run, unreachable server: this store's
+          // own failure, reported next to the stores that did get cleaned.
+          return [
+            {
+              storeId: id,
+              shop: storeLabel(id),
+              status: 'failed',
+              found: 0,
+              deleted: 0,
+              error: errMessage(err, 'cleanup failed.'),
+            },
+          ];
+        } finally {
+          setCleaningStores((prev) => {
+            const next = new Set(prev);
+            next.delete(id);
+            return next;
+          });
+        }
+      }),
+    );
+    const { notice: n, error: e } = describeCleanup(outcomes.flat(), 'customer', storeLabelFor);
+    setNotice(n);
+    setError(e);
   };
 
   const handleCleanupImportRun = async () => {
@@ -408,7 +415,11 @@ export function ImportPanel({ result }: Props) {
     setNotice('');
     try {
       const res = await cleanupImportRun(feedback.importRunId, primaryStoreId);
-      setNotice(`Deleted ${res.deleted} of ${res.found} customer(s) for this import (${res.shop}).`);
+      // One run per store the import touched: say which were cleaned, which are
+      // still deleting, and which failed (with the server's reason).
+      const { notice: n, error: e } = describeCleanup(res.stores, 'customer', storeLabelFor);
+      setNotice(n);
+      setError(e);
       await Promise.all(displayedStoreIds.map((id) => refreshStoreStats(id)));
     } catch (err) {
       setError(errMessage(err, 'Cleanup failed.'));
@@ -424,13 +435,13 @@ export function ImportPanel({ result }: Props) {
     const st = storeStats[storeId];
     const cleaning = cleaningStores.has(storeId);
     const adminUrl = shopifyAdminUrl(store?.shop, 'customers');
+    // The server splits the rows it SENDS (merged duplicates and blank lines
+    // already gone), so the plan must split the same number.
     const batch = inParallelReview
-      ? batchSizeFor(index, result.totalRows, selectedStoreIds.length)
+      ? batchSizeFor(index, sendRows, selectedStoreIds.length)
       : null;
     const pct =
-      batch !== null && result.totalRows > 0
-        ? Math.round((batch / result.totalRows) * 100)
-        : null;
+      batch !== null && sendRows > 0 ? Math.round((batch / sendRows) * 100) : null;
 
     return (
       <div className="store-card" key={storeId}>
@@ -503,11 +514,13 @@ export function ImportPanel({ result }: Props) {
               you want to clean up — the count still reads 0 and the button was
               dead for the rest of the session. cleanStore re-reads the store to
               find what to delete and is confirm-gated, so a no-op click is cheap;
-              a stranded user is not. */}
+              a stranded user is not. It IS disabled while an import is running:
+              it deletes by tag across the whole store, including what the
+              running import is creating right now. */}
           <button
             className="btn btn-outline btn-sm"
             onClick={() => cleanStore(storeId)}
-            disabled={cleaning}
+            disabled={cleaning || busy}
           >
             {cleaning ? 'Cleaning…' : 'Clean QA'}
           </button>
@@ -630,7 +643,7 @@ export function ImportPanel({ result }: Props) {
             <div className="review-bar">
               <span className="muted">
                 Parallel import · <strong>{selectedStoreIds.length}</strong> stores ·{' '}
-                {result.totalRows} rows total
+                {sendRows} rows to send
               </span>
               <div className="toolbar-actions">
                 <button className="btn btn-outline btn-sm" onClick={editSelection} disabled={busy}>
@@ -640,7 +653,7 @@ export function ImportPanel({ result }: Props) {
                   <button
                     className="btn btn-outline btn-sm"
                     onClick={cleanAllSelected}
-                    disabled={cleaningStores.size > 0}
+                    disabled={cleaningStores.size > 0 || busy}
                   >
                     Clean QA on all selected
                   </button>
@@ -666,6 +679,8 @@ export function ImportPanel({ result }: Props) {
       )}
 
       {error && <div className="error-banner">{error}</div>}
+      {/* Kept apart from `error`: it clears itself on the next good poll. */}
+      {polling && pollError && <div className="warning-banner">{pollError}</div>}
       {/* Transient status (cleanup results etc.) — kept lighter than the success
           headline so it doesn't compete with the run's hero number. Dismissible. */}
       {notice && (

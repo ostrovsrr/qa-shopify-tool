@@ -51,7 +51,10 @@ export class ProductFieldsRule implements ProductValidationRule {
       }
 
       for (const { columns, label } of PRODUCT_TEXT) {
-        const column = columns.find((c) => c in first.original) ?? columns[0];
+        // The builder sends the first NON-EMPTY of these columns (col(first,
+        // 'Type', 'Product Type')), so judge that one and name it — a blank
+        // Type next to a filled Product Type must not hide the long value.
+        const column = columns.find((c) => col(first.normalized, c) !== '') ?? columns[0];
         const value = col(first.normalized, column);
         if (value.length > MAX_TEXT_LENGTH) issues.push(tooLong(first, column, label, value));
       }

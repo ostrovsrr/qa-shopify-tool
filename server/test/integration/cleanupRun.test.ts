@@ -217,6 +217,46 @@ runIf('async cleanup', () => {
     expect(await prisma.storeLock.findUnique({ where: { storeId: 'store1' } })).toBeNull();
   });
 
+  // Every instance shares one database but holds only its own SE's stores. The
+  // sweep used to reconcile EVERY running cleanup, so a colleague's cleanup made
+  // each other instance log "store is not configured" once a minute — which is
+  // what the fleet status page then showed as every instance's last error.
+  it("sweepRunningCleanups leaves a colleague's cleanup alone, and still sweeps its own", async () => {
+    const { resetShopifyConfigCache } = await import('../../src/config/shopify');
+    process.env.SHOPIFY_TEST_STORES = JSON.stringify([
+      { id: 'store1', shop: 'store1.myshopify.com', adminToken: 'shpat_x', apiVersion: '2026-01' },
+    ]);
+    resetShopifyConfigCache();
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const theirs = await prisma.cleanupRun.create({
+        data: {
+          entity: 'PRODUCT',
+          storeId: 'someone-elses-store',
+          shopDomain: 'someone-elses-store.myshopify.com',
+          tag: 'qa-import',
+          status: 'RUNNING',
+          bulkOperationId: 'gid://shopify/BulkOperation/theirs',
+          submittedIds: manyIds(100),
+        },
+      });
+      taggedIds = manyIds(100);
+      const mine = await startCleanupRun('CUSTOMER', 'store1', 'qa-import');
+      opStatus = 'COMPLETED';
+      opUrl = 'https://results/cleanup';
+
+      await sweepRunningCleanups();
+
+      expect((await prisma.cleanupRun.findUnique({ where: { id: mine.id } }))?.status).toBe('COMPLETED');
+      expect((await prisma.cleanupRun.findUnique({ where: { id: theirs.id } }))?.status).toBe('RUNNING');
+      expect(errors).not.toHaveBeenCalled();
+    } finally {
+      errors.mockRestore();
+      process.env.SHOPIFY_TEST_STORES = '[]';
+      resetShopifyConfigCache();
+    }
+  });
+
   it('marks the run FAILED when Shopify ends the operation non-COMPLETED', async () => {
     taggedIds = manyIds(100);
     const run = await startCleanupRun('PRODUCT', 'store1', 'qa-import');

@@ -15,16 +15,26 @@ import './index.css';
 // It is a label, not a login (see api/actor.ts) — so a failure here must never
 // block the app. If the request fails, is slow, or the instance has no owner
 // configured, the badge simply starts empty exactly as it did before.
+//
+// "Slow" is bounded: a request that hangs (a stalled proxy, a server mid-restart)
+// used to leave a blank page indefinitely, because rendering waited on it.
+const INSTANCE_TIMEOUT_MS = 2500;
+
 async function loadInstanceDefault(): Promise<void> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), INSTANCE_TIMEOUT_MS);
   try {
-    const res = await fetch('/api/instance');
+    const res = await fetch('/api/instance', { signal: controller.signal });
     if (!res.ok) return;
     const body: unknown = await res.json();
     if (body && typeof body === 'object' && 'owner' in body) {
       setInstanceDefault((body as { owner: string | null }).owner);
     }
   } catch {
-    // Deliberately silent: no default is a supported state, not an error.
+    // Deliberately silent: no default is a supported state, not an error. A
+    // timeout lands here too (AbortError) and the app renders without it.
+  } finally {
+    window.clearTimeout(timer);
   }
 }
 

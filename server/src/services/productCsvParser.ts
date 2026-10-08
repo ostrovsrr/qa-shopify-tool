@@ -1,10 +1,12 @@
 import fs from 'fs';
 import { Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 import { parse } from 'csv-parse';
 import { CsvParseError } from '../errors';
 import { ParsedProductCsv, ProductCsvRow, ProductGroup } from '../types';
 import { isRowFullyEmpty, normalizeRecord } from '../utils/normalize';
 import { normalizeCsvHeaders } from './csvHeaders';
+import { isFileReadError } from './csvParser.service';
 
 // The Shopify product CSV groups rows by Handle: the first row of a Handle carries
 // the product-level fields, and rows sharing the Handle add variants/images. We
@@ -67,6 +69,11 @@ const PARSE_OPTIONS = {
   bom: true,
 } as const;
 
+function needsTrim(record: Record<string, string>): boolean {
+  for (const v of Object.values(record)) if (v !== v.trim()) return true;
+  return false;
+}
+
 function toParsed(records: Record<string, string>[], headers: string[]): ParsedProductCsv {
   // Trim trailing fully-empty rows (common when exporting from spreadsheets).
   let lastNonEmpty = records.length - 1;
@@ -77,6 +84,10 @@ function toParsed(records: Record<string, string>[], headers: string[]): ParsedP
   const rows: ProductCsvRow[] = [];
   for (let i = 0; i <= lastNonEmpty; i++) {
     const record = records[i];
+    // Release the parser's record as soon as it is converted: on a large file
+    // the raw records, the complete copies and the normalized copies would
+    // otherwise all be resident at once.
+    (records as (Record<string, string> | undefined)[])[i] = undefined;
     if (isRowFullyEmpty(record)) continue; // skip blank rows mid-file
     const completeRecord = Object.fromEntries(
       headers.map((header) => [header, record[header] ?? '']),
@@ -84,9 +95,12 @@ function toParsed(records: Record<string, string>[], headers: string[]): ParsedP
     rows.push({
       rowNumber: i + 2, // header is line 1
       original: completeRecord,
-      normalized: normalizeRecord(completeRecord),
+      // Most cells carry no surrounding whitespace; share the record then
+      // instead of holding a second identical copy of every row.
+      normalized: needsTrim(completeRecord) ? normalizeRecord(completeRecord) : completeRecord,
     });
   }
+  records.length = 0;
 
   return { rows, headers, groups: groupByHandle(rows) };
 }
@@ -94,21 +108,26 @@ function toParsed(records: Record<string, string>[], headers: string[]): ParsedP
 async function parseProductCsvStream(input: Readable): Promise<ParsedProductCsv> {
   const records: Record<string, string>[] = [];
   let headers: string[] = [];
-  const parser = input.pipe(
-    parse({
-      ...PARSE_OPTIONS,
-      columns: (rawHeaders: string[]) => {
-        headers = normalizeCsvHeaders(rawHeaders);
-        return headers;
-      },
-    }),
-  );
+  const parser = parse({
+    ...PARSE_OPTIONS,
+    columns: (rawHeaders: string[]) => {
+      headers = normalizeCsvHeaders(rawHeaders);
+      return headers;
+    },
+  });
 
+  // pipeline, not input.pipe(parser) — see the customer twin in
+  // csvParser.service.ts: pipe() let a source read error crash the process and
+  // leaked the file descriptor when the parser failed mid-file.
   try {
-    for await (const record of parser) {
-      records.push(record as Record<string, string>);
-    }
+    await pipeline(input, parser, async (source: AsyncIterable<unknown>) => {
+      for await (const record of source) {
+        records.push(record as Record<string, string>);
+      }
+    });
   } catch (err) {
+    // Could not READ the file: our problem, not a malformed CSV — generic 500.
+    if (isFileReadError(err)) throw err;
     // See csvParser.service.ts — a malformed CSV is the user's to fix, so tell them
     // what is wrong with it rather than hiding it behind a generic 500.
     if (err instanceof CsvParseError) throw err;
@@ -132,6 +151,21 @@ export async function parseProductCsvBuffer(buffer: Buffer): Promise<ParsedProdu
   return parseProductCsvStream(Readable.from(buffer));
 }
 
+/** The Handle of the product each row belongs to, fed the rows in file order:
+ *  exactly the assignment groupByHandle makes, so anything that labels rows by
+ *  product (the reports, which page rows from the DB and cannot hold the whole
+ *  grouping) agrees with what the pre-check judged and the import sent. A row
+ *  with a blank Handle continues the previous product; '' means the row belongs
+ *  to no product (a blank Handle before any product), which nothing imports. */
+export function productHandleTracker(): (row: Record<string, string>) => string {
+  let current = '';
+  return (row) => {
+    const handle = col(row, 'Handle');
+    if (handle) current = handle;
+    return current;
+  };
+}
+
 // Groups rows by Handle, preserving the order each Handle first appears. A row
 // with no Handle is attached to the most recent Handle (Shopify exports leave the
 // Handle blank on continuation rows in some dialects); a leading row with no
@@ -139,13 +173,11 @@ export async function parseProductCsvBuffer(buffer: Buffer): Promise<ParsedProdu
 export function groupByHandle(rows: ProductCsvRow[]): ProductGroup[] {
   const groups: ProductGroup[] = [];
   const byHandle = new Map<string, ProductGroup>();
-  let currentHandle = '';
+  const productOf = productHandleTracker();
 
   for (const row of rows) {
-    const handle = col(row.normalized, 'Handle');
-    const key = handle || currentHandle;
+    const key = productOf(row.normalized);
     if (!key) continue; // no handle and no preceding group — skip
-    currentHandle = key;
 
     let group = byHandle.get(key);
     if (!group) {

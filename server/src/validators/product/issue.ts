@@ -40,6 +40,25 @@ export function productIssue(
   };
 }
 
+function byCodePoint(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** The one order pre-check issues are shown in — the upload response, the
+ *  upload detail (GET) and the Excel sheet alike: by row, then issue type, then
+ *  column. Compared by code point in JS everywhere rather than left to the
+ *  database's collation, so every surface lists them identically. */
+export function compareProductIssues(
+  a: { rowNumber: number; issueType: string; column: string },
+  b: { rowNumber: number; issueType: string; column: string },
+): number {
+  return (
+    a.rowNumber - b.rowNumber ||
+    byCodePoint(a.issueType, b.issueType) ||
+    byCodePoint(a.column, b.column)
+  );
+}
+
 /** The raw cell, as the merchant typed it (for Current Value). */
 export function rawCell(row: ProductCsvRow, column: string): string {
   return row.original[column] ?? '';

@@ -6,9 +6,9 @@ import { VariantFieldsRule } from './variantFields.rule';
 import { OptionsRule } from './options.rule';
 import { ProductFieldsRule } from './productFields.rule';
 import { ImageUrlRule } from './imageUrl.rule';
-import { FILE_BLOCKING_ISSUE_TYPES } from './issue';
+import { compareProductIssues, FILE_BLOCKING_ISSUE_TYPES } from './issue';
 
-export { FILE_BLOCKING_ISSUE_TYPES };
+export { compareProductIssues, FILE_BLOCKING_ISSUE_TYPES };
 
 // File-level checks only: each predicts, from the CSV alone, a rejection by
 // Shopify's admin CSV import, pinned to an observed verdict (see
@@ -31,6 +31,7 @@ export function runProductValidation(groups: ProductGroup[]): ProductValidationI
     // Per-issue push, not push(...arr): see validateCustomerCsv.
     for (const issue of rule.validate(groups)) issues.push(issue);
   }
-  return issues.sort((a, b) => a.rowNumber - b.rowNumber);
+  // Same order the upload detail and the Excel sheet show (compareProductIssues).
+  return issues.sort(compareProductIssues);
 }
 

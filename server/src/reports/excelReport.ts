@@ -176,27 +176,33 @@ function addFullUploadedFileSheet(
     return;
   }
 
-  const allColumns = ['Row Number', ...originalColumns];
-  sheet.columns = allColumns.map((col) => ({
-    header: excelSafeText(col),
-    key: col,
-    width: col === 'Row Number' ? 12 : 22,
-  }));
+  sheet.columns = [
+    { header: 'Row Number', key: 'rowNumber', width: 12 },
+    ...originalColumns.map((col, i) => ({ header: excelSafeText(col), key: csvKey(i), width: 22 })),
+  ];
 
-  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(allColumns.length)}1` };
+  sheet.autoFilter = { from: 'A1', to: `${columnIndexToLetter(originalColumns.length + 1)}1` };
   styleHeader(sheet.getRow(1), HEADER_COLOURS['Full Uploaded File']);
 
   for (const origRow of originalRows) {
     const data = origRow.data as Record<string, string>;
-    const rowData: Record<string, string | number> = { 'Row Number': origRow.rowNumber };
-    for (const col of originalColumns) {
-      rowData[col] = data[col] ?? '';
-    }
+    const rowData: Record<string, string | number> = { rowNumber: origRow.rowNumber };
+    originalColumns.forEach((col, i) => {
+      rowData[csvKey(i)] = data[col] ?? '';
+    });
     sheet.addRow(excelSafeRecord(rowData)).commit();
   }
 
   sheet.commit();
 }
+
+// Worksheet column keys. ExcelJS keeps ONE column per key, so keying CSV columns
+// by header text let a CSV column named "Row Number" (natural in a CSV saved from
+// one of these reports and uploaded again) overwrite the tool's own column. The
+// tool's columns use fixed identifiers; CSV and template columns are keyed by
+// position under a prefix no tool key uses, so nothing can collide.
+const csvKey = (index: number) => `csv:${index}`;
+const templateKey = (index: number) => `tpl:${index}`;
 
 const AUTO_FIX_GREEN = 'FFD1FAE5';
 
@@ -312,7 +318,7 @@ function addShopifyTemplateSheet(
     { header: 'Duplicate Group # (Phone)', key: 'dupPhoneGroup', width: 22 },
     ...(anyMerges ? [{ header: 'Merged From Rows', key: 'mergedFromRows', width: 18 }] : []),
     { header: 'Row Number', key: 'rowNumber', width: 12 },
-    ...effectiveColumns.map((col) => ({ header: col, key: col, width: 26 })),
+    ...effectiveColumns.map((col, i) => ({ header: excelSafeText(col), key: templateKey(i), width: 26 })),
   ];
 
   sheet.autoFilter = {
@@ -348,9 +354,9 @@ function addShopifyTemplateSheet(
 
     // Records are final (move-to-Notes / Helios tag already applied by
     // buildTemplateDataset) — just emit them.
-    for (const shopifyCol of effectiveColumns) {
-      rowData[shopifyCol] = row.record[shopifyCol] ?? '';
-    }
+    effectiveColumns.forEach((shopifyCol, i) => {
+      rowData[templateKey(i)] = row.record[shopifyCol] ?? '';
+    });
 
     const excelRow = sheet.addRow(excelSafeRecord(rowData));
 

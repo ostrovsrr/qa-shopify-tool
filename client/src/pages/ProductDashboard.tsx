@@ -106,7 +106,13 @@ export function ProductDashboard() {
         setUploadPhase('import');
         setActiveTab('upload');
       })
-      .catch(() => active && setError('Failed to load upload.'))
+      .catch(() => {
+        if (!active) return;
+        // Drop the upload that was on screen — see CustomerDashboard.
+        setUpload(null);
+        setUploadPhase('upload');
+        setError('Failed to load upload.');
+      })
       .finally(() => active && setLoading(false));
     return () => {
       active = false;

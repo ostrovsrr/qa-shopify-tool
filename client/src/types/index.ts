@@ -151,6 +151,21 @@ export interface CleanupResult {
   deleted: number;
   failed: number;
   errors: { id: string; message: string }[];
+  /** One entry per store the cleanup touched, so a partial failure is reported
+   *  per store instead of being folded into the totals. */
+  stores: CleanupStoreOutcome[];
+}
+
+/** How one store's cleanup run ended, as far as the client watched it.
+ *  'running' = the client stopped watching, but the server is still deleting. */
+export interface CleanupStoreOutcome {
+  storeId: string | null;
+  shop: string;
+  status: 'completed' | 'failed' | 'running';
+  found: number;
+  deleted: number;
+  /** The server's reason for a failed run (or why it could not be watched). */
+  error: string | null;
 }
 
 export interface RejectedRow {
@@ -168,6 +183,13 @@ export interface PerStoreResult {
   rejected: number;
 }
 
+/** A store a parallel import was split across (from its batch-job rows). Known
+ *  from the moment the run starts, unlike perStore, which fills in as jobs finish. */
+export interface BatchStore {
+  storeId: string | null;
+  shopDomain: string;
+}
+
 export interface ImportFeedback {
   importRunId: string;
   validationId: string;
@@ -181,6 +203,8 @@ export interface ImportFeedback {
   createdAt: string;
   rejectedRows: RejectedRow[];
   perStore: PerStoreResult[];
+  /** Empty for a single-store run; optional because older servers omit it. */
+  batchStores?: BatchStore[];
 }
 
 // ── Products ─────────────────────────────────────────────────────────────────
@@ -262,6 +286,7 @@ export interface ProductCleanupResult {
   deleted: number;
   failed: number;
   errors: { id: string; message: string }[];
+  stores: CleanupStoreOutcome[];
 }
 
 export interface RejectionGroup {
@@ -289,4 +314,6 @@ export interface ProductImportFeedback {
   createdAt: string;
   rejectionGroups: RejectionGroup[];
   perStore: PerStoreResult[];
+  /** See ImportFeedback.batchStores. */
+  batchStores?: BatchStore[];
 }

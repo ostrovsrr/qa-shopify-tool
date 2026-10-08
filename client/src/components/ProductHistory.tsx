@@ -19,10 +19,11 @@ function ImportBadge({ lastImport }: { lastImport: ProductHistoryImport | null }
       </span>
     );
   }
-  if (status === 'RUNNING') {
+  // PENDING is the normal first state, not a failure — see ValidationHistory.
+  if (status === 'RUNNING' || status === 'PENDING') {
     return (
       <span className="badge badge-importing" title="Import in progress">
-        ⬆ Importing…
+        ⬆ {status === 'PENDING' ? 'Import starting…' : 'Importing…'}
       </span>
     );
   }
@@ -136,13 +137,17 @@ export function ProductHistory({ onOpen, refreshTrigger }: Props) {
   // mine-only left unreachable for everybody.
   const [scope, setScope] = useState<'mine' | 'all'>('mine');
 
+  // Only the latest request may write the list — see ValidationHistory.
+  const requestSeq = useRef(0);
   const load = () => {
+    const seq = ++requestSeq.current;
+    const current = () => seq === requestSeq.current;
     setLoading(true);
     setError('');
     fetchHistory(scope === 'mine')
-      .then(setHistory)
-      .catch(() => setError('Failed to load history.'))
-      .finally(() => setLoading(false));
+      .then((items) => current() && setHistory(items))
+      .catch(() => current() && setError('Failed to load history.'))
+      .finally(() => current() && setLoading(false));
   };
 
   useEffect(load, [refreshTrigger, scope]);

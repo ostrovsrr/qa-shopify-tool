@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { ProductGroup } from '../../src/types';
 import { runProductValidation } from '../../src/validators/product';
 import { DuplicateVariantRule } from '../../src/validators/product/duplicateVariant.rule';
-import { MissingOptionValueRule } from '../../src/validators/product/missingOptionValue.rule';
 import { GiftCardRule } from '../../src/validators/product/giftCard.rule';
+import { ProductFieldsRule } from '../../src/validators/product/productFields.rule';
+import { compareProductIssues } from '../../src/validators/product';
+import { LONG } from '../../scripts/rejectionProbe/cases';
 
 // One Handle group from plain records; row numbers start at 2 like a real CSV.
 function group(handle: string, records: Record<string, string>[], firstRow = 2): ProductGroup {
@@ -132,5 +134,63 @@ describe('pre-check message quoting', () => {
     const money = issues.find((i) => i.issueType === 'UnreadableMoney')!;
     expect(money.message).toContain(': "abc" is not a valid price');
     expect(money.message).not.toContain('""');
+  });
+});
+
+// The builder sends col(first, 'Type', 'Product Type') — the first NON-EMPTY of
+// the two. The rule used to judge the first column that merely EXISTED, so a
+// blank Type hid a 300-character Product Type that the import then sent (and
+// Shopify rejected: probe type-long).
+describe('ProductFieldsRule reads Type the way the builder sends it', () => {
+  const rule = new ProductFieldsRule();
+
+  it('flags a long Product Type behind a blank Type, naming Product Type', () => {
+    const issues = rule.validate([group('p', [{ Title: 'P', Type: '', 'Product Type': LONG }])]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ issueType: 'FieldTooLong', column: 'Product Type', currentValue: LONG });
+    expect(issues[0].message).toContain('Product type is too long (maximum is 255 characters)');
+  });
+
+  it('does not flag a long Product Type that a filled Type overrides', () => {
+    const issues = rule.validate([group('p', [{ Title: 'P', Type: 'Shirts', 'Product Type': LONG }])]);
+    expect(issues).toEqual([]);
+  });
+
+  it('still flags a long Type', () => {
+    const issues = rule.validate([group('p', [{ Title: 'P', Type: LONG, 'Product Type': 'Shirts' }])]);
+    expect(issues.map((i) => i.column)).toEqual(['Type']);
+  });
+});
+
+describe('number cells too large to read', () => {
+  it('says a huge price is too large, not that it has no number', () => {
+    const issues = runProductValidation([group('p', [{ Title: 'P', 'Variant Price': '9'.repeat(400) }])]);
+    const money = issues.find((i) => i.issueType === 'UnreadableMoney')!;
+    expect(money.message).toContain('too large');
+    expect(money.message).not.toContain('has no number');
+  });
+
+  it('flags grams too large for a double instead of sending a null weight', () => {
+    const issues = runProductValidation([group('p', [{ Title: 'P', 'Variant Grams': '1e999' }])]);
+    expect(issues.map((i) => i.issueType)).toEqual(['InvalidWeight']);
+    expect(issues[0].message).toContain('too large');
+  });
+});
+
+// The upload response, the upload detail and the Excel sheet all list issues
+// in compareProductIssues order; runProductValidation (the upload response)
+// used to sort by row only, leaving rule order within a row.
+describe('pre-check issue order', () => {
+  it('sorts by row, then issue type, then column', () => {
+    const issues = runProductValidation([
+      group('p', [{ Title: '', 'Variant SKU': LONG, 'Variant Barcode': LONG, 'Variant Price': 'abc' }]),
+    ]);
+    expect(issues.map((i) => [i.issueType, i.column])).toEqual([
+      ['FieldTooLong', 'Variant Barcode'],
+      ['FieldTooLong', 'Variant SKU'],
+      ['MissingTitle', 'Title'],
+      ['UnreadableMoney', 'Variant Price'],
+    ]);
+    expect([...issues].sort(compareProductIssues)).toEqual(issues);
   });
 });

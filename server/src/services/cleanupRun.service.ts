@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { CleanupRun, Prisma } from '@prisma/client';
 import prisma from '../db/prisma';
-import { getShopifyConfig, getShopifyStoresConfig, resolveStoreId } from '../config/shopify';
+import { getShopifyConfig, sweepOwnsStore } from '../config/shopify';
 import { getShopifyClient } from './shopifyClient';
 import {
   acquireStoreLock,
@@ -349,19 +349,6 @@ export async function reconcileCleanupRun(id: string): Promise<CleanupRun | null
 }
 
 /**
- * Does THIS instance hold credentials for the store? Mirrors ownsStore in
- * importSweep.service.ts (same reasoning): judged only when there is a usable store
- * list, because with none resolveStoreId returns null for everything alike and a skip
- * would turn a misconfiguration into a silent no-op. A NULL storeId is a legacy row,
- * left to the normal path, which fails it honestly.
- */
-function ownsStore(storeId: string | null, canJudge: boolean): boolean {
-  if (!canJudge) return true;
-  if (!storeId) return true;
-  return Boolean(resolveStoreId(storeId));
-}
-
-/**
  * Advance every still-running cleanup, independent of any browser.
  *
  * The bulk path holds its store lock until reconcileCleanupRun brings the run to
@@ -380,6 +367,10 @@ function ownsStore(storeId: string | null, canJudge: boolean): boolean {
  * operation id yet and belongs to resume-on-boot, not here — the reconcile guard
  * would bounce it anyway.
  *
+ * Only rows for stores THIS instance holds credentials for — see sweepOwnsStore.
+ * The import sweep always did this; this one did not, so one colleague's cleanup
+ * filled every other instance's log with "store is not configured" once a minute.
+ *
  * Serves the customer and product flows alike — one engine, both flows.
  */
 export async function sweepRunningCleanups(): Promise<void> {
@@ -391,13 +382,8 @@ export async function sweepRunningCleanups(): Promise<void> {
     select: { id: true, storeId: true },
   });
 
-  const storesConfig = getShopifyStoresConfig();
-  const canJudge = storesConfig.ok && storesConfig.stores.length > 0;
-
   for (const { id, storeId } of stuck) {
-    // Only this instance's stores. Every instance sees every colleague's cleanups in
-    // the shared database; sweeping one we hold no token for can only fail.
-    if (!ownsStore(storeId, canJudge)) continue;
+    if (!sweepOwnsStore(storeId)) continue;
     // One unreachable store must not stop the rest from being reconciled.
     try {
       await reconcileCleanupRun(id);

@@ -7,9 +7,13 @@ const apiVersionSchema = z
   .regex(/^\d{4}-\d{2}$/, 'SHOPIFY_API_VERSION must look like "2026-01".')
   .default(DEFAULT_API_VERSION);
 
+const SHOP_REQUIRED = 'Shop domain is required (e.g. my-store.myshopify.com)';
+
+// A whitespace-only shop used to pass min(1) and then normalise to "" — a store with
+// no domain and an empty id.
 const shopSchema = z
   .string()
-  .min(1, 'Shop domain is required (e.g. my-store.myshopify.com)');
+  .refine((value) => value.trim().length > 0, SHOP_REQUIRED);
 
 const tokenSchema = z
   .string()
@@ -54,11 +58,25 @@ const jsonStoreSchema = z.object({
   clientSecret: z.string().min(1).optional(),
 });
 
-function normalizeShop(raw: string): string {
-  return raw
-    .trim()
-    .replace(/^https?:\/\//, '')
-    .replace(/\/+$/, '');
+// The forms people actually paste, all meaning the same shop:
+//   my-store.myshopify.com
+//   https://my-store.myshopify.com/
+//   my-store.myshopify.com/admin            (copied from the old admin URL)
+//   https://admin.shopify.com/store/my-store/products   (the new admin URL)
+// Every one must normalise to "my-store.myshopify.com", or the same shop gets two
+// different lock keys and two operations can run against it at once.
+//
+// Ids are derived from this for stores configured without one, so the result for a
+// form that already worked (a bare or https:// domain, trailing slash) is unchanged.
+const ADMIN_STORE_URL_RE = /^(?:https?:\/\/)?admin\.shopify\.com\/store\/([^/?#]+)/i;
+
+export function normalizeShop(raw: string): string {
+  const trimmed = raw.trim();
+  const admin = ADMIN_STORE_URL_RE.exec(trimmed);
+  if (admin) return `${admin[1]}.myshopify.com`;
+  return trimmed
+    .replace(/^https?:\/\//i, '')
+    .replace(/[/?#].*$/, '');
 }
 
 function normalizeId(raw: string): string {
@@ -69,14 +87,46 @@ function normalizeId(raw: string): string {
     .replace(/^-+|-+$/g, '');
 }
 
+// ── Config errors reach the browser ─────────────────────────────────────────
+//
+// The message of anything thrown here is cached as the config error and returned
+// to the UI (GET /api/shopify/stores, ShopifyConfigError passthrough). So it must
+// never contain the configured VALUES — those include the shared client secret and
+// admin tokens. In particular:
+//   - JSON.parse's SyntaxError quotes a slice of the input in V8
+//     ("...\"clientSecret\":abc12..." is not valid JSON), so it is caught and
+//     replaced by a fixed message;
+//   - a ZodError's own message is a JSON dump of its issues; we use only each
+//     issue's path and message, and every message reachable here is either a
+//     fixed string from this file or a zod default that describes the expectation,
+//     never the received value.
+function describeIssue(issue: z.ZodIssue): string {
+  const path = issue.path.length > 0 ? `${issue.path.join('.')}: ` : '';
+  return `${path}${issue.message}`;
+}
+
 function validateStore(store: ShopifyStoreConfig): ShopifyStoreConfig {
+  if (!store.shop) {
+    throw new Error(`${store.label}: ${SHOP_REQUIRED}`);
+  }
+  if (!store.id) {
+    throw new Error(`${store.label} (${store.shop}) has an empty store id.`);
+  }
   if (!store.adminToken && (!store.clientId || !store.clientSecret)) {
     throw new Error(
       `${store.label} (${store.shop}) needs either adminToken or clientId + clientSecret.`,
     );
   }
-  if (store.adminToken) tokenSchema.parse(store.adminToken);
-  apiVersionSchema.parse(store.apiVersion);
+  if (store.adminToken) {
+    const token = tokenSchema.safeParse(store.adminToken);
+    if (!token.success) {
+      throw new Error(`${store.label} (${store.shop}): ${token.error.errors[0].message}`);
+    }
+  }
+  const version = apiVersionSchema.safeParse(store.apiVersion);
+  if (!version.success) {
+    throw new Error(`${store.label} (${store.shop}): ${version.error.errors[0].message}`);
+  }
   return store;
 }
 
@@ -84,9 +134,19 @@ function fromJsonEnv(): ShopifyStoreConfig[] {
   const raw = process.env.SHOPIFY_TEST_STORES;
   if (!raw) return [];
 
-  const parsed = z.array(jsonStoreSchema).safeParse(JSON.parse(raw));
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    // Deliberately NOT the SyntaxError's message: it quotes the input.
+    throw new Error(
+      'SHOPIFY_TEST_STORES is not valid JSON. Check its syntax (quotes, commas, brackets); the value is not shown because it contains credentials.',
+    );
+  }
+
+  const parsed = z.array(jsonStoreSchema).safeParse(json);
   if (!parsed.success) {
-    throw new Error(`SHOPIFY_TEST_STORES is invalid: ${parsed.error.errors[0].message}`);
+    throw new Error(`SHOPIFY_TEST_STORES is invalid: ${describeIssue(parsed.error.errors[0])}`);
   }
 
   return parsed.data.map((store, index) =>
@@ -163,11 +223,22 @@ export function getShopifyStoresConfig(): ShopifyStoreConfigResult {
     }
 
     const seen = new Set<string>();
+    // The store lock is keyed by id. One shop listed under two ids would get two
+    // lock keys, so two operations could run against the same shop at once.
+    const shopOwner = new Map<string, string>();
     for (const store of effectiveStores) {
       if (seen.has(store.id)) {
         throw new Error(`Duplicate Shopify store id "${store.id}".`);
       }
       seen.add(store.id);
+      const shopKey = store.shop.toLowerCase();
+      const owner = shopOwner.get(shopKey);
+      if (owner !== undefined) {
+        throw new Error(
+          `Shopify shop "${store.shop}" is configured twice (store ids "${owner}" and "${store.id}"). List each shop once.`,
+        );
+      }
+      shopOwner.set(shopKey, store.id);
     }
 
     cached = { ok: true, stores: effectiveStores };
@@ -231,6 +302,28 @@ export function getShopifyConfig(storeId?: string): ShopifyConfigResult {
 export function resolveStoreId(storeId?: string): string | null {
   const result = getShopifyConfig(storeId);
   return result.ok ? result.config.id : null;
+}
+
+/**
+ * Should THIS instance's background sweeps touch a row for this store?
+ *
+ * One instance per Solution Engineer against a SHARED database, so every sweep sees
+ * every colleague's rows too. Reconciling one we have no token for cannot corrupt
+ * anything — reconcile throws and the sweep logs it — but it means eight instances
+ * logging a failure a minute for every run the ninth owns, which buries the
+ * failures that matter. (Observed: one colleague's cleanup filled every other
+ * instance's log, and so the status page, with "store is not configured".)
+ *
+ * Judged only when there IS a config to judge against: with no usable store list,
+ * resolveStoreId returns null for everything alike, and skipping on that basis would
+ * turn a misconfiguration into a silent no-op. Then it is better to attempt and fail
+ * loudly. Same reasoning as importResume.service.ts.
+ */
+export function sweepOwnsStore(storeId: string | null): boolean {
+  const config = getShopifyStoresConfig();
+  if (!config.ok || config.stores.length === 0) return true;
+  if (!storeId) return true; // legacy single-store row — let the normal path speak
+  return Boolean(resolveStoreId(storeId));
 }
 
 export function resetShopifyConfigCache(): void {
