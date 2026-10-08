@@ -73,6 +73,9 @@ export interface ResumableRow {
   /** A batch job's parent run. Read only for job tables (findResumableRows with
    *  `withParent`), so a job can re-take its lock as its store's SHARE of that run. */
   importRunId?: string;
+  /** A cleanup op's parent run. The op has no store or lock of its own: it re-takes
+   *  the lock its parent holds (CLEANUP_RUN, the run's id). */
+  cleanupRunId?: string;
 }
 
 /**

@@ -48,8 +48,19 @@ const fakeClient = {
 /** When set, getShopifyClient throws it — an instance with no token for the store. */
 let clientError: Error | null = null;
 /** How the bulk-delete submit fails, if it does: before the mutation call (nothing
- *  reached Shopify) or after markSubmitAttempt (outcome unknown). */
-let submitFailure: 'before-mutation' | 'during-mutation' | null = null;
+ *  reached Shopify), after markSubmitAttempt (outcome unknown), or Shopify's
+ *  definite refusal at the per-shop concurrent limit. */
+type SubmitFailure = 'before-mutation' | 'during-mutation' | 'concurrency' | null;
+let submitFailure: SubmitFailure = null;
+/** Per-submit failure by call order (op i is submitted i-th); overrides submitFailure. */
+let submitFailures: SubmitFailure[] = [];
+let submitCalls = 0;
+/** The ids each submit was given, by call order. */
+const submittedSlices: string[][] = [];
+/** The ids each result-file parse was given. */
+const parsedSlices: string[][] = [];
+/** Per-op Shopify state by bulk op id; an op not listed reads opStatus / opUrl. */
+const opState = new Map<string, { status?: string; error?: Error }>();
 /** When set, fetchBulkOperationState throws it. */
 let fetchError: Error | null = null;
 /** Runs inside fetchBulkOperationState — lets a test stage a concurrent poll. */
@@ -72,33 +83,45 @@ vi.mock('../../src/services/shopifyBulk', async (importOriginal) => {
     ...actual,
     submitBulkDelete: async (
       _client: unknown,
-      _ids: string[],
+      ids: string[],
       _spec: unknown,
       beforeRun?: () => Promise<void>,
     ) => {
-      if (submitFailure === 'before-mutation') throw new Error('staged upload failed');
+      // Taken before any await, so the n-th call is the n-th op launched.
+      const n = submitCalls++;
+      submittedSlices[n] = ids;
+      const failure = submitFailures[n] ?? submitFailure;
+      if (failure === 'before-mutation') throw new Error('staged upload failed');
       if (beforeRun) await beforeRun();
-      if (submitFailure === 'during-mutation') throw new Error('socket hang up');
-      const id = `gid://shopify/BulkOperation/del-${submittedOps.length + 1}`;
+      if (failure === 'during-mutation') throw new Error('socket hang up');
+      if (failure === 'concurrency') throw new actual.BulkConcurrencyLimitError();
+      const id = `gid://shopify/BulkOperation/del-${n + 1}`;
       submittedOps.push(id);
       return id;
     },
     fetchBulkOperationState: async (_c: unknown, id: string) => {
       if (onFetch) await onFetch();
       if (fetchError) throw fetchError;
+      const own = opState.get(id);
+      if (own?.error) throw own.error;
       return {
         id,
-        status: opStatus,
+        status: own?.status ?? opStatus,
         errorCode: null,
         objectCount: String(taggedIds.length),
         url: opUrl,
         partialDataUrl: null,
       };
     },
-    parseBulkDeleteResults: async (_url: string, ids: string[]) => ({
-      deleted: ids.length - 1,
-      errors: [{ id: ids[ids.length - 1], message: 'Product is referenced by an order' }],
-    }),
+    // One refused id per op — the last of the slice it was given — so the totals
+    // and errors show exactly which slice each op's result was mapped back to.
+    parseBulkDeleteResults: async (_url: string, ids: string[]) => {
+      parsedSlices.push(ids);
+      return {
+        deleted: ids.length - 1,
+        errors: [{ id: ids[ids.length - 1], message: 'Product is referenced by an order' }],
+      };
+    },
   };
 });
 
@@ -107,7 +130,9 @@ const { resetDb } = await import('./resetDb');
 const { startCleanupRun, reconcileCleanupRun, sweepRunningCleanups } = await import(
   '../../src/services/cleanupRun.service'
 );
-const { MAX_JOB_POLL_ATTEMPTS } = await import('../../src/services/shopifyBulk');
+const { MAX_JOB_POLL_ATTEMPTS, splitIntoBatches } = await import('../../src/services/shopifyBulk');
+const app = (await import('../../src/index')).default;
+const request = (await import('supertest')).default;
 const { resetShopifyConfigCache } = await import('../../src/config/shopify');
 const { busyStores } = await import('../../src/services/storeLock.service');
 
@@ -127,11 +152,19 @@ runIf('async cleanup', () => {
     serialDeletes = 0;
     clientError = null;
     submitFailure = null;
+    submitFailures = [];
+    submitCalls = 0;
+    submittedSlices.length = 0;
+    parsedSlices.length = 0;
+    opState.clear();
     fetchError = null;
     onFetch = null;
+    // Pinned, not left to the default: the op counts below depend on it.
+    vi.stubEnv('BULK_OPS_PER_STORE', '5');
     await resetDb();
   });
   afterEach(() => {
+    vi.unstubAllEnvs();
     process.env.SHOPIFY_TEST_STORES = '[]';
     resetShopifyConfigCache();
   });
@@ -150,7 +183,9 @@ runIf('async cleanup', () => {
     const elapsed = Date.now() - started;
 
     expect(run.status).toBe('RUNNING');
-    expect(run.bulkOperationId).toBe('gid://shopify/BulkOperation/del-1');
+    // The deletes live on the run's ops now, not on the run.
+    expect(run.bulkOperationId).toBeNull();
+    expect(submittedOps).toHaveLength(5);
     expect(run.found).toBe(200);
     // The old code would have polled here for up to 300 seconds.
     expect(elapsed).toBeLessThan(2_000);
@@ -179,12 +214,17 @@ runIf('async cleanup', () => {
     opUrl = 'https://results/cleanup';
     const done = await reconcileCleanupRun(run.id);
 
+    // Five ops of 20, each refusing the last id of its own slice.
     expect(done?.status).toBe('COMPLETED');
-    expect(done?.deleted).toBe(99);
-    expect(done?.failedCount).toBe(1);
-    expect(done?.errors).toEqual([
-      { id: 'gid://shopify/Product/100', message: 'Product is referenced by an order' },
-    ]);
+    expect(done?.deleted).toBe(95);
+    expect(done?.failedCount).toBe(5);
+    expect(done?.errors).toEqual(
+      [20, 40, 60, 80, 100].map((n) => ({
+        id: `gid://shopify/Product/${n}`,
+        message: 'Product is referenced by an order',
+      })),
+    );
+    expect(await lockOn('store1')).toBeNull();
   });
 
   // ── THE STORE MUST NOT STAY "BUSY" AFTER THE DELETE FINISHES ───────────────
@@ -212,7 +252,7 @@ runIf('async cleanup', () => {
 
     const done = await prisma.cleanupRun.findUnique({ where: { id: run.id } });
     expect(done?.status).toBe('COMPLETED');
-    expect(done?.deleted).toBe(99);
+    expect(done?.deleted).toBe(95);
     // The store is free again — no lingering lock, no false "busy".
     expect(await prisma.storeLock.findUnique({ where: { storeId: 'store1' } })).toBeNull();
   });
@@ -313,6 +353,10 @@ runIf('async cleanup', () => {
   // non-owner's reconcile used to bump pollAttempts BEFORE discovering it could not
   // build a client, so ten instances' sweeps burned the cap and the run was failed
   // — store released — while Shopify was still deleting.
+  //
+  // These seed a run the way it was written BEFORE the split into cleanup_ops (one
+  // op, its id on the run itself), so they also pin that such a row, RUNNING across
+  // the deploy, still reconciles to the end.
   async function runningCleanup(storeId: string, pollAttempts = 0) {
     const run = await prisma.cleanupRun.create({
       data: {
@@ -453,7 +497,201 @@ runIf('async cleanup', () => {
     const run = await startCleanupRun('PRODUCT', 'store1', 'qa-import');
 
     expect(run.status).toBe('FAILED');
-    expect(run.error).toBe('staged upload failed');
+    expect(run.error).toContain('staged upload failed');
     expect(await lockOn('store1')).toBeNull();
+  });
+
+  // ── K DELETES PER STORE ───────────────────────────────────────────────────
+  const opsOf = (runId: string) =>
+    prisma.cleanupOp.findMany({ where: { cleanupRunId: runId }, orderBy: { opIndex: 'asc' } });
+
+  it('splits a big teardown into k ops, each given its own slice, and sums them', async () => {
+    taggedIds = manyIds(103);
+    const run = await startCleanupRun('PRODUCT', 'store1', 'qa-import');
+
+    const ops = await opsOf(run.id);
+    expect(ops.map((o) => [o.opIndex, o.opCount, o.status])).toEqual(
+      [0, 1, 2, 3, 4].map((i) => [i, 5, 'RUNNING']),
+    );
+    expect(ops.every((o) => o.bulkOperationId)).toBe(true);
+    // Contiguous and complete: every id deleted exactly once.
+    expect(submittedSlices).toEqual(splitIntoBatches(taggedIds, 5));
+
+    opStatus = 'COMPLETED';
+    opUrl = 'https://results/cleanup';
+    const done = await reconcileCleanupRun(run.id);
+
+    // Each result file was mapped back to the slice of the op it belongs to.
+    expect([...parsedSlices].sort((a, b) => a.length - b.length || a[0].localeCompare(b[0]))).toEqual(
+      [...splitIntoBatches(taggedIds, 5)].sort((a, b) => a.length - b.length || a[0].localeCompare(b[0])),
+    );
+    expect(done).toMatchObject({ status: 'COMPLETED', deleted: 98, failedCount: 5, error: null });
+    expect(await lockOn('store1')).toBeNull();
+  });
+
+  it('BULK_OPS_PER_STORE=1 runs one op over every id', async () => {
+    vi.stubEnv('BULK_OPS_PER_STORE', '1');
+    taggedIds = manyIds(100);
+    const run = await startCleanupRun('CUSTOMER', 'store1', 'qa-import');
+
+    expect(await opsOf(run.id)).toHaveLength(1);
+    expect(submittedSlices).toEqual([taggedIds]);
+
+    opStatus = 'COMPLETED';
+    opUrl = 'https://results/cleanup';
+    expect(await reconcileCleanupRun(run.id)).toMatchObject({ status: 'COMPLETED', deleted: 99 });
+  });
+
+  it('keeps the store held while any op is still deleting', async () => {
+    taggedIds = manyIds(100);
+    const run = await startCleanupRun('PRODUCT', 'store1', 'qa-import');
+    opUrl = 'https://results/cleanup';
+    opStatus = 'COMPLETED';
+    opState.set('gid://shopify/BulkOperation/del-3', { status: 'RUNNING' });
+
+    const midway = await reconcileCleanupRun(run.id);
+
+    expect(midway?.status).toBe('RUNNING');
+    expect((await opsOf(run.id)).map((o) => o.status)).toEqual([
+      'COMPLETED', 'COMPLETED', 'RUNNING', 'COMPLETED', 'COMPLETED',
+    ]);
+    expect((await lockOn('store1'))?.ownerId).toBe(run.id);
+
+    opState.clear();
+    expect(await reconcileCleanupRun(run.id)).toMatchObject({ status: 'COMPLETED', deleted: 95 });
+    expect(await lockOn('store1')).toBeNull();
+  });
+
+  it('a partial failure ends FAILED, keeps what was deleted, and names the op', async () => {
+    taggedIds = manyIds(100);
+    const run = await startCleanupRun('PRODUCT', 'store1', 'qa-import');
+    opStatus = 'COMPLETED';
+    opUrl = 'https://results/cleanup';
+    opState.set('gid://shopify/BulkOperation/del-2', { status: 'CANCELED' });
+
+    const done = await reconcileCleanupRun(run.id);
+
+    expect(done).toMatchObject({ status: 'FAILED', deleted: 76, failedCount: 4 });
+    expect(done?.error).toContain('1 of 5 deletes did not complete');
+    expect(done?.error).toContain('Delete 2: Bulk delete CANCELED');
+    // Nothing is running any more, so the store is handed back.
+    expect(await lockOn('store1')).toBeNull();
+  });
+
+  it('two concurrent polls finish each op once, and the run once', async () => {
+    taggedIds = manyIds(100);
+    const run = await startCleanupRun('CUSTOMER', 'store1', 'qa-import');
+    opStatus = 'COMPLETED';
+    opUrl = 'https://results/cleanup';
+
+    await Promise.all([reconcileCleanupRun(run.id), reconcileCleanupRun(run.id)]);
+
+    const done = await prisma.cleanupRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(done).toMatchObject({ status: 'COMPLETED', deleted: 95, failedCount: 5 });
+  });
+
+  // ── AN AMBIGUOUS OP KEEPS THE STORE AFTER THE ROLL-UP ─────────────────────
+  it('an op whose submit outcome is unknown keeps the store busy after the others finish', async () => {
+    taggedIds = manyIds(100);
+    submitFailures = [null, 'during-mutation', null, null, null];
+    const run = await startCleanupRun('PRODUCT', 'store1', 'qa-import');
+
+    expect(run.status).toBe('RUNNING');
+    const ops = await opsOf(run.id);
+    expect(ops[1]).toMatchObject({ status: 'FAILED', bulkOperationId: null });
+    expect(ops[1].submitAttemptedAt).not.toBeNull();
+    expect(ops[1].error).toContain('may or may not have reached Shopify');
+
+    opStatus = 'COMPLETED';
+    opUrl = 'https://results/cleanup';
+    const done = await reconcileCleanupRun(run.id);
+
+    expect(done).toMatchObject({ status: 'FAILED', deleted: 76, failedCount: 4, bulkOperationId: null });
+    expect(done?.error).toContain('may or may not have reached Shopify');
+    // The run is now the "FAILED while submitting" holder storeLock honours to the TTL.
+    expect(done?.submitAttemptedAt).not.toBeNull();
+    expect((await lockOn('store1'))?.ownerId).toBe(run.id);
+    expect((await busyStores()).map((b) => b.storeId)).toEqual(['store1']);
+  });
+
+  it("Shopify's concurrent-limit refusal is definite: the op is not outcome-unknown", async () => {
+    taggedIds = manyIds(100);
+    submitFailure = 'concurrency';
+
+    const run = await startCleanupRun('PRODUCT', 'store1', 'qa-import');
+
+    expect(run.status).toBe('FAILED');
+    expect(run.error).toContain('Too many bulk operations');
+    expect(run.submitAttemptedAt).toBeNull();
+    expect((await opsOf(run.id)).every((o) => o.submitAttemptedAt === null)).toBe(true);
+    expect(await lockOn('store1')).toBeNull();
+  });
+
+  // ── PER-OP POLL RULES ─────────────────────────────────────────────────────
+  it('past the cap, an op whose status cannot be read is failed; the others still finish', async () => {
+    taggedIds = manyIds(100);
+    const run = await startCleanupRun('PRODUCT', 'store1', 'qa-import');
+    const ops = await opsOf(run.id);
+    await prisma.cleanupOp.update({
+      where: { id: ops[0].id },
+      data: { pollAttempts: MAX_JOB_POLL_ATTEMPTS },
+    });
+    opStatus = 'COMPLETED';
+    opUrl = 'https://results/cleanup';
+    opState.set(ops[0].bulkOperationId!, { error: new Error('Bulk operation not found while polling.') });
+
+    const done = await reconcileCleanupRun(run.id);
+
+    expect(done).toMatchObject({ status: 'FAILED', deleted: 76, failedCount: 4 });
+    expect(done?.error).toContain('Delete 1: Could not read');
+    // The unreadable op had an op id: not a submit-time ambiguity, so the store is freed.
+    expect(await lockOn('store1')).toBeNull();
+  });
+
+  it('under the cap, one op\'s bad poll is reported but the others still advance', async () => {
+    taggedIds = manyIds(100);
+    const run = await startCleanupRun('PRODUCT', 'store1', 'qa-import');
+    opStatus = 'COMPLETED';
+    opUrl = 'https://results/cleanup';
+    opState.set('gid://shopify/BulkOperation/del-4', { error: new Error('network down') });
+
+    await expect(reconcileCleanupRun(run.id)).rejects.toThrow('network down');
+
+    expect((await opsOf(run.id)).map((o) => o.status)).toEqual([
+      'COMPLETED', 'COMPLETED', 'COMPLETED', 'RUNNING', 'COMPLETED',
+    ]);
+    expect((await prisma.cleanupRun.findUniqueOrThrow({ where: { id: run.id } })).status).toBe('RUNNING');
+  });
+
+  it('a non-owner instance does not spend any op\'s poll budget', async () => {
+    taggedIds = manyIds(100);
+    const run = await startCleanupRun('PRODUCT', 'store1', 'qa-import');
+    clientError = new Error('Store "store1" is not configured.');
+
+    await expect(reconcileCleanupRun(run.id)).rejects.toThrow('not configured');
+
+    expect((await opsOf(run.id)).every((o) => o.pollAttempts === 0)).toBe(true);
+  });
+
+  // ── THE RESPONSE ──────────────────────────────────────────────────────────
+  it('GET /api/cleanup/:id does not send the id list or op internals', async () => {
+    taggedIds = manyIds(100);
+    const run = await startCleanupRun('PRODUCT', 'store1', 'qa-import');
+
+    const res = await request(app).get(`/api/cleanup/${run.id}`);
+
+    expect(res.status).toBe(200);
+    // Everything client/src/api/cleanupPoller.ts reads...
+    for (const key of [
+      'id', 'entity', 'storeId', 'shopDomain', 'tag', 'status',
+      'found', 'deleted', 'failedCount', 'error', 'errors',
+    ]) {
+      expect(res.body).toHaveProperty(key);
+    }
+    expect(res.body).toMatchObject({ id: run.id, status: 'RUNNING', found: 100 });
+    // ...and none of what can be 80k ids long or is the server's business.
+    for (const key of ['submittedIds', 'ops', 'bulkOperationId', 'pollAttempts', 'claimedAt', 'submitAttemptedAt']) {
+      expect(res.body).not.toHaveProperty(key);
+    }
   });
 });

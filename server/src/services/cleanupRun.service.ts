@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import type { CleanupRun, Prisma } from '@prisma/client';
+import type { CleanupOp, CleanupRun, Prisma } from '@prisma/client';
 import prisma from '../db/prisma';
 import { getShopifyConfig, sweepOwnsStore } from '../config/shopify';
 import { getShopifyClient } from './shopifyClient';
@@ -10,10 +10,14 @@ import {
   StoreBusyError,
 } from './storeLock.service';
 import {
+  BulkConcurrencyLimitError,
+  BulkDeleteFailure,
   BulkDeleteSpec,
   fetchBulkOperationState,
   MAX_JOB_POLL_ATTEMPTS,
+  opsForStoreOnShop,
   parseBulkDeleteResults,
+  splitIntoBatches,
   submitBulkDelete,
   TERMINAL_BULK_STATUSES,
 } from './shopifyBulk';
@@ -43,6 +47,13 @@ import {
 //     you have not recorded),
 //   - a PENDING row is resumable on boot,
 //   - customers and products are twins and share one engine.
+//
+// K DELETES PER STORE. A big teardown is split across up to BULK_OPS_PER_STORE
+// concurrent Shopify bulk deletes (cleanup_ops) — measured 3.6x faster with five
+// than with one. The CleanupRun stays one row per store: it owns the store lock
+// (CLEANUP_RUN, its id), holds the listed ids, and carries the totals once every op
+// is terminal (rollUpCleanupRun). A RUNNING row with bulkOperationId set predates
+// the split and is still reconciled the old way (reconcileSingleOpRun).
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type CleanupEntity = 'CUSTOMER' | 'PRODUCT';
@@ -162,9 +173,13 @@ export async function startCleanupRun(
 
   try {
     const { shop, ids } = await adapter.fetchIdsByTag(storeId, tag);
+    const inline = ids.length <= adapter.bulkThreshold;
     await prisma.cleanupRun.update({
       where: { id: runId },
-      data: { shopDomain: shop, found: ids.length, submittedIds: ids },
+      // The bulk path writes submittedIds together with its ops (launchCleanupOps),
+      // so a crash between the two leaves "never listed" for resume to re-list,
+      // never a list with no ops to delete it.
+      data: { shopDomain: shop, found: ids.length, ...(inline ? { submittedIds: ids } : {}) },
     });
 
     // Nothing tagged: done before we started.
@@ -179,7 +194,7 @@ export async function startCleanupRun(
 
     const client = await getShopifyClient(storeId);
 
-    if (ids.length <= adapter.bulkThreshold) {
+    if (inline) {
       const { deleted, errors } = await adapter.serialDelete(client, ids);
       const done = await prisma.cleanupRun.update({
         where: { id: runId },
@@ -196,41 +211,212 @@ export async function startCleanupRun(
     }
 
     // The bulk path outlives this request; the lock is held until the poll that
-    // reconciles it to terminal (reconcileCleanupRun) hands it back.
-    const bulkOpId = await submitBulkDelete(client, ids, adapter.deleteSpec, () =>
-      markSubmitAttempt(prisma.cleanupRun as never, runId),
+    // rolls the last op up to terminal (reconcileCleanupRun) hands it back.
+    await launchCleanupOps(runId, client, ids, adapter);
+    return await prisma.cleanupRun.findUniqueOrThrow({ where: { id: runId } });
+  } catch (err) {
+    // Only a run still PENDING is ours to fail here: nothing was submitted for it
+    // (every Shopify submit happens per op, after the run went RUNNING), so the store
+    // is provably idle and can be handed back. A RUNNING run's outcome belongs to its
+    // ops — a DB error after they were submitted must not fail the run and release
+    // the store under live deletes; the poll and the sweep roll it up.
+    const message = (err as Error).message;
+    const { count } = await prisma.cleanupRun.updateMany({
+      where: { id: runId, status: 'PENDING' },
+      data: { status: 'FAILED', error: message.slice(0, 500) },
+    });
+    if (count === 1) await releaseStoreLock(runId);
+    return prisma.cleanupRun.findUniqueOrThrow({ where: { id: runId } });
+  }
+}
+
+/** Error text for a delete that may have reached Shopify — the user is the only one
+ *  who can look at the store, so say what to check. */
+function outcomeUnknownMessage(cause: string): string {
+  return `The delete may or may not have reached Shopify (${cause}). Check the store, and re-run cleanup if tagged records remain.`;
+}
+
+/**
+ * Split a PENDING run's ids into k ops, record them, and submit them all at once.
+ *
+ * submittedIds, the run's move to RUNNING and the k PENDING op rows land in ONE
+ * transaction, before anything is sent to Shopify: a crash after it leaves PENDING
+ * ops for resume to relaunch, a crash before it leaves a PENDING run with no ops,
+ * which resume re-lists (relaunchCleanupRun). Never a submitted op with no row.
+ *
+ * Each op deletes splitIntoBatches(ids, k)[opIndex], which the reconcile recomputes
+ * from (opIndex, opCount) to map its result file back by line — so the split must
+ * stay a pure function of the persisted ids and k.
+ *
+ * Guarded on the run still being PENDING, so a run another process already launched
+ * is not launched twice.
+ */
+async function launchCleanupOps(
+  runId: string,
+  client: Awaited<ReturnType<typeof getShopifyClient>>,
+  ids: string[],
+  adapter: CleanupAdapter,
+  listed: Prisma.CleanupRunUpdateManyMutationInput = {},
+): Promise<void> {
+  // Capped by the bulk ops already running on the shop (an orphan from a crash, a
+  // colleague's import), so one op's submit does not fail on the per-shop limit.
+  const k = await opsForStoreOnShop(client, ids.length);
+  const ops = Array.from({ length: k }, (_, opIndex) => ({
+    id: uuidv4(),
+    cleanupRunId: runId,
+    opIndex,
+    opCount: k,
+  }));
+
+  const launched = await prisma.$transaction(async (tx) => {
+    const { count } = await tx.cleanupRun.updateMany({
+      where: { id: runId, status: 'PENDING' },
+      data: { ...listed, submittedIds: ids, status: 'RUNNING' },
+    });
+    if (count !== 1) return false;
+    await tx.cleanupOp.createMany({ data: ops });
+    return true;
+  });
+  if (!launched) return;
+
+  const slices = splitIntoBatches(ids, k);
+  // allSettled: launchCleanupOp records its own failures, so a rejection here is
+  // the DB failing us mid-record. That op stays PENDING for resume; the others must
+  // still be recorded, and the roll-up still run.
+  const results = await Promise.allSettled(
+    ops.map((op) => launchCleanupOp(op.id, client, slices[op.opIndex], adapter.deleteSpec)),
+  );
+  for (const r of results) {
+    if (r.status === 'rejected') {
+      console.error(`[cleanup] ${runId}: could not record an op's submit:`, (r.reason as Error).message);
+    }
+  }
+  // If every op already failed at submit, the run finishes now.
+  await rollUpCleanupRun(runId);
+}
+
+/**
+ * Submit one op's slice and record the outcome. Never throws for a Shopify failure:
+ * every one ends the op RUNNING or FAILED.
+ *
+ * Which FAILED matters to the store lock (see rollUpCleanupRun):
+ *   - DEFINITE — the throw came before the mutation call (submitAttemptedAt never
+ *     written), or Shopify answered with a refusal that started nothing
+ *     (BulkConcurrencyLimitError). submitAttemptedAt is cleared, so the op reads as
+ *     "nothing running".
+ *   - OUTCOME UNKNOWN — the mutation call itself failed (a dropped connection or a
+ *     gateway error says nothing about whether the op landed), or Shopify returned
+ *     an op id and RECORDING it failed. submitAttemptedAt stays set with no op id —
+ *     the state storeLock's judgeHolder treats as possibly still running.
+ */
+async function launchCleanupOp(
+  opId: string,
+  client: Awaited<ReturnType<typeof getShopifyClient>>,
+  slice: string[],
+  spec: BulkDeleteSpec,
+): Promise<void> {
+  // Set the moment Shopify hands back an op id. A throw after that is not a refused
+  // submit — the op exists and may be deleting right now.
+  let bulkOpId: string | null = null;
+  try {
+    bulkOpId = await submitBulkDelete(client, slice, spec, () =>
+      markSubmitAttempt(prisma.cleanupOp as never, opId),
     );
-    return await prisma.cleanupRun.update({
-      where: { id: runId },
+    await prisma.cleanupOp.updateMany({
+      where: { id: opId, status: 'PENDING' },
       data: { status: 'RUNNING', bulkOperationId: bulkOpId },
     });
   } catch (err) {
     const message = (err as Error).message;
-    // Did the failure happen AFTER markSubmitAttempt, i.e. in the bulk mutation call
-    // itself? Then Shopify may have accepted the delete and be running it right now
-    // — a timeout or a dropped connection says nothing about whether the op landed.
-    const attempted = await prisma.cleanupRun.findUnique({
-      where: { id: runId },
+    if (bulkOpId) {
+      await prisma.cleanupOp
+        .updateMany({
+          where: { id: opId, status: 'PENDING' },
+          data: {
+            status: 'FAILED',
+            error: outcomeUnknownMessage(
+              `Shopify started ${bulkOpId}; recording it failed: ${message}`,
+            ).slice(0, 500),
+          },
+        })
+        .catch(() => undefined); // the DB just failed us once; PENDING + attempted is also "unknown"
+      return;
+    }
+    const attempted = await prisma.cleanupOp.findUnique({
+      where: { id: opId },
       select: { submitAttemptedAt: true },
     });
-    const outcomeUnknown = Boolean(attempted?.submitAttemptedAt);
-    const failed = await prisma.cleanupRun.update({
-      where: { id: runId },
+    const definite = !attempted?.submitAttemptedAt || err instanceof BulkConcurrencyLimitError;
+    await prisma.cleanupOp.updateMany({
+      where: { id: opId, status: 'PENDING' },
       data: {
         status: 'FAILED',
-        error: (outcomeUnknown
-          ? `The delete may or may not have reached Shopify (${message}). Check the store, and re-run cleanup if tagged records remain.`
-          : message
-        ).slice(0, 500),
+        error: (definite ? message : outcomeUnknownMessage(message)).slice(0, 500),
+        ...(definite ? { submitAttemptedAt: null } : {}),
       },
     });
-    // Only hand the store back when we KNOW nothing is running on it. After an
-    // ambiguous submit the lock stays until its TTL: storeLock treats a FAILED holder
-    // with submitAttemptedAt and no op id as possibly still running, so the next
-    // colleague is told the store may be busy instead of landing on a live delete.
-    if (!outcomeUnknown) await releaseStoreLock(runId);
-    return failed;
   }
+}
+
+/** FAILED while submitting, with no op id: the delete may be running at Shopify.
+ *  The same test storeLock's judgeHolder applies to a lock holder. */
+function isOutcomeUnknown(op: CleanupOp): boolean {
+  return op.status === 'FAILED' && op.submitAttemptedAt !== null && !op.bulkOperationId;
+}
+
+/** One sentence for the run naming each op that did not complete. Identical
+ *  reasons are folded ("Deletes 1, 2, 3: …") so five ops refused for one cause do
+ *  not repeat it five times inside the 500-char column. */
+function rollUpError(ops: CleanupOp[], failed: CleanupOp[]): string {
+  if (ops.length === 1) return failed[0].error ?? `Bulk delete ${failed[0].status}.`;
+  const byReason = new Map<string, number[]>();
+  for (const op of failed) {
+    const reason = op.error ?? `Bulk delete ${op.status}.`;
+    byReason.set(reason, [...(byReason.get(reason) ?? []), op.opIndex + 1]);
+  }
+  const parts = [...byReason].map(
+    ([reason, nums]) => `${nums.length === 1 ? 'Delete' : 'Deletes'} ${nums.join(', ')}: ${reason}`,
+  );
+  return `${failed.length} of ${ops.length} deletes did not complete. ${parts.join(' ')}`;
+}
+
+/**
+ * Once every op is terminal, finish the run: ONE guarded transition that sums the
+ * ops' counts and refused ids. COMPLETED only if every op completed; otherwise
+ * FAILED, keeping the counts of the ops that did finish — what was deleted was
+ * deleted.
+ *
+ * Only the poll that makes the transition touches the lock, and only after the
+ * terminal write has committed. It releases the store — unless an op failed with
+ * its outcome unknown. Then the run gets submitAttemptedAt (it has no
+ * bulkOperationId), which storeLock already reads as "FAILED while submitting, may
+ * still be running", so the store stays busy until the lock's TTL instead of
+ * landing the next colleague on a live delete. No lock code knows about ops.
+ */
+async function rollUpCleanupRun(runId: string): Promise<void> {
+  const ops = await prisma.cleanupOp.findMany({
+    where: { cleanupRunId: runId },
+    orderBy: { opIndex: 'asc' },
+  });
+  if (ops.length === 0) return;
+  if (ops.some((op) => !TERMINAL_BULK_STATUSES.includes(op.status))) return;
+
+  const failed = ops.filter((op) => op.status !== 'COMPLETED');
+  const ambiguous = ops.some(isOutcomeUnknown);
+  const errors = ops.flatMap((op) => (op.errors ?? []) as unknown as BulkDeleteFailure[]);
+
+  const { count } = await prisma.cleanupRun.updateMany({
+    where: { id: runId, status: { notIn: TERMINAL_BULK_STATUSES } },
+    data: {
+      status: failed.length === 0 ? 'COMPLETED' : 'FAILED',
+      deleted: ops.reduce((n, op) => n + op.deleted, 0),
+      failedCount: ops.reduce((n, op) => n + op.failedCount, 0),
+      errors: errors.length > 0 ? (errors as unknown as object[]) : undefined,
+      error: failed.length === 0 ? null : rollUpError(ops, failed).slice(0, 500),
+      ...(ambiguous ? { submitAttemptedAt: new Date() } : {}),
+    },
+  });
+  if (count === 1 && !ambiguous) await releaseStoreLock(runId);
 }
 
 /** Shop domain from env config, without touching the network — so the row (and its
@@ -260,9 +446,120 @@ export async function reconcileCleanupRun(id: string): Promise<CleanupRun | null
   const run = await prisma.cleanupRun.findUnique({ where: { id } });
   if (!run) return null;
   if (TERMINAL_BULK_STATUSES.includes(run.status)) return run;
-  // PENDING means the submit never landed — resume-on-boot owns that, not the poll.
-  if (!run.bulkOperationId) return run;
+  // A run submitted as one op, before the split: reconciled exactly as before.
+  if (run.bulkOperationId) return reconcileSingleOpRun(run);
 
+  const ops = await prisma.cleanupOp.findMany({
+    where: { cleanupRunId: id },
+    orderBy: { opIndex: 'asc' },
+  });
+  // No ops means the run is still PENDING — the submit never happened, and
+  // resume-on-boot owns that, not the poll.
+  if (ops.length === 0) return run;
+
+  // An op with no op id is PENDING (a crash mid-submit) — resume's, not ours.
+  const open = ops.filter((op) => !TERMINAL_BULK_STATUSES.includes(op.status) && op.bulkOperationId);
+  let failure: unknown = null;
+  if (open.length > 0) {
+    const adapter = adapterFor(run.entity as CleanupEntity);
+    // Before any op's poll counter is touched — see reconcileSingleOpRun.
+    const client = await getShopifyClient(run.storeId ?? undefined);
+    const ids = (run.submittedIds ?? []) as string[];
+    // Each op is advanced on its own: one op's bad poll must not stop the others.
+    const results = await Promise.allSettled(
+      open.map((op) => advanceCleanupOp(client, op, ids, adapter.deleteSpec)),
+    );
+    const rejected = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+    failure = rejected ? rejected.reason : null;
+    // Still being watched, so keep holding the store.
+    if (results.some((r) => r.status === 'fulfilled' && r.value === 'running')) {
+      await renewStoreLock(id);
+    }
+  }
+
+  // Also when nothing was open: a roll-up an earlier caller lost to a DB error is
+  // retried here.
+  await rollUpCleanupRun(id);
+  // A bad poll of one op is reported the way a single-op run's is, after the
+  // others have been advanced.
+  if (failure) throw failure;
+  return prisma.cleanupRun.findUnique({ where: { id } });
+}
+
+/**
+ * One poll step for one op: the per-op twin of reconcileSingleOpRun, same rules.
+ * The op's terminal write is guarded on its status, so two concurrent polls cannot
+ * both finish it. Returns whether Shopify still reports the op running.
+ */
+async function advanceCleanupOp(
+  client: Awaited<ReturnType<typeof getShopifyClient>>,
+  op: CleanupOp,
+  submittedIds: string[],
+  spec: BulkDeleteSpec,
+): Promise<'running' | 'done'> {
+  // Atomic increment, as for a single-op run: concurrent polls must both count.
+  const { pollAttempts: attempts } = await prisma.cleanupOp.update({
+    where: { id: op.id },
+    data: { pollAttempts: { increment: 1 } },
+    select: { pollAttempts: true },
+  });
+  const overCap = attempts > MAX_JOB_POLL_ATTEMPTS;
+
+  const finishOp = async (data: Prisma.CleanupOpUpdateManyMutationInput): Promise<'done'> => {
+    await prisma.cleanupOp.updateMany({
+      where: { id: op.id, status: { notIn: TERMINAL_BULK_STATUSES } },
+      data,
+    });
+    return 'done';
+  };
+
+  let state: Awaited<ReturnType<typeof fetchBulkOperationState>>;
+  try {
+    state = await fetchBulkOperationState(client, op.bulkOperationId!);
+  } catch (err) {
+    // The cap only ends an op whose status cannot be READ — see reconcileSingleOpRun.
+    if (!overCap) throw err;
+    return finishOp({
+      status: 'FAILED',
+      error: `Could not read the bulk delete's status from Shopify after ${MAX_JOB_POLL_ATTEMPTS} checks (${(err as Error).message}). Check the store, and re-run cleanup if tagged records remain.`.slice(0, 500),
+    });
+  }
+
+  if (!TERMINAL_BULK_STATUSES.includes(state.status)) {
+    // Shopify says it is still deleting: past the cap or not, it stays RUNNING.
+    if (overCap) {
+      console.warn(
+        `[cleanup] op ${op.id}: still ${state.status} at Shopify after ${attempts} status checks; keeping the store locked`,
+      );
+    }
+    return 'running';
+  }
+
+  if (state.status !== 'COMPLETED') {
+    return finishOp({
+      status: state.status,
+      error: `Bulk delete ${state.status}${state.errorCode ? ` (${state.errorCode})` : ''}.`,
+    });
+  }
+
+  if (!state.url) return finishOp({ status: 'COMPLETED', deleted: 0, failedCount: 0 });
+
+  // The result file maps back BY LINE to exactly the ids this op was given, so its
+  // slice is recomputed from the persisted list — never the whole list.
+  const slice = splitIntoBatches(submittedIds, op.opCount)[op.opIndex] ?? [];
+  const { deleted, errors } = await parseBulkDeleteResults(state.url, slice, spec);
+  return finishOp({
+    status: 'COMPLETED',
+    deleted,
+    failedCount: errors.length,
+    errors: errors.length > 0 ? (errors as unknown as object[]) : undefined,
+  });
+}
+
+/** reconcileCleanupRun for a run submitted as ONE bulk op (bulkOperationId on the
+ *  run itself) — every run before the split into cleanup_ops. Unchanged. */
+async function reconcileSingleOpRun(run: CleanupRun): Promise<CleanupRun | null> {
+  const id = run.id;
   const adapter = adapterFor(run.entity as CleanupEntity);
 
   // Build the client BEFORE touching the poll counter. Eleven instances share one
@@ -295,7 +592,7 @@ export async function reconcileCleanupRun(id: string): Promise<CleanupRun | null
 
   let state: Awaited<ReturnType<typeof fetchBulkOperationState>>;
   try {
-    state = await fetchBulkOperationState(client, run.bulkOperationId);
+    state = await fetchBulkOperationState(client, run.bulkOperationId!);
   } catch (err) {
     // Under the cap, a failed status read is just a bad poll: the next one retries.
     if (!overCap) throw err;
@@ -363,9 +660,9 @@ export async function reconcileCleanupRun(id: string): Promise<CleanupRun | null
  * than at the TTL ceiling. reconcileCleanupRun is idempotent and guards on status,
  * so racing a live client poll on the same run is harmless.
  *
- * Only bulk-path rows are touched (bulkOperationId set). A PENDING row has no
- * operation id yet and belongs to resume-on-boot, not here — the reconcile guard
- * would bounce it anyway.
+ * Only bulk-path rows are touched: a run with ops, or a pre-split run with its
+ * bulkOperationId set. A PENDING row has neither yet and belongs to resume-on-boot,
+ * not here — the reconcile guard would bounce it anyway.
  *
  * Only rows for stores THIS instance holds credentials for — see sweepOwnsStore.
  * The import sweep always did this; this one did not, so one colleague's cleanup
@@ -377,7 +674,7 @@ export async function sweepRunningCleanups(): Promise<void> {
   const stuck = await prisma.cleanupRun.findMany({
     where: {
       status: { notIn: TERMINAL_BULK_STATUSES },
-      bulkOperationId: { not: null },
+      OR: [{ bulkOperationId: { not: null } }, { ops: { some: {} } }],
     },
     select: { id: true, storeId: true },
   });
@@ -407,7 +704,11 @@ export async function getCleanupRunsForImport(importRunId: string): Promise<Clea
 
 // ── crash recovery ───────────────────────────────────────────────────────────
 
-/** Re-submit a cleanup whose bulk delete never reached Shopify. */
+/**
+ * Re-submit a cleanup that never got as far as its ops — the process died before
+ * the transaction that writes them. Its ops are created and submitted exactly as
+ * the live path does (launchCleanupOps).
+ */
 async function relaunchCleanupRun(id: string): Promise<void> {
   const run = await prisma.cleanupRun.findUnique({ where: { id } });
   if (!run) return;
@@ -420,13 +721,11 @@ async function relaunchCleanupRun(id: string): Promise<void> {
   // every tagged record was still in the store. List them now, by the run's tag,
   // exactly as the live path does; this resume already holds the store's lock.
   let ids: string[];
+  let listed: Prisma.CleanupRunUpdateManyMutationInput = {};
   if (run.submittedIds === null) {
-    const listed = await adapter.fetchIdsByTag(run.storeId ?? undefined, run.tag);
-    ids = listed.ids;
-    await prisma.cleanupRun.updateMany({
-      where: { id, status: 'PENDING' },
-      data: { shopDomain: listed.shop, found: ids.length, submittedIds: ids },
-    });
+    const fetched = await adapter.fetchIdsByTag(run.storeId ?? undefined, run.tag);
+    ids = fetched.ids;
+    listed = { shopDomain: fetched.shop, found: ids.length };
   } else {
     ids = run.submittedIds as string[];
   }
@@ -434,7 +733,7 @@ async function relaunchCleanupRun(id: string): Promise<void> {
   if (ids.length === 0) {
     await prisma.cleanupRun.updateMany({
       where: { id, status: 'PENDING' },
-      data: { status: 'COMPLETED', deleted: 0, failedCount: 0 },
+      data: { ...listed, submittedIds: ids, status: 'COMPLETED', deleted: 0, failedCount: 0 },
     });
     // Done before it started — the store is free.
     await releaseStoreLock(id);
@@ -442,13 +741,34 @@ async function relaunchCleanupRun(id: string): Promise<void> {
   }
 
   const client = await getShopifyClient(run.storeId ?? undefined);
-  const bulkOpId = await submitBulkDelete(client, ids, adapter.deleteSpec, () =>
-    markSubmitAttempt(prisma.cleanupRun as never, id),
-  );
-  await prisma.cleanupRun.updateMany({
-    where: { id, status: 'PENDING' },
-    data: { status: 'RUNNING', bulkOperationId: bulkOpId },
+  await launchCleanupOps(id, client, ids, adapter, listed);
+}
+
+/** Re-submit one op that provably never reached Shopify, then roll its run up. */
+async function relaunchCleanupOp(opId: string): Promise<void> {
+  const op = await prisma.cleanupOp.findUnique({
+    where: { id: opId },
+    include: { cleanupRun: true },
   });
+  if (!op || op.status !== 'PENDING') return;
+  const run = op.cleanupRun;
+  const adapter = adapterFor(run.entity as CleanupEntity);
+  // The same slice the live launch gave this op, recomputed from the persisted ids.
+  const slice = splitIntoBatches((run.submittedIds ?? []) as string[], op.opCount)[op.opIndex] ?? [];
+  const client = await getShopifyClient(run.storeId ?? undefined);
+  await launchCleanupOp(op.id, client, slice, adapter.deleteSpec);
+  await rollUpCleanupRun(run.id);
+}
+
+/** Fail an op resume could not relaunch, then roll its run up — this may have been
+ *  the last op the run was waiting on. */
+async function failCleanupOp(opId: string, error: string): Promise<void> {
+  await failRow(prisma.cleanupOp as never, opId, error);
+  const op = await prisma.cleanupOp.findUnique({
+    where: { id: opId },
+    select: { cleanupRunId: true },
+  });
+  if (op) await rollUpCleanupRun(op.cleanupRunId);
 }
 
 /**
@@ -458,6 +778,13 @@ async function relaunchCleanupRun(id: string): Promise<void> {
  * but the shop cannot tell us which bulk op is ours, so resume cannot recover the
  * real deleted/failed counts either — a FAILED run that says "check and re-run" is
  * honest, where a guessed op could report another operation's counts.
+ *
+ * Two tables, two stores. A PENDING run died before its ops were written (it is
+ * relaunched whole). A PENDING op died between the ops being written and its own
+ * submit being recorded; it has no store or lock of its own, so it reads its run's
+ * store and re-takes its run's lock (re-entrant for the same owner). An op failed
+ * as outcome-unknown leaves submitAttemptedAt set, so the roll-up keeps the store
+ * busy until the TTL, exactly like the live ambiguous submit.
  */
 export function cleanupResumableStores(): ResumableStore[] {
   return [
@@ -473,5 +800,81 @@ export function cleanupResumableStores(): ResumableStore[] {
         operation: 'a cleanup',
       }),
     },
+    {
+      label: 'cleanup-op',
+      findResumable: async (staleBefore) => {
+        const ops = await prisma.cleanupOp.findMany({
+          where: {
+            status: 'PENDING',
+            OR: [{ claimedAt: null }, { claimedAt: { lt: staleBefore } }],
+          },
+          select: {
+            id: true,
+            createdAt: true,
+            submitAttemptedAt: true,
+            cleanupRunId: true,
+            cleanupRun: { select: { storeId: true } },
+          },
+        });
+        return ops.map((op) => ({
+          id: op.id,
+          storeId: op.cleanupRun.storeId,
+          createdAt: op.createdAt,
+          submitAttemptedAt: op.submitAttemptedAt,
+          cleanupRunId: op.cleanupRunId,
+        }));
+      },
+      claim: (id, staleBefore) => claimRow(prisma.cleanupOp as never, id, staleBefore),
+      relaunch: relaunchCleanupOp,
+      fail: failCleanupOp,
+      lockOwner: (row) => ({
+        ownerType: 'CLEANUP_RUN',
+        ownerId: row.cleanupRunId!,
+        operation: 'a cleanup',
+      }),
+    },
   ];
+}
+
+/**
+ * What the cleanup endpoints send back. Every field client/src/api/cleanupPoller.ts
+ * reads, and nothing it does not: submittedIds can be 80k ids, and the client
+ * re-fetches the run every 2s while it runs. Op ids, poll counters and claim
+ * timestamps are the server's business.
+ */
+export type CleanupRunView = Pick<
+  CleanupRun,
+  | 'id'
+  | 'entity'
+  | 'storeId'
+  | 'shopDomain'
+  | 'tag'
+  | 'importRunId'
+  | 'status'
+  | 'found'
+  | 'deleted'
+  | 'failedCount'
+  | 'error'
+  | 'errors'
+  | 'createdAt'
+  | 'updatedAt'
+>;
+
+export function toCleanupRunView(run: CleanupRun): CleanupRunView {
+  return {
+    id: run.id,
+    entity: run.entity,
+    storeId: run.storeId,
+    shopDomain: run.shopDomain,
+    tag: run.tag,
+    importRunId: run.importRunId,
+    status: run.status,
+    found: run.found,
+    deleted: run.deleted,
+    failedCount: run.failedCount,
+    error: run.error,
+    errors: run.errors,
+    createdAt: run.createdAt,
+    updatedAt: run.updatedAt,
+  };
 }

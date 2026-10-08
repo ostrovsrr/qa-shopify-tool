@@ -503,7 +503,8 @@ model CleanupOp {
   cleanupRunId      String
   cleanupRun        CleanupRun @relation(fields: [cleanupRunId], references: [id], onDelete: Cascade)
   opIndex           Int
-  // How many records this op was given to delete.
+  // How many ops the run's ids were split into (k). With opIndex it recomputes this
+  // op's slice: splitIntoBatches(submittedIds, opCount)[opIndex].
   opCount           Int
   bulkOperationId   String?
   status            String     @default("PENDING")

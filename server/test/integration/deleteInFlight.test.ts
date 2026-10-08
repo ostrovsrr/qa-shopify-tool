@@ -146,6 +146,26 @@ runIf('deleting a run with work still in flight', () => {
     expect(res.body.error).toBe(DELETE_WHILE_CLEANING);
   });
 
+  // A cleanup split into several bulk deletes stays RUNNING on its run until the last
+  // op is terminal, so one finished op must not open the door.
+  it('refuses while a cleanup still has a delete op running', async () => {
+    const id = await seedValidation();
+    const importId = await seedCustomerImport(id, 'COMPLETED');
+    const cleanup = await seedCleanup(importId, 'RUNNING');
+    await prisma.cleanupOp.createMany({
+      data: [
+        { cleanupRunId: cleanup.id, opIndex: 0, opCount: 2, status: 'COMPLETED', bulkOperationId: 'gid://shopify/BulkOperation/1' },
+        { cleanupRunId: cleanup.id, opIndex: 1, opCount: 2, status: 'RUNNING', bulkOperationId: 'gid://shopify/BulkOperation/2' },
+      ],
+    });
+
+    const res = await deleteValidation(id);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe(DELETE_WHILE_CLEANING);
+    expect(await validationExists(id)).toBe(true);
+  });
+
   it('deletes once everything has finished', async () => {
     const id = await seedValidation();
     const importId = await seedCustomerImport(id, 'FAILED', ['COMPLETED', 'FAILED']);

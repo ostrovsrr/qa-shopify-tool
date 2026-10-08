@@ -11,6 +11,7 @@ import {
   startCustomerImport,
 } from '../services/shopifyImport.service';
 import { recordAction } from '../services/actionLog.service';
+import { toCleanupRunView } from '../services/cleanupRun.service';
 import {
   ShopifyAuthError,
   ShopifyConfigError,
@@ -234,7 +235,7 @@ export async function cleanupImportRunHandler(
         detail: { tag: run.tag, cleanupRunId: run.id, found: run.found },
       });
     }
-    res.status(202).json(runs);
+    res.status(202).json(runs.map(toCleanupRunView));
   } catch (err) {
     if (handleShopifyError(err, res)) return;
     next(err);
