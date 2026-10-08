@@ -1,5 +1,5 @@
 import prisma from '../db/prisma';
-import { getShopifyStoresConfig, resolveStoreId } from '../config/shopify';
+import { sweepOwnsStore } from '../config/shopify';
 import { TERMINAL_BULK_STATUSES } from './shopifyBulk';
 import { reconcileImportRun } from './shopifyImport.service';
 import { reconcileProductImportRun } from './productImport.service';
@@ -27,34 +27,14 @@ import { reconcileProductImportRun } from './productImport.service';
 // equivalent. This is that, for the customer and product flows, which are twins.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Only touch rows for stores THIS instance holds credentials for.
- *
- * One instance per Solution Engineer against a SHARED database, so this sweep sees
- * every colleague's runs too. Reconciling one we have no token for cannot corrupt
- * anything — reconcile throws and the catch below logs it — but it would mean seven
- * instances logging a failure a minute for every run the eighth owns, which buries
- * the failures that matter.
- *
- * Judged only when there IS a config to judge against: with no usable store list,
- * resolveStoreId returns null for everything alike, and skipping on that basis would
- * turn a misconfiguration into a silent no-op. Then it is better to attempt and fail
- * loudly. Same reasoning as importResume.service.ts.
- */
-function ownsStore(storeId: string | null, canJudge: boolean): boolean {
-  if (!canJudge) return true;
-  if (!storeId) return true; // legacy single-store row — let the normal path speak
-  return Boolean(resolveStoreId(storeId));
-}
-
+/** Only rows for stores THIS instance holds credentials for — see sweepOwnsStore. */
 async function sweep<T extends { id: string; storeId: string | null }>(
   label: string,
   rows: T[],
-  canJudge: boolean,
   reconcile: (id: string) => Promise<unknown>,
 ): Promise<void> {
   for (const row of rows) {
-    if (!ownsStore(row.storeId, canJudge)) continue;
+    if (!sweepOwnsStore(row.storeId)) continue;
     // One unreachable store must not stop the rest from being reconciled.
     try {
       await reconcile(row.id);
@@ -72,9 +52,6 @@ async function sweep<T extends { id: string; storeId: string | null }>(
  * best and a duplicate submit at worst.
  */
 export async function sweepRunningImports(): Promise<void> {
-  const storesConfig = getShopifyStoresConfig();
-  const canJudge = storesConfig.ok && storesConfig.stores.length > 0;
-
   const customerRuns = await prisma.importRun.findMany({
     where: {
       status: { notIn: TERMINAL_BULK_STATUSES },
@@ -91,6 +68,6 @@ export async function sweepRunningImports(): Promise<void> {
     select: { id: true, storeId: true },
   });
 
-  await sweep('customer', customerRuns, canJudge, reconcileImportRun);
-  await sweep('product', productRuns, canJudge, reconcileProductImportRun);
+  await sweep('customer', customerRuns, reconcileImportRun);
+  await sweep('product', productRuns, reconcileProductImportRun);
 }

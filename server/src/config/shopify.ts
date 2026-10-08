@@ -233,6 +233,28 @@ export function resolveStoreId(storeId?: string): string | null {
   return result.ok ? result.config.id : null;
 }
 
+/**
+ * Should THIS instance's background sweeps touch a row for this store?
+ *
+ * One instance per Solution Engineer against a SHARED database, so every sweep sees
+ * every colleague's rows too. Reconciling one we have no token for cannot corrupt
+ * anything — reconcile throws and the sweep logs it — but it means eight instances
+ * logging a failure a minute for every run the ninth owns, which buries the
+ * failures that matter. (Observed: one colleague's cleanup filled every other
+ * instance's log, and so the status page, with "store is not configured".)
+ *
+ * Judged only when there IS a config to judge against: with no usable store list,
+ * resolveStoreId returns null for everything alike, and skipping on that basis would
+ * turn a misconfiguration into a silent no-op. Then it is better to attempt and fail
+ * loudly. Same reasoning as importResume.service.ts.
+ */
+export function sweepOwnsStore(storeId: string | null): boolean {
+  const config = getShopifyStoresConfig();
+  if (!config.ok || config.stores.length === 0) return true;
+  if (!storeId) return true; // legacy single-store row — let the normal path speak
+  return Boolean(resolveStoreId(storeId));
+}
+
 export function resetShopifyConfigCache(): void {
   cached = null;
 }

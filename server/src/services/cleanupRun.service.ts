@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { CleanupRun } from '@prisma/client';
 import prisma from '../db/prisma';
-import { getShopifyConfig } from '../config/shopify';
+import { getShopifyConfig, sweepOwnsStore } from '../config/shopify';
 import { getShopifyClient } from './shopifyClient';
 import {
   acquireStoreLock,
@@ -322,6 +322,10 @@ export async function reconcileCleanupRun(id: string): Promise<CleanupRun | null
  * operation id yet and belongs to resume-on-boot, not here — the reconcile guard
  * would bounce it anyway.
  *
+ * Only rows for stores THIS instance holds credentials for — see sweepOwnsStore.
+ * The import sweep always did this; this one did not, so one colleague's cleanup
+ * filled every other instance's log with "store is not configured" once a minute.
+ *
  * Serves the customer and product flows alike — one engine, both flows.
  */
 export async function sweepRunningCleanups(): Promise<void> {
@@ -330,10 +334,11 @@ export async function sweepRunningCleanups(): Promise<void> {
       status: { notIn: TERMINAL_BULK_STATUSES },
       bulkOperationId: { not: null },
     },
-    select: { id: true },
+    select: { id: true, storeId: true },
   });
 
-  for (const { id } of stuck) {
+  for (const { id, storeId } of stuck) {
+    if (!sweepOwnsStore(storeId)) continue;
     // One unreachable store must not stop the rest from being reconciled.
     try {
       await reconcileCleanupRun(id);
