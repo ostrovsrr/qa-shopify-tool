@@ -1,10 +1,12 @@
 import fs from 'fs';
 import { Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 import { parse } from 'csv-parse';
 import { CsvParseError } from '../errors';
 import { ParsedProductCsv, ProductCsvRow, ProductGroup } from '../types';
 import { isRowFullyEmpty, normalizeRecord } from '../utils/normalize';
 import { normalizeCsvHeaders } from './csvHeaders';
+import { isFileReadError } from './csvParser.service';
 
 // The Shopify product CSV groups rows by Handle: the first row of a Handle carries
 // the product-level fields, and rows sharing the Handle add variants/images. We
@@ -106,21 +108,26 @@ function toParsed(records: Record<string, string>[], headers: string[]): ParsedP
 async function parseProductCsvStream(input: Readable): Promise<ParsedProductCsv> {
   const records: Record<string, string>[] = [];
   let headers: string[] = [];
-  const parser = input.pipe(
-    parse({
-      ...PARSE_OPTIONS,
-      columns: (rawHeaders: string[]) => {
-        headers = normalizeCsvHeaders(rawHeaders);
-        return headers;
-      },
-    }),
-  );
+  const parser = parse({
+    ...PARSE_OPTIONS,
+    columns: (rawHeaders: string[]) => {
+      headers = normalizeCsvHeaders(rawHeaders);
+      return headers;
+    },
+  });
 
+  // pipeline, not input.pipe(parser) — see the customer twin in
+  // csvParser.service.ts: pipe() let a source read error crash the process and
+  // leaked the file descriptor when the parser failed mid-file.
   try {
-    for await (const record of parser) {
-      records.push(record as Record<string, string>);
-    }
+    await pipeline(input, parser, async (source: AsyncIterable<unknown>) => {
+      for await (const record of source) {
+        records.push(record as Record<string, string>);
+      }
+    });
   } catch (err) {
+    // Could not READ the file: our problem, not a malformed CSV — generic 500.
+    if (isFileReadError(err)) throw err;
     // See csvParser.service.ts — a malformed CSV is the user's to fix, so tell them
     // what is wrong with it rather than hiding it behind a generic 500.
     if (err instanceof CsvParseError) throw err;

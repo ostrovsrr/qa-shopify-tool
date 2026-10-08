@@ -1,5 +1,6 @@
 import fs from 'fs';
 import { Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 import { parse } from 'csv-parse';
 import { CsvParseError } from '../errors';
 import { CustomerCsvRow } from '../types';
@@ -48,24 +49,39 @@ function toRows(records: Record<string, string>[], headers: string[]): ParsedCsv
   return { rows, headers };
 }
 
+/** A filesystem failure reading the upload (ENOENT, EPERM, EBUSY…), as opposed to
+ *  csv-parse rejecting its contents. Node's fs errors always carry `syscall`. */
+export function isFileReadError(err: unknown): boolean {
+  return err instanceof Error && typeof (err as NodeJS.ErrnoException).syscall === 'string';
+}
+
 async function parseCsvStream(input: Readable): Promise<ParsedCsv> {
   const records: Record<string, string>[] = [];
   let headers: string[] = [];
-  const parser = input.pipe(
-    parse({
-      ...PARSE_OPTIONS,
-      columns: (rawHeaders: string[]) => {
-        headers = normalizeCsvHeaders(rawHeaders);
-        return headers;
-      },
-    }),
-  );
+  const parser = parse({
+    ...PARSE_OPTIONS,
+    columns: (rawHeaders: string[]) => {
+      headers = normalizeCsvHeaders(rawHeaders);
+      return headers;
+    },
+  });
 
+  // pipeline, not input.pipe(parser). pipe() neither forwards the SOURCE's errors
+  // nor listens for them, so an ENOENT/EPERM/EBUSY on the temp file was an
+  // unhandled 'error' event that took the whole process down; and when the parser
+  // failed mid-file the ReadStream was never destroyed, leaking the fd — which on
+  // Windows keeps the unlinked merchant CSV delete-pending until restart. pipeline
+  // rejects on an error from either side and destroys every stream either way.
   try {
-    for await (const record of parser) {
-      records.push(record as Record<string, string>);
-    }
+    await pipeline(input, parser, async (source: AsyncIterable<unknown>) => {
+      for await (const record of source) {
+        records.push(record as Record<string, string>);
+      }
+    });
   } catch (err) {
+    // Could not READ the file (it vanished, is locked…): our problem, not the
+    // user's, so not a CsvParseError — it goes to the generic 500 with a reference.
+    if (isFileReadError(err)) throw err;
     // A malformed CSV is the USER's problem and they can fix it — but only if we
     // tell them what it is. csv-parse says things like "Quote Not Closed: ... at
     // line 2", which is about their file and nothing about our server, so it is
