@@ -335,7 +335,7 @@ export const MAX_BULK_OPS_PER_SHOP = 5;
 
 /**
  * How many bulk operations one store's import / cleanup is split across.
- * `BULK_OPS_PER_STORE=1` is the kill switch: today's one-op-per-store behaviour.
+ * `BULK_OPS_PER_STORE=1` is the kill switch: one bulk op per store (still the batch path).
  * Unset or non-numeric means the Shopify cap; anything else is clamped to 1..cap.
  */
 export function getBulkOpsPerStore(): number {

@@ -45,6 +45,11 @@ Migrations run at **start**, not at build (the database is not reachable from th
 build). The image runs `prisma migrate deploy`, which applies pending migrations and
 **cannot** reset or drop anything.
 
+When several instances share one database, restart them all together on the new
+image, never one by one: an instance still on older code reads a store-lock owner
+type it does not know (such as `IMPORT_STORE_SHARE`) as a finished owner and would
+take that store from a live run.
+
 > **Never run `prisma migrate dev` against a real database here.** Its drift check can
 > offer a destructive reset, and this database has *intentional* drift
 > (`validation_runs.crossReferenceData` exists in the DB but not in `schema.prisma`).
