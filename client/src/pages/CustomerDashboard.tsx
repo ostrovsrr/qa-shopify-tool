@@ -59,7 +59,14 @@ export function CustomerDashboard() {
         setUploadPhase('results');
         setActiveTab('upload');
       })
-      .catch(() => active && setError('Failed to load validation run.'))
+      .catch(() => {
+        if (!active) return;
+        // Drop the run that was on screen: leaving run A rendered under run B's
+        // URL (with a live import panel aimed at A) is worse than showing nothing.
+        setResult(null);
+        setUploadPhase((phase) => (phase === 'results' ? 'upload' : phase));
+        setError('Failed to load validation run.');
+      })
       .finally(() => active && setLoading(false));
     return () => {
       active = false;
