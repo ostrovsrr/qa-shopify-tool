@@ -24,6 +24,11 @@ param(
   [string]$Branch     = 'main',
   [string]$ConfigFile = 'C:\ProgramData\qa-shopify-tool\deploy.env',
   [string]$TaskPath   = '\QA Shopify Tool\',
+
+  # Deploy this commit instead of the tip of origin/$Branch. This is the rollback
+  # lever: when a deploy fails, the error names the commit that was running before.
+  [string]$Commit     = '',
+
   [switch]$SkipRestart
 )
 
@@ -55,20 +60,36 @@ function Get-InstancePorts {
     Where-Object { $_.LocalPort -ge 3100 -and $_.LocalPort -le 3199 })
 }
 
-# ── Source ──────────────────────────────────────────────────────────────────
+# -- Source ------------------------------------------------------------------
 Write-Step 'Source'
+$target         = if ($Commit) { $Commit } else { "origin/$Branch" }
+$previousCommit = $null
 if (Test-Path -LiteralPath (Join-Path $AppRoot '.git')) {
-  Write-Host "Updating $AppRoot"
+  # What was running before this deploy -- named in the error if the deploy fails,
+  # so rolling back is one command (-Commit) rather than an archaeology session.
+  Push-Location $AppRoot
+  try { $previousCommit = (& git rev-parse HEAD | Select-Object -First 1) } finally { Pop-Location }
+  Write-Host "Updating $AppRoot (currently at $previousCommit)"
   Invoke-Native git @('fetch', '--prune', 'origin') $AppRoot
   Invoke-Native git @('checkout', $Branch) $AppRoot
-  Invoke-Native git @('reset', '--hard', "origin/$Branch") $AppRoot
+  Invoke-Native git @('reset', '--hard', $target) $AppRoot
 } else {
   Write-Host "Cloning into $AppRoot"
   $parent = Split-Path -Parent $AppRoot
   New-Item -ItemType Directory -Force -Path $parent | Out-Null
   Invoke-Native git @('clone', '--branch', $Branch, $RepoUrl, $AppRoot) $parent
+  if ($Commit) { Invoke-Native git @('reset', '--hard', $Commit) $AppRoot }
 }
 Invoke-Native git @('log', '-1', '--oneline') $AppRoot
+
+# Read the config BEFORE taking anything down: a broken deploy.env should fail the
+# deploy while the instances are still serving, not after.
+$cfg = & (Join-Path $PSScriptRoot 'Get-DeployConfig.ps1') -Path $ConfigFile
+if (-not $cfg.BindAddrSet) {
+  # The launchers default to 127.0.0.1 when BIND_ADDR is missing (fail closed).
+  # On a box teammates reach over the network that means: up, healthy, unreachable.
+  Write-Warning "BIND_ADDR is not set in $ConfigFile -- the instances will bind to 127.0.0.1 and be reachable from THIS machine only. Set it explicitly if teammates connect over the network."
+}
 
 $serverDir = Join-Path $AppRoot 'server'
 $clientDir = Join-Path $AppRoot 'client'
@@ -80,7 +101,7 @@ if (Test-Path -LiteralPath (Join-Path $serverDir '.env')) {
   Write-Warning "server\.env exists in the checkout. Instances set their own process environment and dotenv does not override it, but this file should not be here. Remove it."
 }
 
-# ── Take the instances out of the way ───────────────────────────────────────
+# -- Take the instances out of the way ---------------------------------------
 #
 # DISABLE, not merely stop. Each task carries a 5-minute repeating trigger (the
 # recovery safety net in Register-Instances.ps1), and a tick landing mid-build
@@ -140,12 +161,27 @@ if ($tasks.Count -gt 0) {
   }
 }
 
-# Everything below is wrapped: a failed build must not leave the instances
+# Everything below is wrapped: a failed CLIENT build must not leave the instances
 # disabled, or a deploy that dies halfway takes the tool down until somebody
-# notices and re-enables seven tasks by hand.
+# notices and re-enables eleven tasks by hand.
+#
+# With ONE exception, enforced in the finally block: once the server tree has been
+# touched (npm ci / prisma generate / tsc), the instances are NOT started again
+# unless `prisma migrate deploy` then succeeded. Starting them would run new (or
+# half-built) code against the old -- or a partially migrated -- schema: queries
+# against columns that do not exist yet, silently wrong results, or writes the old
+# schema cannot hold. That is worse than being down, and it looks like it works.
+#
+# Why not roll back automatically: a failed migration is recorded as failed in
+# _prisma_migrations, and `migrate deploy` refuses to run at all (P3009) until a
+# human resolves it -- so redeploying the previous commit would stop at the same
+# step. And a partially applied migration leaves the schema in a state only a human
+# can judge. So: stay down, say so loudly, and name the exact way back.
+$serverTouched = $false
+$migrated      = $false
 try {
 
-  # ── Client ────────────────────────────────────────────────────────────────
+  # -- Client ----------------------------------------------------------------
   #
   # Built BEFORE the instances start: server/src/index.ts mounts express.static
   # only when client/dist exists AT BOOT. A missing bundle is not an error -- the
@@ -157,8 +193,11 @@ try {
     throw 'Client build produced no dist/index.html'
   }
 
-  # ── Server ────────────────────────────────────────────────────────────────
+  # -- Server ----------------------------------------------------------------
   Write-Step 'Server build'
+  # From here on the server tree no longer holds the build that matched the
+  # database. See the finally block.
+  $serverTouched = $true
   Invoke-Native $npm @('ci') $serverDir
   # Generated code -- must exist before tsc runs.
   Invoke-Native $npx @('prisma', 'generate') $serverDir
@@ -167,25 +206,45 @@ try {
     throw 'Server build produced no dist/index.js'
   }
 
-  # ── Migrations: ONCE ──────────────────────────────────────────────────────
+  # -- Migrations: ONCE ------------------------------------------------------
   #
   # `migrate deploy` applies pending migrations and CANNOT reset or drop anything.
   # NEVER `migrate dev` here: its drift check can offer a destructive reset, and
   # this database has intentional drift (validation_runs.crossReferenceData exists
   # in the DB but not in schema.prisma).
   Write-Step 'Migrations'
-  $cfg = & (Join-Path $PSScriptRoot 'Get-DeployConfig.ps1') -Path $ConfigFile
   $env:DATABASE_URL = $cfg.DatabaseUrl
   try {
     Invoke-Native $npx @('prisma', 'migrate', 'deploy') $serverDir
+    $migrated = $true
   } finally {
     $env:DATABASE_URL = $null
   }
 
 } finally {
 
-  # ── Bring them back ───────────────────────────────────────────────────────
-  if ($tasks.Count -eq 0) {
+  # -- Bring them back -------------------------------------------------------
+  if ($serverTouched -and -not $migrated) {
+    # Do NOT start them: code and schema may not match. See the comment above try.
+    $rollback = if ($previousCommit) {
+      "  Roll back the code:  powershell -NoProfile -ExecutionPolicy Bypass -File .\Deploy-QaTool.ps1 -Commit $previousCommit"
+    } else {
+      '  (No previous commit recorded -- this was a fresh clone.)'
+    }
+    Write-Host ''
+    Write-Host '=====================================================================' -ForegroundColor Red
+    Write-Host ' DEPLOY FAILED after the server build started. Instances are STOPPED' -ForegroundColor Red
+    Write-Host ' and their tasks DISABLED on purpose: starting them could run new code' -ForegroundColor Red
+    Write-Host ' against an old or partially migrated database schema.' -ForegroundColor Red
+    Write-Host '=====================================================================' -ForegroundColor Red
+    Write-Host "  Running before this deploy: $previousCommit"
+    Write-Host "  Attempted:                  $target"
+    Write-Host '  Inspect the database:  cd server; npx.cmd prisma migrate status   (DATABASE_URL from deploy.env)'
+    Write-Host '  If a migration is marked failed, fix it by hand and use `prisma migrate resolve` before any redeploy.'
+    Write-Host '  Then EITHER fix forward and re-run Deploy-QaTool.ps1,'
+    Write-Host $rollback
+    Write-Host '  Deploy-QaTool.ps1 re-enables and starts the instances once a build AND migration succeed.'
+  } elseif ($tasks.Count -eq 0) {
     Write-Warning 'No instance tasks registered. Run Register-Instances.ps1.'
   } elseif ($SkipRestart) {
     Write-Warning '-SkipRestart: instances are stopped and STILL DISABLED. Re-enable them with Register-Instances.ps1, or Enable-ScheduledTask.'

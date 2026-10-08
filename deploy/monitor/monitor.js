@@ -26,10 +26,13 @@
 
 const http = require('http');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const PORT = Number(process.env.MONITOR_PORT ?? 3100);
-const BIND_ADDR = process.env.BIND_ADDR ?? '0.0.0.0';
+// Loopback unless told otherwise: fail closed, like the instances and the compose
+// stack. Start-Monitor.ps1 passes the BIND_ADDR from deploy.env.
+const BIND_ADDR = process.env.BIND_ADDR || '127.0.0.1';
 const FIRST_PORT = Number(process.env.MONITOR_FIRST_PORT ?? 3101);
 const LAST_PORT = Number(process.env.MONITOR_LAST_PORT ?? 3111);
 const LOG_DIR = process.env.MONITOR_LOG_DIR ?? 'C:\\ProgramData\\qa-shopify-tool\\logs';
@@ -164,69 +167,119 @@ async function pollActivity() {
 
 // ── History ─────────────────────────────────────────────────────────────────
 //
-// One line per poll: the timestamp and a bitmask of which ports answered. Compact
-// enough to keep a week of 30-second samples in a flat file, and trivially
+// One line per poll: the timestamp and a bitmask of which ports answered, plus the
+// port that bit 0 stands for (`b`) and how many ports the mask covers (`n`).
+// Compact enough to keep a week of 30-second samples in a flat file, and trivially
 // greppable if this page is ever the thing that is broken.
+//
+// The mask is anchored to a PORT NUMBER, not to "whatever FIRST_PORT is today".
+// Records written before `b` existed carry only {t, m} with bit 0 = 3101 (FIRST_PORT
+// has always been SE1's port); they are read with LEGACY_BASE_PORT. Without the
+// anchor, a change to the first watched port slid a week of history onto the wrong
+// SEs.
+//
+// The history is held in memory: loaded once at start, appended per poll, pruned in
+// place. The file is the durable copy, not something every page view re-reads and
+// re-parses (~20k lines at full retention, filtered once per instance per view).
 
-function appendHistory(now) {
-  let mask = 0;
-  ports.forEach((p, i) => {
-    if (state.get(p).up) mask |= 1 << i;
-  });
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.appendFileSync(HISTORY_FILE, JSON.stringify({ t: now, m: mask }) + '\n');
-  } catch {
-    /* a failed write must not stop the polling */
+const LEGACY_BASE_PORT = 3101;
+const MAX_MASK_BITS = 30; // stay clear of the sign bit in JS bitwise ops
+
+/** Normalise a parsed line to {t, b, n, m}, or null if it is not a sample. */
+function normaliseRecord(rec) {
+  if (!rec || typeof rec.t !== 'number' || typeof rec.m !== 'number') return null;
+  if (typeof rec.b === 'number') {
+    return { t: rec.t, b: rec.b, n: typeof rec.n === 'number' ? rec.n : MAX_MASK_BITS, m: rec.m };
   }
+  return { t: rec.t, b: LEGACY_BASE_PORT, n: MAX_MASK_BITS, m: rec.m };
 }
 
-function readHistory() {
+/** true / false for a port in this sample, or null when the sample did not watch it. */
+function upAt(rec, port) {
+  const bit = port - rec.b;
+  if (bit < 0 || bit >= rec.n || bit >= MAX_MASK_BITS) return null;
+  return Boolean(rec.m & (1 << bit));
+}
+
+function loadHistoryFile() {
   try {
     const raw = fs.readFileSync(HISTORY_FILE, 'utf8');
     const cutoff = Date.now() - RETAIN_MS;
     const out = [];
     for (const line of raw.split('\n')) {
-      if (!line) continue;
+      if (!line.trim()) continue;
       try {
-        const rec = JSON.parse(line);
-        if (rec.t >= cutoff) out.push(rec);
+        const rec = normaliseRecord(JSON.parse(line));
+        if (rec && rec.t >= cutoff) out.push(rec);
       } catch {
         /* skip a torn line rather than lose the file */
       }
     }
+    out.sort((a, b) => a.t - b.t);
     return out;
   } catch {
     return [];
   }
 }
 
-/** Rewrite the file without anything older than the retention window. Cheap at this
- *  size, and it keeps the file from growing without bound the way
- *  product_original_rows does. */
-function pruneHistory() {
-  const kept = readHistory();
+/** In-memory history, oldest first. */
+let history = loadHistoryFile();
+
+function appendHistory(now) {
+  const base = ports[0];
+  const n = Math.min(ports.length, MAX_MASK_BITS);
+  let mask = 0;
+  ports.forEach((p, i) => {
+    if (i < n && state.get(p).up) mask |= 1 << i;
+  });
+  const rec = { t: now, b: base, n, m: mask };
+  history.push(rec);
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(HISTORY_FILE, kept.map((r) => JSON.stringify(r)).join('\n') + (kept.length ? '\n' : ''));
+    fs.appendFileSync(HISTORY_FILE, JSON.stringify(rec) + '\n');
+  } catch {
+    /* a failed write must not stop the polling */
+  }
+}
+
+/** Drop anything older than the retention window, in memory and on disk. Rewriting
+ *  the file keeps it from growing without bound the way product_original_rows does.
+ *  Old-format lines are rewritten in the new format, with their base made explicit. */
+function pruneHistory() {
+  const cutoff = Date.now() - RETAIN_MS;
+  let drop = 0;
+  while (drop < history.length && history[drop].t < cutoff) drop++;
+  if (drop > 0) history = history.slice(drop);
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const tmp = `${HISTORY_FILE}.tmp`;
+    fs.writeFileSync(tmp, history.map((r) => JSON.stringify(r)).join('\n') + (history.length ? '\n' : ''));
+    fs.renameSync(tmp, HISTORY_FILE);
   } catch {
     /* not worth failing over */
   }
 }
 
-/** Availability and restart count per port over a window. A "restart" here is an
- *  observed down→up transition — which is exactly the signal that was missing when
- *  SE4 was being quietly revived every five minutes. */
-function summarise(history, windowMs) {
+/** Samples newer than `windowMs` ago. History is time-ordered, so walk back from the end. */
+function samplesWithin(windowMs) {
   const cutoff = Date.now() - windowMs;
-  const rows = history.filter((r) => r.t >= cutoff);
-  return ports.map((port, i) => {
+  let i = history.length;
+  while (i > 0 && history[i - 1].t >= cutoff) i--;
+  return history.slice(i);
+}
+
+/** Availability and restart count per port over a set of samples. A "restart" here
+ *  is an observed down→up transition — which is exactly the signal that was missing
+ *  when SE4 was being quietly revived every five minutes. */
+function summarise(rows) {
+  return ports.map((port) => {
     let seen = 0;
     let upCount = 0;
     let recoveries = 0;
     let prevUp = null;
     for (const r of rows) {
-      const up = Boolean(r.m & (1 << i));
+      const up = upAt(r, port);
+      if (up === null) continue; // this sample did not watch this port
       seen++;
       if (up) upCount++;
       if (prevUp === false && up) recoveries++;
@@ -241,16 +294,16 @@ function summarise(history, windowMs) {
   });
 }
 
-/** A compact strip of the last N samples for the sparkline on the page. */
-function strip(history, portIndex, buckets = 96) {
+/** A compact strip of the last 24h for the sparkline on the page. */
+function strip(dayRows, port, buckets = 96) {
+  if (dayRows.length === 0) return [];
   const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-  const rows = history.filter((r) => r.t >= cutoff);
-  if (rows.length === 0) return [];
   const span = 24 * 60 * 60 * 1000 / buckets;
   const out = new Array(buckets).fill(null);
-  for (const r of rows) {
-    const idx = Math.min(buckets - 1, Math.floor((r.t - cutoff) / span));
-    const up = Boolean(r.m & (1 << portIndex));
+  for (const r of dayRows) {
+    const up = upAt(r, port);
+    if (up === null) continue;
+    const idx = Math.max(0, Math.min(buckets - 1, Math.floor((r.t - cutoff) / span)));
     // A bucket is only "up" if every sample in it was up: a bucket that hides one
     // failure is the same lie a spot check tells.
     out[idx] = out[idx] === null ? up : out[idx] && up;
@@ -261,9 +314,9 @@ function strip(history, portIndex, buckets = 96) {
 // ── HTTP ────────────────────────────────────────────────────────────────────
 
 function statusPayload() {
-  const history = readHistory();
-  const day = summarise(history, 24 * 60 * 60 * 1000);
-  const week = summarise(history, 7 * 24 * 60 * 60 * 1000);
+  const dayRows = samplesWithin(24 * 60 * 60 * 1000);
+  const day = summarise(dayRows);
+  const week = summarise(samplesWithin(RETAIN_MS));
   return {
     now: Date.now(),
     lastPollAt,
@@ -274,7 +327,7 @@ function statusPayload() {
       activity: activity.get(port),
       day: day[i],
       week: week[i],
-      strip: strip(history, i),
+      strip: strip(dayRows, port),
     })),
   };
 }
@@ -358,7 +411,7 @@ ${rows}
 </tbody></table></div>`;
 }
 
-function renderPage() {
+function renderPage(linkHost) {
   const data = statusPayload();
   const downCount = data.instances.filter((i) => i.up === false).length;
   const unknown = data.instances.filter((i) => i.up === null).length;
@@ -379,7 +432,7 @@ function renderPage() {
       return `<tr class="${cls}">
         <td class="se">${escapeHtml(i.se)}</td>
         <td class="owner">${escapeHtml(i.owner ?? '—')}</td>
-        <td><a href="http://${escapeHtml(HOSTNAME_FOR_LINKS)}:${i.port}/" target="_blank" rel="noopener">:${i.port}</a></td>
+        <td><a href="http://${escapeHtml(linkHost)}:${i.port}/" target="_blank" rel="noopener">:${i.port}</a></td>
         <td><span class="dot"></span>${label}</td>
         <td class="num">${i.up === null ? '—' : ago(i.since)}</td>
         <td class="num">${pct(i.day.availability)}</td>
@@ -469,14 +522,37 @@ in front of this has no authentication.<br>
 </div></body></html>`;
 }
 
-// Used only to build clickable links to the instances. Whatever host the page was
-// reached on is the host the reader can reach the instances on.
-let HOSTNAME_FOR_LINKS = '10.20.30.208';
+// ── Link host ───────────────────────────────────────────────────────────────
+//
+// Used only to build clickable links to the instances. Whatever host THIS reader
+// reached the page on is the host they can reach the instances on -- so it is
+// worked out per request. It used to be one module-level variable overwritten by
+// every request, so a viewer on localhost rewrote everyone else's links to
+// http://localhost:3101.
+
+/** Fallback when a request carries no usable Host: the bind address if it is a
+ *  specific one, else this machine's name. */
+const FALLBACK_LINK_HOST = (() => {
+  if (BIND_ADDR && BIND_ADDR !== '0.0.0.0' && BIND_ADDR !== '::') {
+    return BIND_ADDR.includes(':') ? `[${BIND_ADDR}]` : BIND_ADDR;
+  }
+  return os.hostname();
+})();
+
+/** The Host header's hostname part, validated, ready to put in a URL ("[::1]" for
+ *  IPv6). Anything that is not a plain hostname / IPv4 / bracketed IPv6 is ignored. */
+function linkHostFor(req) {
+  const raw = String(req.headers.host ?? '').trim();
+  // [IPv6]:port or [IPv6]
+  const v6 = /^\[([0-9A-Fa-f:.]+)\](?::\d{1,5})?$/.exec(raw);
+  if (v6) return `[${v6[1]}]`;
+  // hostname or IPv4, optional :port
+  const v4 = /^([A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?)(?::\d{1,5})?$/.exec(raw);
+  if (v4) return v4[1];
+  return FALLBACK_LINK_HOST;
+}
 
 const server = http.createServer((req, res) => {
-  const host = (req.headers.host ?? '').split(':')[0];
-  if (host) HOSTNAME_FOR_LINKS = host;
-
   const url = (req.url ?? '/').split('?')[0];
 
   if (url === '/api/status') {
@@ -491,7 +567,7 @@ const server = http.createServer((req, res) => {
   }
   if (url === '/' || url === '/index.html') {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-    res.end(renderPage());
+    res.end(renderPage(linkHostFor(req)));
     return;
   }
   res.writeHead(404, { 'content-type': 'application/json' });

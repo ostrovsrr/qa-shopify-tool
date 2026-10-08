@@ -37,72 +37,16 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
 
-# ── Parse the shared env file ───────────────────────────────────────────────
+# -- Read the shared env file -------------------------------------------------
 #
-# Values may be single- or double-quoted and MAY SPAN LINES: the store lists are
-# pretty-printed JSON in deploy/.env.example, and a naive line-at-a-time parser
-# silently truncates them to their first line, producing a store list that parses
-# as invalid JSON at boot. Hence the explicit open-quote scan.
-function Read-DotEnv {
-  param([string]$Path)
+# Get-DeployConfig.ps1 is the ONE parser of deploy.env, shared with Deploy and
+# Register. This script used to carry its own copy; the copies drifted, and a config
+# that Deploy and Register accepted (DATABASE_URL only, no POSTGRES_PASSWORD) made
+# every launcher throw at start. A config error still throws here, before the loop.
+$deployCfg = & (Join-Path $PSScriptRoot 'Get-DeployConfig.ps1') -Path $ConfigFile
+$cfg       = $deployCfg.Values
 
-  if (-not (Test-Path -LiteralPath $Path)) {
-    throw "Config file not found: $Path (copy deploy/.env there -- it is never in the git checkout)"
-  }
-
-  $map   = @{}
-  $lines = [System.IO.File]::ReadAllLines($Path)
-  $i     = 0
-
-  while ($i -lt $lines.Count) {
-    $line = $lines[$i]
-    $i++
-
-    if ($line -match '^\s*(#|$)') { continue }
-    if ($line -notmatch '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$') { continue }
-
-    $key  = $Matches[1]
-    $rest = $Matches[2]
-
-    $quote = $null
-    if ($rest.Length -gt 0 -and ($rest[0] -eq "'" -or $rest[0] -eq '"')) { $quote = $rest[0] }
-
-    if ($null -eq $quote) {
-      # Unquoted: strip a trailing inline comment, then trim.
-      $map[$key] = ($rest -replace '\s+#.*$', '').Trim()
-      continue
-    }
-
-    $body = $rest.Substring(1)
-    if ($body.EndsWith($quote)) {
-      $map[$key] = $body.Substring(0, $body.Length - 1)
-      continue
-    }
-
-    # Quote left open: keep consuming lines until it closes.
-    $sb = [System.Text.StringBuilder]::new()
-    [void]$sb.Append($body)
-    $closed = $false
-    while ($i -lt $lines.Count) {
-      $next = $lines[$i]
-      $i++
-      if ($next.EndsWith($quote)) {
-        [void]$sb.Append("`n").Append($next.Substring(0, $next.Length - 1))
-        $closed = $true
-        break
-      }
-      [void]$sb.Append("`n").Append($next)
-    }
-    if (-not $closed) { throw "Unterminated $quote quote for $key in $Path" }
-    $map[$key] = $sb.ToString()
-  }
-
-  return $map
-}
-
-$cfg = Read-DotEnv -Path $ConfigFile
-
-# ── Resolve this instance's stores ──────────────────────────────────────────
+# -- Resolve this instance's stores ------------------------------------------
 $storesKey = "SHOPIFY_STORES_$Instance"
 $stores    = $cfg[$storesKey]
 if ([string]::IsNullOrWhiteSpace($stores)) {
@@ -117,16 +61,11 @@ try { $null = $stores | ConvertFrom-Json } catch { throw "$storesKey is not vali
 $n    = [int]($Instance -replace '^SE', '')
 $port = 3100 + $n
 
-$pgPassword = $cfg['POSTGRES_PASSWORD']
-if ([string]::IsNullOrWhiteSpace($pgPassword)) { throw "POSTGRES_PASSWORD is missing in $ConfigFile" }
+# DATABASE_URL as given, or derived from POSTGRES_PASSWORD (URL-escaped) -- the
+# exact URL Deploy-QaTool.ps1 migrated with.
+$dbUrl = $deployCfg.DatabaseUrl
 
-$dbUrl = $cfg['DATABASE_URL']
-if ([string]::IsNullOrWhiteSpace($dbUrl)) {
-  $escaped = [uri]::EscapeDataString($pgPassword)
-  $dbUrl   = "postgresql://postgres:$escaped@127.0.0.1:5432/shopify_csv_qa"
-}
-
-# ── Environment ─────────────────────────────────────────────────────────────
+# -- Environment -------------------------------------------------------------
 #
 # Set in the PROCESS, not in a .env file. The app calls dotenv.config(), which
 # does not override variables that are already set, so these win even if a stray
@@ -135,7 +74,8 @@ $env:NODE_ENV                  = 'production'
 $env:PORT                      = "$port"
 $env:DATABASE_URL              = $dbUrl
 $env:SHOPIFY_TEST_STORES       = $stores
-$env:BIND_ADDR                 = if ($cfg['BIND_ADDR']) { $cfg['BIND_ADDR'] } else { '0.0.0.0' }
+# 127.0.0.1 unless deploy.env sets BIND_ADDR: no authentication, so fail closed.
+$env:BIND_ADDR                 = $deployCfg.BindAddr
 $env:SHOPIFY_API_VERSION       = $cfg['SHOPIFY_API_VERSION']
 $env:DATABASE_CONNECTION_LIMIT = if ($cfg['DATABASE_CONNECTION_LIMIT']) { $cfg['DATABASE_CONNECTION_LIMIT'] } else { '5' }
 $env:UPLOAD_DIR                = Join-Path $env:TEMP "qa-uploads-$($Instance.ToLower())"
@@ -160,15 +100,35 @@ $env:RETENTION_CONFIRMED = $null
 New-Item -ItemType Directory -Force -Path $env:UPLOAD_DIR | Out-Null
 New-Item -ItemType Directory -Force -Path $LogDir         | Out-Null
 
-# ── Log rotation ────────────────────────────────────────────────────────────
+# -- Log rotation ------------------------------------------------------------
+#
+# Checked at start, before every restart, and at most every $RollCheckSeconds while
+# node is writing (from Write-Log). Checking only at launcher start was not enough:
+# this launcher is long-lived by design, so a chatty or crash-looping instance grew
+# its log without bound -- exactly the case the 20 MB cap exists for.
 $logFile = Join-Path $LogDir "$($Instance.ToLower()).log"
-if ((Test-Path -LiteralPath $logFile) -and ((Get-Item -LiteralPath $logFile).Length -gt $MaxLogBytes)) {
-  $rolled = "$logFile.1"
-  if (Test-Path -LiteralPath $rolled) { Remove-Item -LiteralPath $rolled -Force }
-  Move-Item -LiteralPath $logFile -Destination $rolled -Force
+$RollCheckSeconds    = 30
+$script:nextRollCheck = [DateTime]::MinValue
+
+function Invoke-LogRoll {
+  $script:nextRollCheck = (Get-Date).AddSeconds($RollCheckSeconds)
+  # NEVER fatal. This runs inside the pipeline that carries node's output; an
+  # exception here (say, someone tailing the log holds it open and the move fails)
+  # would end that pipeline and take node down with it. A failed roll just waits
+  # for the next check.
+  try {
+    $item = Get-Item -LiteralPath $logFile -ErrorAction SilentlyContinue
+    if ($item -and $item.Length -gt $MaxLogBytes) {
+      $rolled = "$logFile.1"
+      if (Test-Path -LiteralPath $rolled) { Remove-Item -LiteralPath $rolled -Force -ErrorAction Stop }
+      Move-Item -LiteralPath $logFile -Destination $rolled -Force -ErrorAction Stop
+    }
+  } catch { }
 }
 
-# ── Run ─────────────────────────────────────────────────────────────────────
+Invoke-LogRoll
+
+# -- Run ---------------------------------------------------------------------
 #
 # Migrations are NOT run here. Seven processes racing `prisma migrate deploy`
 # against one database is the exact problem the compose stack's dedicated
@@ -185,7 +145,12 @@ if (-not (Test-Path -LiteralPath $nodeExe)) { throw "node.exe not found" }
 
 Set-Location $serverDir
 
-function Write-Log { param($m) "[$(Get-Date -Format o)] $m" | Out-File -FilePath $logFile -Append -Encoding utf8 }
+function Write-Log {
+  param($m)
+  $now = Get-Date
+  if ($now -ge $script:nextRollCheck) { Invoke-LogRoll }
+  "[$($now.ToString('o'))] $m" | Out-File -FilePath $logFile -Append -Encoding utf8
+}
 
 function Test-PortHeld {
   param([int]$Port)
@@ -200,7 +165,7 @@ if (Test-PortHeld -Port $port) {
   exit 0
 }
 
-# ── Supervisor loop ─────────────────────────────────────────────────────────
+# -- Supervisor loop ---------------------------------------------------------
 #
 # Task Scheduler's own RestartOnFailure is NOT relied on: this box registers tasks
 # with UseUnifiedSchedulingEngine, and that engine does not honour restart-on-failure
@@ -217,6 +182,7 @@ $backoff    = 2
 $maxBackoff = 60
 
 while ($true) {
+  Invoke-LogRoll
   Write-Log "starting $Instance on port $port (bind $($env:BIND_ADDR))"
   $started = Get-Date
 
