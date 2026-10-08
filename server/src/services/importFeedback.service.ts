@@ -150,7 +150,16 @@ export async function getImportFeedback(
 export function batchStoresOf(
   jobs: { storeId: string | null; shopDomain: string; batchIndex: number }[],
 ): BatchStore[] {
+  // One entry per STORE: a store's share can run as several jobs, and the UI wants
+  // the stores, not the ops. A job with no store is kept as its own entry.
+  const seen = new Set<string>();
   return [...jobs]
     .sort((a, b) => a.batchIndex - b.batchIndex)
+    .filter((job) => {
+      if (!job.storeId) return true;
+      if (seen.has(job.storeId)) return false;
+      seen.add(job.storeId);
+      return true;
+    })
     .map((job) => ({ storeId: job.storeId, shopDomain: job.shopDomain }));
 }
