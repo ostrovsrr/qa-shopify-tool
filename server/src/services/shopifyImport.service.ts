@@ -589,11 +589,16 @@ export async function startBatchImport(
   const clients = await Promise.all(
     storeIds.map((storeId) => getShopifyClient(storeId).catch(() => null)),
   );
-  const k = Math.min(
+  const minOps = Math.min(
     ...(await Promise.all(
       clients.map((client) => (client ? opsForStoreOnShop(client, perStore) : opsForStore(perStore))),
     )),
   );
+  // Cap k so every selected store gets work: with fewer rows than stores × k the
+  // flat split leaves the trailing slices empty, and those are whole stores idle
+  // (lock taken for nothing, absent from the parent shopDomain). With fewer rows
+  // than stores some store goes without whatever k is, so k stays 1 there.
+  const k = Math.max(1, Math.min(minOps, Math.floor(rows.length / storeIds.length)));
   const batchCount = storeIds.length * k;
   const batches = splitIntoBatches(rows, batchCount);
 
@@ -870,7 +875,10 @@ async function reconcileBatchRun(
 
   // Roll up: re-read jobs and recompute parent counts from the merged rowResults —
   // counted in the database, not by loading every row of a large import per poll.
-  const fresh = await prisma.importBatchJob.findMany({ where: { importRunId: parentId } });
+  const fresh = await prisma.importBatchJob.findMany({
+    where: { importRunId: parentId },
+    orderBy: { batchIndex: 'asc' },
+  });
   const allTerminal = fresh.every((j) => TERMINAL_BULK_STATUSES.includes(j.status));
   const [successCount, totalCount] = await Promise.all([
     prisma.importRowResult.count({ where: { importRunId: parentId, accepted: true } }),
@@ -880,12 +888,14 @@ async function reconcileBatchRun(
 
   if (allTerminal) {
     const failedJobs = fresh.filter((j) => j.status !== 'COMPLETED');
-    const error = failedJobs.length
-      ? failedJobs
-          .map((j) => `${j.shopDomain}: ${j.error ?? j.status}`)
-          .join(' | ')
-          .slice(0, 500)
-      : null;
+    // One entry per failed STORE (its first failed job): a store runs up to k jobs,
+    // and k copies of one store's error would crowd the other stores out of the
+    // 500 characters.
+    const failedStores = new Map<string, string>();
+    for (const j of failedJobs) {
+      if (!failedStores.has(j.shopDomain)) failedStores.set(j.shopDomain, `${j.shopDomain}: ${j.error ?? j.status}`);
+    }
+    const error = failedJobs.length ? [...failedStores.values()].join(' | ').slice(0, 500) : null;
     await prisma.importRun.updateMany({
       where: { id: parentId, status: 'RUNNING' },
       data: {

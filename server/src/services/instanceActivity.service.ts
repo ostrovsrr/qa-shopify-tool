@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import prisma from '../db/prisma';
 import { getSafeShopifyStores } from '../config/shopify';
-import { liveStoreLocks } from './storeLock.service';
+import { liveStoreLocks, shareOwner } from './storeLock.service';
 import { TERMINAL_BULK_STATUSES } from './shopifyBulk';
 import { normalizeActor } from './actionLog.service';
 
@@ -115,22 +115,49 @@ export async function getInstanceActivity(now = Date.now()): Promise<InstanceAct
   // cannot wedge a store), which means an import nobody is watching drops out of
   // the locks after the TTL while Shopify is still working on it. The run row stays
   // non-terminal until someone opens it again, so that is where "running" lives.
-  // Batches are listed per store: the job carries the store, the parent does not.
+  // Batches are listed per store: the job carries the store, the parent does not. A
+  // store runs up to k jobs of one run, folded below into one entry per store.
   const [ci, cj, pi, pj, cl, locks] = await Promise.all([
     storeIds.length ? prisma.importRun.findMany({ where: open, select: pick }) : [],
-    storeIds.length ? prisma.importBatchJob.findMany({ where: open, select: { ...pick, rowCount: true } }) : [],
+    storeIds.length ? prisma.importBatchJob.findMany({ where: open, select: { ...pick, importRunId: true, rowCount: true } }) : [],
     storeIds.length ? prisma.productImportRun.findMany({ where: open, select: pick }) : [],
-    storeIds.length ? prisma.productImportJob.findMany({ where: open, select: { ...pick, productCount: true } }) : [],
+    storeIds.length ? prisma.productImportJob.findMany({ where: open, select: { ...pick, importRunId: true, productCount: true } }) : [],
     storeIds.length ? prisma.cleanupRun.findMany({ where: open, select: { ...pick, entity: true } }) : [],
     liveStoreLocks(),
   ]);
   const watched = new Set(locks.map((l) => l.ownerId));
 
+  // A store's share of a batch is ONE operation to the SE however many jobs it was
+  // split into: sum their sizes, start at the earliest, and judge "watched" by the
+  // share's lock (jobs never own one; their share does).
+  const shares = <J extends { id: string; importRunId: string; storeId: string | null; createdAt: Date }>(
+    jobs: J[],
+    sizeOf: (j: J) => number,
+  ) => {
+    const byShare = new Map<string, { id: string; storeId: string | null; createdAt: Date; size: number }>();
+    for (const j of jobs) {
+      const key = `${j.importRunId}:${j.storeId}`;
+      const seen = byShare.get(key);
+      if (seen) {
+        seen.size += sizeOf(j);
+        if (j.createdAt < seen.createdAt) seen.createdAt = j.createdAt;
+      } else {
+        byShare.set(key, {
+          id: j.storeId ? shareOwner(j.importRunId, j.storeId) : j.id,
+          storeId: j.storeId,
+          createdAt: j.createdAt,
+          size: sizeOf(j),
+        });
+      }
+    }
+    return [...byShare.values()];
+  };
+
   const rows: { id: string; storeId: string | null; createdAt: Date; operation: string; size: number | null }[] = [
     ...ci.map((r) => ({ ...r, operation: 'customer import', size: null })),
-    ...cj.map((r) => ({ ...r, operation: 'customer import', size: r.rowCount })),
+    ...shares(cj, (j) => j.rowCount).map((r) => ({ ...r, operation: 'customer import' })),
     ...pi.map((r) => ({ ...r, operation: 'product import', size: null })),
-    ...pj.map((r) => ({ ...r, operation: 'product import', size: r.productCount })),
+    ...shares(pj, (j) => j.productCount).map((r) => ({ ...r, operation: 'product import' })),
     ...cl.map((r) => ({ ...r, operation: `${r.entity === 'PRODUCT' ? 'product' : 'customer'} cleanup`, size: null })),
   ];
 

@@ -865,7 +865,12 @@ export async function startBatchProductImport(
     ),
     Promise.all(clients.map((client) => (client ? fetchStoreContext(client) : undefined))),
   ]);
-  const k = Math.min(...opCounts);
+  const minOps = Math.min(...opCounts);
+  // Cap k so every selected store gets work: with fewer products than stores × k the
+  // flat split leaves the trailing slices empty, and those are whole stores idle
+  // (lock taken for nothing, absent from the parent shopDomain). With fewer products
+  // than stores some store goes without whatever k is, so k stays 1 there.
+  const k = Math.max(1, Math.min(minOps, Math.floor(groups.length / storeIds.length)));
   const batchCount = storeIds.length * k;
   const batches = splitIntoBatches(groups, batchCount);
 
@@ -1149,7 +1154,10 @@ async function reconcileBatchRun(
 
   // Roll up: re-read jobs and recompute parent counts from the merged rowResults —
   // counted in the database, not by loading every result row per poll.
-  const fresh = await prisma.productImportJob.findMany({ where: { importRunId: parentId } });
+  const fresh = await prisma.productImportJob.findMany({
+    where: { importRunId: parentId },
+    orderBy: { batchIndex: 'asc' },
+  });
   const allTerminal = fresh.every((j) => TERMINAL_BULK_STATUSES.includes(j.status));
   const [successCount, totalCount] = await Promise.all([
     prisma.productImportResult.count({ where: { importRunId: parentId, accepted: true } }),
@@ -1159,12 +1167,14 @@ async function reconcileBatchRun(
 
   if (allTerminal) {
     const failedJobs = fresh.filter((j) => j.status !== 'COMPLETED');
-    const error = failedJobs.length
-      ? failedJobs
-          .map((j) => `${j.shopDomain}: ${j.error ?? j.status}`)
-          .join(' | ')
-          .slice(0, 500)
-      : null;
+    // One entry per failed STORE (its first failed job): a store runs up to k jobs,
+    // and k copies of one store's error would crowd the other stores out of the
+    // 500 characters.
+    const failedStores = new Map<string, string>();
+    for (const j of failedJobs) {
+      if (!failedStores.has(j.shopDomain)) failedStores.set(j.shopDomain, `${j.shopDomain}: ${j.error ?? j.status}`);
+    }
+    const error = failedJobs.length ? [...failedStores.values()].join(' | ').slice(0, 500) : null;
     await prisma.productImportRun.updateMany({
       where: { id: parentId, status: 'RUNNING' },
       data: {

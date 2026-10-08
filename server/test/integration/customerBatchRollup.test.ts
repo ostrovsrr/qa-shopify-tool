@@ -33,28 +33,21 @@ const runIf = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const truncateAll = resetDb;
 
 /** A validation run with two customer rows, enough to split across stores. */
-async function seedValidation(): Promise<string> {
+async function seedValidation(n = 2): Promise<string> {
   const validationId = uuidv4();
   await prisma.validationRun.create({
     data: {
       id: validationId,
       fileName: 'customers.csv',
       fileType: 'CUSTOMER',
-      totalRows: 2,
+      totalRows: n,
       errors: 0,
       originalRows: {
-        create: [
-          {
-            id: uuidv4(),
-            rowNumber: 2,
-            data: { 'First Name': 'Ann', 'Last Name': 'Lee', Email: 'ann@example.com' },
-          },
-          {
-            id: uuidv4(),
-            rowNumber: 3,
-            data: { 'First Name': 'Bob', 'Last Name': 'Ray', Email: 'bob@example.com' },
-          },
-        ],
+        create: Array.from({ length: n }, (_, i) => ({
+          id: uuidv4(),
+          rowNumber: i + 2,
+          data: { 'First Name': `C${i}`, 'Last Name': 'Test', Email: `c${i}@example.com` },
+        })),
       },
     },
   });
@@ -154,6 +147,35 @@ runIf('customer batch rollup — never claim an import succeeded when it did not
     expect(run.error).toContain('s2.myshopify.com');
   });
 
+  // A store runs up to k jobs: the parent error names each failed store ONCE, and
+  // k copies must not crowd the other stores out of its 500 characters.
+  it('names a failed store once however many of its jobs failed', async () => {
+    const validationId = await seedValidation();
+    const parentId = uuidv4();
+    await prisma.importRun.create({
+      data: {
+        id: parentId,
+        validationId,
+        shopDomain: 'a.myshopify.com, b.myshopify.com',
+        status: 'RUNNING',
+        batchJobs: {
+          create: [
+            { storeId: 'store1', shopDomain: 'a.myshopify.com', batchIndex: 0, error: 'boom' },
+            { storeId: 'store1', shopDomain: 'a.myshopify.com', batchIndex: 1, error: 'other' },
+            { storeId: 'store2', shopDomain: 'b.myshopify.com', batchIndex: 2 },
+            { storeId: 'store2', shopDomain: 'b.myshopify.com', batchIndex: 3, status: 'COMPLETED' },
+          ].map((j) => ({ status: 'FAILED', batchCount: 4, rowCount: 1, ...j })),
+        },
+      },
+    });
+
+    await reconcileImportRun(parentId);
+
+    const run = await prisma.importRun.findUniqueOrThrow({ where: { id: parentId } });
+    expect(run.status).toBe('FAILED');
+    expect(run.error).toBe('a.myshopify.com: boom | b.myshopify.com: FAILED');
+  });
+
   it('a single PENDING job among terminal ones is enough to hold the rollup open', async () => {
     const validationId = await seedValidation();
     const parentId = await seedRun(validationId, ['COMPLETED', 'FAILED', 'PENDING']);
@@ -197,6 +219,20 @@ runIf('startBatchImport — every job is on disk before Shopify is touched', () 
     // The batch parent's storeId stays NULL: it spans many stores.
     const parent = await prisma.importRun.findUniqueOrThrow({ where: { id: importRunId } });
     expect(parent.storeId).toBeNull();
+  });
+
+  // k is capped so every selected store gets work: 4 rows over 3 stores would size
+  // k=2 (ceil(4/3) rows each) and split into [1,1,1,1,0,0] — stores 2 and 3 idle.
+  it('gives every selected store a job when there are enough rows', async () => {
+    const validationId = await seedValidation(4);
+
+    const result = await startBatchImport(validationId, ['store1', 'store2', 'store3']);
+    expect(result).toMatchObject({ ok: true });
+    const importRunId = (result as { importRunId: string }).importRunId;
+
+    const jobs = await prisma.importBatchJob.findMany({ where: { importRunId }, orderBy: { batchIndex: 'asc' } });
+    expect(jobs.map((j) => j.storeId)).toEqual(['store1', 'store2', 'store3']);
+    expect(jobs.every((j) => j.batchCount === 3)).toBe(true);
   });
 
   // The single-store path has the same rule. It used to submit the bulk op and
