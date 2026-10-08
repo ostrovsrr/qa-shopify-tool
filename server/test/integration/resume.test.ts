@@ -414,7 +414,11 @@ runIf('resume-on-boot', () => {
       found: 2,
       submittedIds: taggedIds,
     });
-    expect((await cleanupOps(run.id)).map((o) => o.bulkOperationId)).toEqual(submitted);
+    // Order-free: the ops submit concurrently, so the fake hands out its op ids in
+    // whichever order the submits finish. Each op records the id ITS submit returned.
+    expect((await cleanupOps(run.id)).map((o) => o.bulkOperationId).sort()).toEqual(
+      [...submitted].sort(),
+    );
     expect(deleteSlices.flat()).toEqual(taggedIds);
   });
 
