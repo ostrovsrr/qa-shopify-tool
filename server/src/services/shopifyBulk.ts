@@ -1,3 +1,4 @@
+import { MAX_BULK_OPS_PER_SHOP, getBulkOpsPerStore } from '../config/shopify';
 import type { ShopifyClient } from './shopifyClient';
 
 // Generic, entity-agnostic Shopify bulk-operation engine. It knows the Shopify
@@ -45,6 +46,46 @@ export class BulkResultParseError extends Error {
     super(message);
     this.name = 'BulkResultParseError';
   }
+}
+
+/** Shopify refused to start a bulk operation because the shop is at its concurrent
+ *  limit. A DEFINITE refusal: Shopify started nothing, so unlike an ambiguous submit
+ *  error it is safe to retry. */
+export class BulkConcurrencyLimitError extends Error {
+  constructor(
+    message = 'Too many bulk operations are already running on this shop (the per-shop concurrent limit is reached). Wait for one to finish and retry.',
+  ) {
+    super(message);
+    this.name = 'BulkConcurrencyLimitError';
+  }
+}
+
+/** How many bulk operations to split one store's work of `lines` lines across: never
+ *  more than `max`, never more than there are lines, never fewer than one. No size
+ *  threshold on purpose: every import and cleanup takes the same path. */
+export function opsForStore(lines: number, max = getBulkOpsPerStore()): number {
+  return Math.max(1, Math.min(max, lines));
+}
+
+/** Bulk mutations currently RUNNING on the shop. Best effort: any error reads as 0,
+ *  because this only sizes the split and a wrong answer is caught by the submit. */
+export async function countRunningBulkMutations(client: ShopifyClient): Promise<number> {
+  try {
+    const data = await client.query<{ bulkOperations: { nodes: { id: string; status: string }[] } }>(
+      'query runningBulkMutations { bulkOperations(first: 10, query: "status:RUNNING operation_type:MUTATION") { nodes { id status } } }',
+    );
+    return data.bulkOperations.nodes.length;
+  } catch (err) {
+    console.warn('Could not count running bulk mutations; assuming none.', err);
+    return 0;
+  }
+}
+
+/** opsForStore, minus the slots an orphaned op (left running by a crash) still holds,
+ *  so one chunk's submit cannot fail on the per-shop limit. */
+export async function opsForStoreOnShop(client: ShopifyClient, lines: number): Promise<number> {
+  const running = await countRunningBulkMutations(client);
+  return Math.max(1, Math.min(opsForStore(lines), MAX_BULK_OPS_PER_SHOP - running));
 }
 
 // ── staged upload → run → poll ───────────────────────────────────────────────
@@ -143,9 +184,7 @@ export async function runBulkMutation(
   if (errs.length > 0) {
     const inProgress = errs.find((e) => /already in progress|in progress/i.test(e.message));
     if (inProgress) {
-      throw new Error(
-        'Too many bulk operations are already running on this shop (the per-shop concurrent limit is reached). Wait for one to finish and retry.',
-      );
+      throw new BulkConcurrencyLimitError();
     }
     throw new Error(`bulkOperationRunMutation failed: ${errs.map((e) => e.message).join('; ')}`);
   }

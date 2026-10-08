@@ -3,15 +3,20 @@ import {
   BULK_POLL_INTERVAL_MS,
   MAX_BULK_POLL_ATTEMPTS,
   MAX_JOB_POLL_ATTEMPTS,
+  BulkConcurrencyLimitError,
   TERMINAL_BULK_STATUSES,
   awaitBulkOperationResultUrl,
   bulkDeleteByIds,
+  countRunningBulkMutations,
+  opsForStore,
+  opsForStoreOnShop,
   fetchAndParseBulkResults,
   fetchBulkOperationState,
   runBulkMutation,
   splitIntoBatches,
   stagedUpload,
 } from '../src/services/shopifyBulk';
+import { isAmbiguousSubmitError } from '../src/services/importReconcile';
 import type { ShopifyClient } from '../src/services/shopifyClient';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -591,5 +596,93 @@ describe('shared constants (the refactor must not redefine these)', () => {
 
   it('pins the stuck-job poll bound', () => {
     expect(MAX_JOB_POLL_ATTEMPTS).toBe(300);
+  });
+});
+
+describe('BulkConcurrencyLimitError', () => {
+  it('is what runBulkMutation throws at the per-shop limit, and is a definite refusal', async () => {
+    const client = fakeClient(async () => ({
+      bulkOperationRunMutation: {
+        bulkOperation: null,
+        userErrors: [{ field: [], message: 'A bulk operation is already in progress', code: null }],
+      },
+    }));
+    const err = await runBulkMutation(client, 'm', 'k').catch((e) => e);
+    expect(err).toBeInstanceOf(BulkConcurrencyLimitError);
+    expect(err.message).toMatch(/per-shop concurrent limit/i);
+    // Shopify started nothing, so the submit is NOT ambiguous.
+    expect(isAmbiguousSubmitError(err)).toBe(false);
+  });
+});
+
+describe('opsForStore', () => {
+  it('never exceeds max, never exceeds the line count, never drops below 1', () => {
+    expect(opsForStore(1000, 5)).toBe(5);
+    expect(opsForStore(3, 5)).toBe(3);
+    expect(opsForStore(0, 5)).toBe(1);
+    expect(opsForStore(1000, 1)).toBe(1);
+  });
+
+  it('defaults max to BULK_OPS_PER_STORE', () => {
+    const prev = process.env.BULK_OPS_PER_STORE;
+    try {
+      process.env.BULK_OPS_PER_STORE = '2';
+      expect(opsForStore(1000)).toBe(2);
+    } finally {
+      if (prev === undefined) delete process.env.BULK_OPS_PER_STORE;
+      else process.env.BULK_OPS_PER_STORE = prev;
+    }
+  });
+});
+
+describe('countRunningBulkMutations', () => {
+  it('counts the running mutation nodes with the validated query', async () => {
+    const query = vi.fn(async () => ({ bulkOperations: { nodes: [{ id: 'a', status: 'RUNNING' }, { id: 'b', status: 'RUNNING' }] } }));
+    expect(await countRunningBulkMutations(fakeClient(query))).toBe(2);
+    expect(query.mock.calls[0][0]).toBe(
+      'query runningBulkMutations { bulkOperations(first: 10, query: "status:RUNNING operation_type:MUTATION") { nodes { id status } } }',
+    );
+  });
+
+  it('returns 0 and warns on any error', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const client = fakeClient(async () => {
+        throw new Error('boom');
+      });
+      expect(await countRunningBulkMutations(client)).toBe(0);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe('opsForStoreOnShop', () => {
+  const running = (n: number) =>
+    fakeClient(async () => ({
+      bulkOperations: { nodes: Array.from({ length: n }, (_, i) => ({ id: `o${i}`, status: 'RUNNING' })) },
+    }));
+  const prev = process.env.BULK_OPS_PER_STORE;
+  afterEach(() => {
+    if (prev === undefined) delete process.env.BULK_OPS_PER_STORE;
+    else process.env.BULK_OPS_PER_STORE = prev;
+  });
+
+  it('uses all slots when none are taken', async () => {
+    delete process.env.BULK_OPS_PER_STORE;
+    expect(await opsForStoreOnShop(running(0), 1000)).toBe(5);
+  });
+  it('leaves room for orphaned running ops', async () => {
+    delete process.env.BULK_OPS_PER_STORE;
+    expect(await opsForStoreOnShop(running(2), 1000)).toBe(3);
+  });
+  it('never goes below 1, even when the shop is full', async () => {
+    delete process.env.BULK_OPS_PER_STORE;
+    expect(await opsForStoreOnShop(running(5), 1000)).toBe(1);
+  });
+  it('still caps by line count', async () => {
+    delete process.env.BULK_OPS_PER_STORE;
+    expect(await opsForStoreOnShop(running(0), 2)).toBe(2);
   });
 });

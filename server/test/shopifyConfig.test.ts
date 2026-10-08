@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  getBulkOpsPerStore,
   getShopifyStoresConfig,
   normalizeShop,
   resetShopifyConfigCache,
@@ -173,5 +174,32 @@ describe('store identity', () => {
       delete process.env.SHOPIFY_SHOP_7;
       delete process.env.SHOPIFY_ADMIN_TOKEN_7;
     }
+  });
+});
+
+describe('getBulkOpsPerStore', () => {
+  const prev = process.env.BULK_OPS_PER_STORE;
+  afterEach(() => {
+    if (prev === undefined) delete process.env.BULK_OPS_PER_STORE;
+    else process.env.BULK_OPS_PER_STORE = prev;
+  });
+  const read = (v: string | undefined) => {
+    if (v === undefined) delete process.env.BULK_OPS_PER_STORE;
+    else process.env.BULK_OPS_PER_STORE = v;
+    return getBulkOpsPerStore();
+  };
+
+  it('defaults to 5 when unset, empty or non-numeric', () => {
+    expect(read(undefined)).toBe(5);
+    expect(read('')).toBe(5);
+    expect(read('abc')).toBe(5);
+  });
+  it('clamps to 1..5', () => {
+    expect(read('1')).toBe(1);
+    expect(read('3')).toBe(3);
+    expect(read('0')).toBe(1);
+    expect(read('-4')).toBe(1);
+    expect(read('99')).toBe(5);
+    expect(read('2.7')).toBe(2);
   });
 });

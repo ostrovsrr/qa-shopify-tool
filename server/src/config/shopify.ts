@@ -329,3 +329,19 @@ export function sweepOwnsStore(storeId: string | null): boolean {
 export function resetShopifyConfigCache(): void {
   cached = null;
 }
+
+/** Shopify allows 5 concurrent bulk mutations per app per shop from API 2026-01. */
+export const MAX_BULK_OPS_PER_SHOP = 5;
+
+/**
+ * How many bulk operations one store's import / cleanup is split across.
+ * `BULK_OPS_PER_STORE=1` is the kill switch: today's one-op-per-store behaviour.
+ * Unset or non-numeric means the Shopify cap; anything else is clamped to 1..cap.
+ */
+export function getBulkOpsPerStore(): number {
+  const raw = process.env.BULK_OPS_PER_STORE?.trim();
+  if (!raw) return MAX_BULK_OPS_PER_SHOP;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return MAX_BULK_OPS_PER_SHOP;
+  return Math.max(1, Math.min(MAX_BULK_OPS_PER_SHOP, Math.trunc(n)));
+}
