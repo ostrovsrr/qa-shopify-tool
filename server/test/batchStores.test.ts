@@ -18,6 +18,21 @@ describe('batchStoresOf', () => {
     ]);
   });
 
+  // A store's share runs as several jobs; the UI restores STORES, not ops.
+  it('lists a store once however many of its jobs there are', () => {
+    expect(
+      batchStoresOf([
+        { storeId: 'store1', shopDomain: 'one.myshopify.com', batchIndex: 1 },
+        { storeId: 'store2', shopDomain: 'two.myshopify.com', batchIndex: 2 },
+        { storeId: 'store1', shopDomain: 'one.myshopify.com', batchIndex: 0 },
+        { storeId: 'store2', shopDomain: 'two.myshopify.com', batchIndex: 3 },
+      ]),
+    ).toEqual([
+      { storeId: 'store1', shopDomain: 'one.myshopify.com' },
+      { storeId: 'store2', shopDomain: 'two.myshopify.com' },
+    ]);
+  });
+
   it('is empty for a single-store run (no batch jobs)', () => {
     expect(batchStoresOf([])).toEqual([]);
   });

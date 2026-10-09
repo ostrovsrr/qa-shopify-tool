@@ -32,6 +32,7 @@ VPN, or a Cloudflare Tunnel with Access already in front of it.
 | `UPLOAD_DIR` | no | Defaults to `/tmp/qa-uploads` in the image. |
 | `RETENTION_DAYS` | no | Days raw uploaded rows are kept. Default 30. `0` disables the purge. |
 | `DATABASE_CONNECTION_LIMIT` | no | Default 10. Lower it if your Postgres has a small `max_connections`. |
+| `BULK_OPS_PER_STORE` | no | Bulk operations one store's import or QA cleanup is split across, 1-5. Default 5; `1` is the kill switch (one op per store). |
 
 ## Build and run
 
@@ -43,6 +44,11 @@ docker run -p 3001:3001 --env-file server/.env -e NODE_ENV=production qa-shopify
 Migrations run at **start**, not at build (the database is not reachable from the
 build). The image runs `prisma migrate deploy`, which applies pending migrations and
 **cannot** reset or drop anything.
+
+When several instances share one database, restart them all together on the new
+image, never one by one: an instance still on older code reads a store-lock owner
+type it does not know (such as `IMPORT_STORE_SHARE`) as a finished owner and would
+take that store from a live run.
 
 > **Never run `prisma migrate dev` against a real database here.** Its drift check can
 > offer a destructive reset, and this database has *intentional* drift

@@ -68,6 +68,12 @@ The server has vitest tests (`npm run test`, `npm run test:integration`, `npm ru
 2. Client starts an import → `POST /api/product-import/:uploadId/run` (single store) or `/run-batch` (parallel across stores), then polls `GET /api/product-import/:id` until terminal
 3. Excel report via `GET /api/product-import/:id/report`; per-store product stats and QA cleanup via `/api/shopify/stores/:storeId/product-stats` and `/cleanup-qa-products` (the unsuffixed `/stats` and `/cleanup-qa` routes are the **customer** equivalents — don't mix them up: cleanup deletes qa-tagged customers vs products respectively)
 
+### Bulk ops per store (imports and QA cleanup, both flows)
+Shopify allows 5 concurrent bulk mutations per shop, and one op is slow on its own, so each store's share of an import and each store's QA cleanup is split across up to `BULK_OPS_PER_STORE` ops (default 5, clamped 1..5; **1 is the kill switch** — one bulk op per store, still the batch path). Measured 2026-10-08 on a test store, 10k customers per side: create 1 op 4m15s vs 5 ops 59s (4.3×); delete 1 op 5m36s vs 5 ops 1m33s (3.6×) — `server/scripts/bulkTiming/timeBulkOps.ts` re-measures it.
+- **Import:** every new import, single-store included, goes through the batch path. Job `i` belongs to store `i mod stores` (round-robin, so each store's total matches the client's per-store plan), `batchIndex = i`, `batchCount = stores × k`. `k` is uniform across a run's stores — the minimum over stores of what the shop has room for (ops already running on it count) — and is capped so every selected store gets work. Per-store views are derived from the per-job rows.
+- **Locks:** the store lock is owned by the store's *share* of the run (owner types `IMPORT_STORE_SHARE` / `PRODUCT_IMPORT_STORE_SHARE`, id `<parentRunId>:<storeId>`), not by one job. It is released only when all of that store's jobs are terminal and none is outcome-unknown (`releaseShareIfDone` in `services/storeLock.service.ts`) — freeing it earlier would let a second import race a bulk op that may still be running.
+- **Cleanup:** a `CleanupRun` is still one row per store and still owns the lock; its Shopify ops are rows in `cleanup_ops` (one per bulk delete; its slice is `splitIntoBatches(submittedIds, opCount)[opIndex]`). 50 ids or fewer still delete serially with no bulk op.
+
 ### Backend (`server/src/`)
 - `controllers/customerValidation.controller.ts` — Express route handlers
 - `services/customerValidation.service.ts` — orchestrates parsing, validation, persistence

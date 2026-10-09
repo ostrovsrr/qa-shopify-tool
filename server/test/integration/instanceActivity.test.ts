@@ -4,7 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import app from '../../src/index';
 import prisma from '../../src/db/prisma';
 import { resetShopifyConfigCache } from '../../src/config/shopify';
-import { acquireStoreLock, StoreLockOwner } from '../../src/services/storeLock.service';
+import { acquireStoreLock, shareOwner, StoreLockOwner } from '../../src/services/storeLock.service';
 import { resetActivityTracking } from '../../src/services/instanceActivity.service';
 import { resetDb } from './resetDb';
 
@@ -155,6 +155,45 @@ runIf('GET /api/instance/activity', () => {
 
     const res = await request(app).get('/api/instance/activity');
     expect(res.body.active).toMatchObject([{ storeId: OURS, operation: 'customer import', size: 500 }]);
+  });
+
+  // A store runs up to k jobs of one run; the SE sees ONE operation per store.
+  it("folds a store's jobs into one entry: summed size, earliest start, watched by its share lock", async () => {
+    const upload = await productUpload('Josh');
+    const parent = await prisma.productImportRun.create({
+      data: { uploadId: upload, shopDomain: 'ours-qa.myshopify.com', status: 'RUNNING' },
+    });
+    const first = new Date(Date.now() - 60_000);
+    for (const [batchIndex, productCount, createdAt] of [[0, 30, new Date()], [1, 12, first], [2, 8, new Date()]] as const) {
+      await prisma.productImportJob.create({
+        data: {
+          importRunId: parent.id,
+          storeId: OURS,
+          shopDomain: 'ours-qa.myshopify.com',
+          batchIndex,
+          batchCount: 3,
+          productCount,
+          status: 'RUNNING',
+          createdAt,
+        },
+      });
+    }
+    await lockStore(OURS, {
+      ownerType: 'PRODUCT_IMPORT_STORE_SHARE',
+      ownerId: shareOwner(parent.id, OURS),
+      operation: 'a product import',
+    });
+
+    const res = await request(app).get('/api/instance/activity');
+
+    expect(res.body.active).toHaveLength(1);
+    expect(res.body.active[0]).toMatchObject({
+      storeId: OURS,
+      operation: 'product import',
+      size: 50,
+      startedAt: first.toISOString(),
+      stale: false,
+    });
   });
 
   it("moves last-active on the SE's own requests, never on the monitor's probes", async () => {

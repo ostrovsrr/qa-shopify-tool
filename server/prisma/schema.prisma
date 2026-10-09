@@ -488,8 +488,40 @@ model CleanupRun {
   submitAttemptedAt DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+  ops             CleanupOp[]
 
   @@index([importRunId])
   @@index([status])
   @@map("cleanup_runs")
+}
+
+// One bulk delete of a cleanup. A store's cleanup splits its tagged records into up
+// to k of these so they run as concurrent Shopify bulk operations; CleanupRun keeps
+// the totals. Same lifecycle as CleanupRun (PENDING until the submit is recorded).
+model CleanupOp {
+  id                String     @id @default(uuid())
+  cleanupRunId      String
+  cleanupRun        CleanupRun @relation(fields: [cleanupRunId], references: [id], onDelete: Cascade)
+  opIndex           Int
+  // How many ops the run's ids were split into (k). With opIndex it recomputes this
+  // op's slice: splitIntoBatches(submittedIds, opCount)[opIndex].
+  opCount           Int
+  bulkOperationId   String?
+  status            String     @default("PENDING")
+  error             String?
+  deleted           Int        @default(0)
+  failedCount       Int        @default(0)
+  // The ids Shopify refused to delete, with its reason. [{ id, message }]
+  errors            Json?
+  pollAttempts      Int        @default(0)
+  // See ImportRun.claimedAt.
+  claimedAt         DateTime?
+  // See ImportRun.submitAttemptedAt.
+  submitAttemptedAt DateTime?
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  @@index([cleanupRunId])
+  @@index([status])
+  @@map("cleanup_ops")
 }

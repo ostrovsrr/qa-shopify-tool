@@ -76,19 +76,23 @@ runIf('pre-persist ordering — the row lands before the bulk op is submitted', 
       },
     });
 
+    // A single-store product import is a one-store batch: the parent and its job
+    // are written first, and the failure lands on the job.
     const result = await startProductImport(uploadId, 'store1');
-    expect(result).toMatchObject({ ok: false });
+    expect(result).toMatchObject({ ok: true });
 
-    // THE ASSERTION. The submit failed, but the row is here — so it was written
-    // first. Under the old "submit then create" order this array would be empty.
+    // THE ASSERTION. The submit failed, but the rows are here — so they were
+    // written first. Under the old "submit then create" order these would be empty.
     const runs = await prisma.productImportRun.findMany({ where: { uploadId } });
     expect(runs).toHaveLength(1);
-    expect(runs[0].status).toBe('FAILED');
-    expect(runs[0].bulkOperationId).toBeNull();
-    expect(runs[0].error).toContain('staged upload exploded');
+    const jobs = await prisma.productImportJob.findMany({ where: { importRunId: runs[0].id } });
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].status).toBe('FAILED');
+    expect(jobs[0].bulkOperationId).toBeNull();
+    expect(jobs[0].error).toContain('staged upload exploded');
     // The staged upload creates nothing in the store, so it is not a submit attempt.
     // Marking intent any earlier would turn provably-safe relaunches into failures.
-    expect(runs[0].submitAttemptedAt).toBeNull();
+    expect(jobs[0].submitAttemptedAt).toBeNull();
   });
 
   it('customers: the run row exists in FAILED state even though the submit blew up', async () => {
@@ -112,14 +116,18 @@ runIf('pre-persist ordering — the row lands before the bulk op is submitted', 
       },
     });
 
+    // A single-store customer import is a one-store batch: the parent and its job
+    // are written first, and the failure lands on the job.
     const result = await startCustomerImport(validationId, 'store1');
-    expect(result).toMatchObject({ ok: false });
+    expect(result).toMatchObject({ ok: true });
 
     const runs = await prisma.importRun.findMany({ where: { validationId } });
     expect(runs).toHaveLength(1);
-    expect(runs[0].status).toBe('FAILED');
-    expect(runs[0].bulkOperationId).toBeNull();
-    expect(runs[0].error).toContain('staged upload exploded');
-    expect(runs[0].submitAttemptedAt).toBeNull();
+    const jobs = await prisma.importBatchJob.findMany({ where: { importRunId: runs[0].id } });
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].status).toBe('FAILED');
+    expect(jobs[0].bulkOperationId).toBeNull();
+    expect(jobs[0].error).toContain('staged upload exploded');
+    expect(jobs[0].submitAttemptedAt).toBeNull();
   });
 });

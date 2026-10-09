@@ -6,10 +6,11 @@ import { TemplateRow } from '../reports/mergeDuplicates';
 import { getShopifyConfig } from '../config/shopify';
 import { purgedMessage } from './retention.service';
 import {
-  acquireStoreLock,
   acquireStoreLocks,
+  releaseShareIfDone,
   releaseStoreLock,
   renewStoreLock,
+  shareOwner,
   StoreBusyError,
 } from './storeLock.service';
 import {
@@ -28,6 +29,8 @@ import {
   BulkResultSource,
   bulkLineErrorMessage,
   fetchAndParseBulkResults,
+  opsForStore,
+  opsForStoreOnShop,
   runBulkMutation,
   splitIntoBatches,
   stagedUpload,
@@ -263,16 +266,28 @@ export function parseCustomerCreateLine(
 
 // ── orchestrator: start (fast) ───────────────────────────────────────────────
 
-// Kicks off the Shopify bulk operation and persists the run as RUNNING, then
-// returns immediately. The op is finalized later by reconcileImportRun (driven
-// by the GET poll), so no HTTP request is held open while Shopify processes.
+// Start a customer import into ONE store. It is a one-store batch: same planner,
+// same pre-persist, same k-ops-per-store split as a parallel import, so the store's
+// share runs as up to BULK_OPS_PER_STORE concurrent bulk ops instead of one. The
+// result is a batch parent + jobs, finalized later by reconcileImportRun (driven by
+// the GET poll), so no HTTP request is held open while Shopify processes.
+//
+// What it keeps from the old single-run path is its front door: the store's health
+// is checked first, and an unhealthy store is reported here with Shopify's own
+// message rather than as a job that failed. A launch failure after that (a refused
+// or ambiguous submit) lands on the job and reaches the user through the poll, as
+// for any batch. The old single-run submit (submitSingleStoreRun) is no longer
+// reached for new runs; it and the single-run reconcile stay so runs written
+// before this change still drain.
 export async function startCustomerImport(
   validationId: string,
   storeId: string,
 ): Promise<RunImportResult> {
+  // Existence only: startBatchImport loads the rows, and a large run's rows are not
+  // worth reading twice.
   const run = await prisma.validationRun.findUnique({
     where: { id: validationId },
-    include: { originalRows: { orderBy: { rowNumber: 'asc' } } },
+    select: { id: true },
   });
   if (!run) return { notFound: true };
 
@@ -283,95 +298,15 @@ export async function startCustomerImport(
     return { ok: false, error: health.error ?? 'Shopify connection not healthy.' };
   }
 
-  const importRunId = uuidv4();
-  const { jsonl, lineRefs } = buildJsonl(buildImportRows(run), importRunId);
-
-  if (lineRefs.length === 0) {
-    return {
-      ok: false,
-      // A purged run has no rows for a reason, and 'no rows to import' would read
-      // like a bug in the upload rather than the retention policy doing its job.
-      error: run.piiPurgedAt ? purgedMessage(run.piiPurgedAt) : 'This validation run has no rows to import.',
-    };
-  }
-
-  // ── PRE-PERSIST before the side effect. Same rule as the batch path.
-  //
-  //    The bulk op creates real customers in a real store. Submitting it before
-  //    the run row exists means a crash in between leaves the op RUNNING on
-  //    Shopify with NO database row at all: the user sees nothing happened, while
-  //    customers land in the store tagged qa-import-<importRunId> — an id that
-  //    only ever existed in memory. Untracked, unreconcilable, and invisible to
-  //    the run-scoped cleanup.
-  //
-  //    Never take a side effect you have not recorded. The row goes down first,
-  //    as PENDING; the op id lands on it the moment Shopify hands one back.
-  //
-  //    The store's busy-lock is taken in the SAME transaction. If someone else is
-  //    already working this store, the transaction rolls back and no row is written
-  //    at all — the caller just gets told the store is busy. Locking after the
-  //    pre-persist would leave an orphan PENDING row that resume-on-boot would
-  //    later try to launch. Note the lock keys on the RESOLVED store id, so an
-  //    omitted storeId (which silently means "the first store") contends with an
-  //    explicit one for the same store.
-  try {
-    await prisma.$transaction(async (tx) => {
-      await acquireStoreLock(tx, storeId, {
-        ownerType: 'IMPORT_RUN',
-        ownerId: importRunId,
-        operation: 'a customer import',
-      });
-      await tx.importRun.create({
-        data: {
-          id: importRunId,
-          validationId,
-          storeId,
-          shopDomain: health.shop ?? shopDomainFor(storeId),
-          bulkOperationId: null,
-          status: 'PENDING',
-          successCount: 0,
-          errorCount: 0,
-        },
-      });
-    });
-  } catch (err) {
-    if (err instanceof StoreBusyError) return { ok: false, busy: true, error: err.message };
-    throw err;
-  }
-
-  try {
-    await submitSingleStoreRun(importRunId, client, jsonl);
-  } catch (err) {
-    const message = (err as Error).message;
-    if (isAmbiguousSubmitError(err)) {
-      // The op may be live on the shop. Do NOT go terminal and do NOT release:
-      // a terminal owner frees the store at once (storeLock's holderIsFinished),
-      // dropping the next colleague's import on top of a possibly-running one.
-      // The row stays PENDING with submitAttemptedAt set — the "outcome unknown"
-      // state importResume already defines — holding the store until the lock's
-      // TTL, after which the sweep fails it with this message.
-      const error = `${AMBIGUOUS_SUBMIT_MESSAGE} (${message})`;
-      await recordAmbiguousSubmit(prisma.importRun as never, importRunId, error);
-      return { ok: false, error };
-    }
-    await prisma.importRun.update({
-      where: { id: importRunId },
-      data: { status: 'FAILED', error: message },
-    });
-    // The run is over before it began — hand the store straight back rather than
-    // making the next colleague wait out the lock TTL.
-    await releaseStoreLock(importRunId);
-    return { ok: false, error: message };
-  }
-
-  return { ok: true, importRunId };
+  return startBatchImport(validationId, [storeId]);
 }
 
 /**
  * Submit a pre-persisted single-store run's bulk op and record its id.
  *
- * Shared by the first launch and by resume-on-boot, so a relaunched run takes the
- * exact same path as an original one — no second implementation to drift.
+ * Only resume-on-boot reaches this now: new single-store imports are one-store
+ * batches (see startCustomerImport). It stays for a single run written before that
+ * change and left PENDING across the deploy.
  */
 async function submitSingleStoreRun(
   importRunId: string,
@@ -608,9 +543,10 @@ async function writeRowResults(
 
 // ── parallel batch import across multiple stores ─────────────────────────────
 
-// Splits the run's rows across the selected stores and kicks off one bulk op per
-// store in parallel. Returns immediately with a parent ImportRun id; the per-store
-// jobs are finalized and merged into the parent's rowResults by the reconcile poll.
+// Splits the run's rows across the selected stores, and each store's share across k
+// concurrent bulk ops, and kicks them all off in parallel. Returns immediately with
+// a parent ImportRun id; the jobs are finalized and merged into the parent's
+// rowResults by the reconcile poll. A single-store import is this with one store.
 export async function startBatchImport(
   validationId: string,
   storeIds: string[],
@@ -620,9 +556,9 @@ export async function startBatchImport(
     include: { originalRows: { orderBy: { rowNumber: 'asc' } } },
   });
   if (!run) return { notFound: true };
-  // One job per store. A repeated id would plan two jobs on the same shop under ONE
-  // lock (acquireStoreLocks dedupes), and from API 2026-01 Shopify happily runs both
-  // bulk ops at once — two half-imports interleaving on one store.
+  // One share per store. A repeated id would plan two shares of the same shop — each
+  // sized as if it had the shop's bulk-op slots to itself — under ONE lock
+  // (acquireStoreLocks dedupes).
   storeIds = [...new Set(storeIds)];
   if (storeIds.length === 0) return { ok: false, error: 'Select at least one store.' };
   if (run.originalRows.length === 0) {
@@ -638,29 +574,60 @@ export async function startBatchImport(
   // Transform BEFORE splitting: merging is cross-row, so it must see the whole
   // dataset — and the reconcile recomputes the same split over the same
   // transformed rows to map results back.
-  const batches = splitIntoBatches(buildImportRows(run), storeIds.length);
+  const rows = buildImportRows(run);
 
-  // ── 1. PLAN the jobs. No Shopify calls: every field here comes from the
-  //       validation run or from env config, so this cannot fail halfway through.
-  const planned = storeIds
-    .map((storeId, index) => ({
-      id: uuidv4(),
-      storeId,
-      index,
-      batch: batches[index] ?? [],
-      // The shop domain is in env config, so we do NOT need verifyConnection() to
-      // know it. That is what lets the whole plan be persisted before we talk to
-      // Shopify at all.
-      shopDomain: shopDomainFor(storeId),
-    }))
-    .filter((p) => p.batch.length > 0); // fewer rows than stores
+  // ── 1. SIZE each store's share: k bulk ops per store, k the SAME for every
+  //       store. finalizeJob and resume recompute a job's rows from nothing but
+  //       (batchIndex, batchCount) over one flat split, so the stores × k slices
+  //       must be one splitIntoBatches call — which only stays balanced per store if
+  //       every store has the same k. The minimum is the one every store can take.
+  //
+  //       Read-only Shopify calls (counting ops already running on each shop), and
+  //       best effort: a store we cannot build a client for is sized without that
+  //       count, and its launch below records the real failure on its jobs.
+  const perStore = Math.ceil(rows.length / storeIds.length);
+  const clients = await Promise.all(
+    storeIds.map((storeId) => getShopifyClient(storeId).catch(() => null)),
+  );
+  const minOps = Math.min(
+    ...(await Promise.all(
+      clients.map((client) => (client ? opsForStoreOnShop(client, perStore) : opsForStore(perStore))),
+    )),
+  );
+  // Cap k so every selected store gets work: with fewer rows than stores × k the
+  // flat split leaves the trailing slices empty, and those are whole stores idle
+  // (lock taken for nothing, absent from the parent shopDomain). With fewer rows
+  // than stores some store goes without whatever k is, so k stays 1 there.
+  const k = Math.max(1, Math.min(minOps, Math.floor(rows.length / storeIds.length)));
+  const batchCount = storeIds.length * k;
+  const batches = splitIntoBatches(rows, batchCount);
+
+  // ── 2. PLAN the jobs: slice i → store i mod stores (round-robin), so each store
+  //       gets k slices. Not k contiguous slices per store: splitIntoBatches gives
+  //       its +1 remainders to the EARLIEST slices, and dealt in blocks of k they
+  //       all land on the first store(s) — off by up to k-1 rows from the per-store
+  //       plan the client previews (batchSizeFor). Dealt round-robin, store j's
+  //       total is exactly splitIntoBatches(n, stores)[j]. Finalize and resume
+  //       index by batchIndex alone, so nothing needs a store's rows contiguous.
+  //       No side effect yet: every field comes from the validation run, env
+  //       config, or the clients built above.
+  const domainOf = new Map(
+    storeIds.map((storeId, s) => [storeId, clients[s]?.shop ?? shopDomainFor(storeId)]),
+  );
+  const planned = batches
+    .map((batch, index) => {
+      const storeId = storeIds[index % storeIds.length];
+      return { id: uuidv4(), storeId, index, batch, shopDomain: domainOf.get(storeId)! };
+    })
+    .filter((p) => p.batch.length > 0); // fewer rows than slices
 
   if (planned.length === 0) {
     return { ok: false, error: 'No rows to import.' };
   }
+  const plannedStores = [...new Set(planned.map((p) => p.storeId))];
 
-  // ── 2. PRE-PERSIST the parent and EVERY job as PENDING, in ONE transaction,
-  //       BEFORE any Shopify call.
+  // ── 3. PRE-PERSIST the parent and EVERY job as PENDING, in ONE transaction,
+  //       BEFORE any Shopify side effect.
   //
   //       reconcileBatchRun rolls the parent up when every job it FINDS IN THE DB
   //       is terminal. That check cannot tell "all 5 jobs finished" apart from
@@ -679,27 +646,28 @@ export async function startBatchImport(
   //       partial fan-out — precisely the half-done, half-reported work the PENDING
   //       pre-persist exists to make impossible. If any store is busy the whole
   //       transaction rolls back, nothing is written, no lock is held, and the user
-  //       is told which store to wait for. Each JOB owns its store's lock (not the
-  //       parent, whose storeId is legitimately NULL), so locks are released one by
-  //       one as each store's job finishes.
+  //       is told which store to wait for.
+  //
+  //       Each store's SHARE owns its lock — the set of this run's jobs on that
+  //       store — not any one job (the first of k siblings to finish would free the
+  //       store under the rest) and not the parent (whose storeId is legitimately
+  //       NULL). A store is freed when the last job of its share is terminal
+  //       (releaseShareIfDone), and every job carries its storeId, since a job
+  //       without one is invisible to its share.
   try {
     await prisma.$transaction(async (tx) => {
-      await acquireStoreLocks(
-        tx,
-        planned.map((p) => p.storeId),
-        (storeId) => ({
-          ownerType: 'IMPORT_JOB',
-          ownerId: planned.find((p) => p.storeId === storeId)!.id,
-          operation: 'a customer import',
-        }),
-      );
+      await acquireStoreLocks(tx, plannedStores, (storeId) => ({
+        ownerType: 'IMPORT_STORE_SHARE',
+        ownerId: shareOwner(parentId, storeId),
+        operation: 'a customer import',
+      }));
       await tx.importRun.create({
         data: {
           id: parentId,
           validationId,
           // NULL is correct here and stays correct: a batch parent spans many stores.
           storeId: null,
-          shopDomain: planned.map((p) => p.shopDomain).join(', ').slice(0, 250),
+          shopDomain: plannedStores.map((s) => domainOf.get(s)!).join(', ').slice(0, 250),
           bulkOperationId: null,
           status: 'RUNNING',
           successCount: 0,
@@ -710,7 +678,7 @@ export async function startBatchImport(
               storeId: p.storeId,
               shopDomain: p.shopDomain,
               batchIndex: p.index,
-              batchCount: storeIds.length,
+              batchCount,
               bulkOperationId: null,
               status: 'PENDING',
               error: null,
@@ -727,10 +695,10 @@ export async function startBatchImport(
     throw err;
   }
 
-  // ── 3. FAN OUT. Each job moves PENDING → RUNNING (with its bulk op id) or
-  //       PENDING → FAILED. A per-store failure is captured on that job rather
-  //       than aborting the batch, which would strand the bulk ops already
-  //       started on the other stores.
+  // ── 4. FAN OUT — only now that every job of every share is on disk. Each job
+  //       moves PENDING → RUNNING (with its bulk op id) or PENDING → FAILED. A
+  //       per-job failure is captured on that job rather than aborting the batch,
+  //       which would strand the bulk ops already started by its siblings.
   await Promise.all(planned.map((p) => launchBatchJob(p.id, p.storeId, p.batch, parentId)));
 
   return { ok: true, importRunId: parentId };
@@ -759,6 +727,10 @@ async function launchBatchJob(
   batch: TemplateRow[],
   parentId: string,
 ): Promise<void> {
+  // Set the moment Shopify hands back an op id. A throw after that is NOT a refused
+  // submit — the op exists and may be running — so the catch must not treat it as
+  // one (see below).
+  let bulkOpId: string | null = null;
   try {
     const client = await getShopifyClient(storeId);
     const health = await client.verifyConnection();
@@ -767,8 +739,9 @@ async function launchBatchJob(
         where: { id: jobId },
         data: { status: 'FAILED', error: health.error ?? 'Store not healthy.' },
       });
-      // This job is terminal — free its store immediately.
-      await releaseStoreLock(jobId);
+      // This job is terminal (and that write is committed) — free its store if it
+      // was the last of its share.
+      await releaseJobStore(jobId, parentId, storeId);
       return;
     }
 
@@ -779,7 +752,7 @@ async function launchBatchJob(
     // tell us which op is ours. Resume-on-boot sees submitAttemptedAt and fails the
     // job honestly instead of guessing (see decideResume in importResume.service.ts).
     await markSubmitAttempt(prisma.importBatchJob as never, jobId);
-    const bulkOpId = await runBulkMutation(client, CUSTOMER_CREATE_MUTATION, stagedPath);
+    bulkOpId = await runBulkMutation(client, CUSTOMER_CREATE_MUTATION, stagedPath);
 
     await prisma.importBatchJob.update({
       where: { id: jobId },
@@ -790,9 +763,29 @@ async function launchBatchJob(
       },
     });
   } catch (err) {
+    if (bulkOpId) {
+      // Shopify ACCEPTED the op; recording its id is what failed. The op may be
+      // running on the store right now, so this is the outcome-unknown case, not a
+      // refusal: leave the job PENDING with submitAttemptedAt set, and its share
+      // holding the store, exactly as an ambiguous submit does — the sweep settles
+      // it once the lock's TTL has run out. Clearing submitAttemptedAt or releasing
+      // here would hand the store to the next colleague on top of a live op.
+      console.warn(
+        `[import] customer job ${jobId}: bulk op ${bulkOpId} submitted but not recorded:`,
+        (err as Error).message,
+      );
+      await recordAmbiguousSubmit(
+        prisma.importBatchJob as never,
+        jobId,
+        `${AMBIGUOUS_SUBMIT_MESSAGE} (Shopify started ${bulkOpId}; recording it failed: ${(err as Error).message})`,
+      ).catch(() => undefined); // the DB just failed us once; the row is already right
+      return;
+    }
     if (isAmbiguousSubmitError(err)) {
-      // The op may be live on this store — keep the job PENDING (outcome unknown)
-      // and its store held. See startCustomerImport.
+      // The op may be live on this store. Do NOT go terminal and do NOT release:
+      // the job stays PENDING with submitAttemptedAt set — the "outcome unknown"
+      // state importResume already defines — so its share keeps the store until
+      // the lock's TTL, after which the sweep fails it with this message.
       await recordAmbiguousSubmit(
         prisma.importBatchJob as never,
         jobId,
@@ -800,12 +793,41 @@ async function launchBatchJob(
       );
       return;
     }
+    // A definite failure: Shopify refused the submit (or we never got as far as
+    // it), so nothing is running for this job. submitAttemptedAt is cleared to say
+    // exactly that — a FAILED job that keeps it with no op id reads as "failed while
+    // submitting, may still be running", and the share would then hold the store
+    // to the TTL over an op that was never started.
     await prisma.importBatchJob.update({
       where: { id: jobId },
-      data: { status: 'FAILED', error: (err as Error).message },
+      data: { status: 'FAILED', error: (err as Error).message, submitAttemptedAt: null },
     });
-    await releaseStoreLock(jobId);
+    await releaseJobStore(jobId, parentId, storeId);
   }
+}
+
+/**
+ * Free a terminal job's store — if it was the last of its share to finish.
+ *
+ * Call only once the job's terminal status is COMMITTED: releaseShareIfDone judges
+ * the share from the database, so two siblings finishing together each see the
+ * other's write and the later one frees the store. Read before the commit, both
+ * would see a live sibling and the store would stay locked until the TTL.
+ *
+ * The job-id release frees a lock taken before shares existed (owned by the job
+ * itself), so batches started before this change still drain; for any newer job
+ * it matches nothing.
+ */
+async function releaseJobStore(jobId: string, parentId: string, storeId: string | null): Promise<void> {
+  if (storeId) await releaseShareIfDone('customer', parentId, storeId);
+  await releaseStoreLock(jobId);
+}
+
+/** Push out the lock a running job's store is held by — its share's, or, for a job
+ *  started before shares existed, its own. */
+async function renewJobStore(jobId: string, parentId: string, storeId: string | null): Promise<void> {
+  if (storeId) await renewStoreLock(shareOwner(parentId, storeId));
+  await renewStoreLock(jobId);
 }
 
 // Advances a batch parent: polls each non-terminal job once, merges completed
@@ -849,16 +871,20 @@ async function reconcileBatchRun(
           data: { status: 'FAILED', error },
         });
       },
-      renewLock: () => renewStoreLock(job.id),
-      // This job is terminal — free ITS store, while the batch's other stores stay
-      // locked by their own jobs.
-      releaseLock: () => releaseStoreLock(job.id),
+      renewLock: () => renewJobStore(job.id, parentId, job.storeId),
+      // This job is terminal — advanceImportOp calls this only after onCompleted /
+      // onEnded / onFailed have committed that — so free its store if it was the
+      // last of its share. Siblings, and the batch's other stores, stay held.
+      releaseLock: () => releaseJobStore(job.id, parentId, job.storeId),
     });
   }
 
   // Roll up: re-read jobs and recompute parent counts from the merged rowResults —
   // counted in the database, not by loading every row of a large import per poll.
-  const fresh = await prisma.importBatchJob.findMany({ where: { importRunId: parentId } });
+  const fresh = await prisma.importBatchJob.findMany({
+    where: { importRunId: parentId },
+    orderBy: { batchIndex: 'asc' },
+  });
   const allTerminal = fresh.every((j) => TERMINAL_BULK_STATUSES.includes(j.status));
   const [successCount, totalCount] = await Promise.all([
     prisma.importRowResult.count({ where: { importRunId: parentId, accepted: true } }),
@@ -868,12 +894,14 @@ async function reconcileBatchRun(
 
   if (allTerminal) {
     const failedJobs = fresh.filter((j) => j.status !== 'COMPLETED');
-    const error = failedJobs.length
-      ? failedJobs
-          .map((j) => `${j.shopDomain}: ${j.error ?? j.status}`)
-          .join(' | ')
-          .slice(0, 500)
-      : null;
+    // One entry per failed STORE (its first failed job): a store runs up to k jobs,
+    // and k copies of one store's error would crowd the other stores out of the
+    // 500 characters.
+    const failedStores = new Map<string, string>();
+    for (const j of failedJobs) {
+      if (!failedStores.has(j.shopDomain)) failedStores.set(j.shopDomain, `${j.shopDomain}: ${j.error ?? j.status}`);
+    }
+    const error = failedJobs.length ? [...failedStores.values()].join(' | ').slice(0, 500) : null;
     await prisma.importRun.updateMany({
       where: { id: parentId, status: 'RUNNING' },
       data: {
@@ -1033,15 +1061,23 @@ export function customerResumableStores(): ResumableStore[] {
     },
     {
       label: 'customer-job',
-      findResumable: (staleBefore) => findResumableRows(prisma.importBatchJob as never, staleBefore),
+      findResumable: (staleBefore) =>
+        findResumableRows(prisma.importBatchJob as never, staleBefore, { withParent: true }),
       claim: (id, staleBefore) => claimRow(prisma.importBatchJob as never, id, staleBefore),
       relaunch: relaunchCustomerJob,
       fail: (id, error) => failRow(prisma.importBatchJob as never, id, error),
-      lockOwner: (row) => ({
-        ownerType: 'IMPORT_JOB',
-        ownerId: row.id,
-        operation: 'a customer import',
-      }),
+      // A job's store is held by its SHARE, so two PENDING siblings on one store both
+      // re-take the same lock (re-entrant) instead of the second being told the
+      // store is busy by its own sibling. A job with no store has no share; it
+      // falls back to its own id, and the relaunch fails it anyway.
+      lockOwner: (row) =>
+        row.importRunId && row.storeId
+          ? {
+              ownerType: 'IMPORT_STORE_SHARE',
+              ownerId: shareOwner(row.importRunId, row.storeId),
+              operation: 'a customer import',
+            }
+          : { ownerType: 'IMPORT_JOB', ownerId: row.id, operation: 'a customer import' },
     },
   ];
 }

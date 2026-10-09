@@ -10,6 +10,7 @@ import {
   startProductImport,
 } from '../services/productImport.service';
 import { recordAction } from '../services/actionLog.service';
+import { toCleanupRunView } from '../services/cleanupRun.service';
 import { ShopifyAuthError, ShopifyConfigError } from '../services/shopifyClient';
 import { reportFileName } from '../utils/reportFileName';
 
@@ -217,7 +218,7 @@ export async function cleanupImportRunHandler(
         detail: { tag: run.tag, cleanupRunId: run.id, found: run.found },
       });
     }
-    res.status(202).json(runs);
+    res.status(202).json(runs.map(toCleanupRunView));
   } catch (err) {
     if (handleShopifyError(err, res)) return;
     next(err);

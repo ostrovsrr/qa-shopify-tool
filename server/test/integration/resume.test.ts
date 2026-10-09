@@ -26,6 +26,8 @@ const attemptSeenAtSubmit: (Date | null)[] = [];
 /** What a cleanup's tag lookup finds in the (fake) store, and how often it looked. */
 let taggedIds: string[] = [];
 let tagListings = 0;
+/** The ids each cleanup delete was submitted with. */
+const deleteSlices: string[][] = [];
 
 const fakeClient = {
   shop: 'fake.myshopify.com',
@@ -51,6 +53,17 @@ vi.mock('../../src/services/shopifyClient', async (importOriginal) => {
   return { ...actual, getShopifyClient: async () => fakeClient };
 });
 
+/** When set, every store id resolves to itself, so resume really takes the store's
+ *  lock (with no store configured — setEnv.ts — it resolves nothing and skips it). */
+let storesResolve = false;
+vi.mock('../../src/config/shopify', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/config/shopify')>();
+  return {
+    ...actual,
+    resolveStoreId: (id?: string) => (storesResolve ? (id ?? null) : actual.resolveStoreId(id)),
+  };
+});
+
 async function recordSubmit(attempt: Date | null): Promise<string> {
   attemptSeenAtSubmit.push(attempt);
   const id = `gid://shopify/BulkOperation/relaunched-${submitted.length + 1}`;
@@ -74,12 +87,17 @@ vi.mock('../../src/services/shopifyBulk', async (importOriginal) => {
     },
     submitBulkDelete: async (
       _client: unknown,
-      _ids: string[],
+      ids: string[],
       _spec: unknown,
       beforeRun?: () => Promise<void>,
     ) => {
+      deleteSlices.push(ids);
       if (beforeRun) await beforeRun();
-      const row = await prisma.cleanupRun.findFirst({ where: { status: 'PENDING' } });
+      // A cleanup's deletes are submitted per op; its intent is marked on the op.
+      const row = await prisma.cleanupOp.findFirst({
+        where: { status: 'PENDING', submitAttemptedAt: { not: null } },
+        orderBy: { submitAttemptedAt: 'desc' },
+      });
       return recordSubmit(row?.submitAttemptedAt ?? null);
     },
   };
@@ -92,11 +110,17 @@ const { resumeStore, SUBMIT_OUTCOME_UNKNOWN } = await import(
 );
 const { productResumableStores } = await import('../../src/services/productImport.service');
 const { cleanupResumableStores } = await import('../../src/services/cleanupRun.service');
+const { customerResumableStores } = await import('../../src/services/shopifyImport.service');
+const { shareOwner } = await import('../../src/services/storeLock.service');
 
 const runIf = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 
 const jobStore = () => productResumableStores().find((s) => s.label === 'product-job')!;
-const cleanupStore = () => cleanupResumableStores()[0];
+const cleanupStore = () => cleanupResumableStores().find((s) => s.label === 'cleanup')!;
+const cleanupOpStore = () => cleanupResumableStores().find((s) => s.label === 'cleanup-op')!;
+const cleanupOps = (runId: string) =>
+  prisma.cleanupOp.findMany({ where: { cleanupRunId: runId }, orderBy: { opIndex: 'asc' } });
+const customerJobStore = () => customerResumableStores().find((s) => s.label === 'customer-job')!;
 
 interface JobSeed {
   submitAttemptedAt?: Date | null;
@@ -156,6 +180,8 @@ runIf('resume-on-boot', () => {
     attemptSeenAtSubmit.length = 0;
     taggedIds = [];
     tagListings = 0;
+    deleteSlices.length = 0;
+    storesResolve = false;
     await resetDb();
   });
   afterAll(async () => {
@@ -215,6 +241,9 @@ runIf('resume-on-boot', () => {
       { submitAttemptedAt: new Date() },
     ]);
 
+    // Resume really takes the store's (share) lock here: the attempted sibling is
+    // failed for its unknown outcome, never for "store busy".
+    storesResolve = true;
     const summary = await resumeStore(jobStore());
 
     expect(summary).toMatchObject({ relaunched: 1, failed: 1 });
@@ -223,6 +252,144 @@ runIf('resume-on-boot', () => {
     const failed = await job(attempted);
     expect(failed.status).toBe('FAILED');
     expect(failed.bulkOperationId).toBeNull();
+    expect(failed.error).toContain(SUBMIT_OUTCOME_UNKNOWN.slice(0, 60));
+  });
+
+  // A product store's share runs as several jobs on ONE store, and they hold one
+  // lock between them. Resume re-takes it as the share, so the second sibling is a
+  // re-entrant acquire — not "the store is busy" with its own brother. (Under the
+  // old per-job owner the second acquire met its RUNNING brother's lock and was
+  // failed "store busy": relaunched 1, failed 1.)
+  it('product: two never-submitted PENDING jobs on one store BOTH relaunch under the share lock', async () => {
+    const jobIds = await seedPendingJobs([{}, {}]);
+    const { importRunId } = await job(jobIds[0]);
+
+    storesResolve = true;
+    const summary = await resumeStore(jobStore());
+
+    expect(summary).toMatchObject({ relaunched: 2, failed: 0 });
+    expect(submitted).toHaveLength(2);
+    expect((await Promise.all(jobIds.map(job))).map((j) => j.status)).toEqual(['RUNNING', 'RUNNING']);
+    const lock = await prisma.storeLock.findUniqueOrThrow({ where: { storeId: 'store1' } });
+    expect(lock).toMatchObject({
+      ownerType: 'PRODUCT_IMPORT_STORE_SHARE',
+      ownerId: shareOwner(importRunId, 'store1'),
+    });
+  });
+
+  // A customer store's share runs as several jobs on ONE store, and they hold one
+  // lock between them. Resume re-takes it as the share, so the second sibling is a
+  // re-entrant acquire — not "the store is busy" with its own brother.
+  it('customer: two never-submitted PENDING jobs on one store BOTH relaunch under the share lock', async () => {
+    const validationId = uuidv4();
+    await prisma.validationRun.create({
+      data: {
+        id: validationId,
+        fileName: 'c.csv',
+        fileType: 'CUSTOMER',
+        totalRows: 2,
+        errors: 0,
+        originalRows: {
+          create: [
+            { id: uuidv4(), rowNumber: 2, data: { 'First Name': 'Ann', Email: 'ann@example.com' } },
+            { id: uuidv4(), rowNumber: 3, data: { 'First Name': 'Bob', Email: 'bob@example.com' } },
+          ],
+        },
+      },
+    });
+    const parentId = uuidv4();
+    const jobIds = [uuidv4(), uuidv4()];
+    await prisma.importRun.create({
+      data: {
+        id: parentId,
+        validationId,
+        storeId: null,
+        shopDomain: 'fake.myshopify.com',
+        status: 'RUNNING',
+        batchJobs: {
+          create: jobIds.map((id, i) => ({
+            id,
+            storeId: 'store1',
+            shopDomain: 'fake.myshopify.com',
+            batchIndex: i,
+            batchCount: 2,
+            status: 'PENDING',
+            rowCount: 1,
+          })),
+        },
+      },
+    });
+
+    storesResolve = true;
+    const summary = await resumeStore(customerJobStore());
+
+    // Under a per-job owner the second acquire met its RUNNING brother's lock and
+    // was failed "store busy".
+    expect(summary).toMatchObject({ relaunched: 2, failed: 0 });
+    const jobs = await prisma.importBatchJob.findMany({ where: { importRunId: parentId } });
+    expect(jobs.map((j) => j.status)).toEqual(['RUNNING', 'RUNNING']);
+    const lock = await prisma.storeLock.findUniqueOrThrow({ where: { storeId: 'store1' } });
+    expect(lock).toMatchObject({ ownerType: 'IMPORT_STORE_SHARE', ownerId: shareOwner(parentId, 'store1') });
+  });
+
+  // ── SINGLE-STORE RUNS FROM BEFORE THE BATCH PATH ──────────────────────────
+  // New imports are always batch parents, so a PENDING single-store run can only be
+  // one the previous code wrote and a deploy interrupted. Its relaunch still goes
+  // through submitSingleStoreRun, under the run's own lock.
+  it('customer: a PENDING legacy single-store run that never attempted its submit is relaunched', async () => {
+    const validationId = uuidv4();
+    await prisma.validationRun.create({
+      data: {
+        id: validationId,
+        fileName: 'c.csv',
+        fileType: 'CUSTOMER',
+        totalRows: 1,
+        errors: 0,
+        originalRows: {
+          create: [{ id: uuidv4(), rowNumber: 2, data: { 'First Name': 'Ann', Email: 'ann@example.com' } }],
+        },
+      },
+    });
+    const run = await prisma.importRun.create({
+      data: { validationId, storeId: 'store1', shopDomain: 'fake.myshopify.com', status: 'PENDING' },
+    });
+
+    storesResolve = true;
+    const summary = await resumeStore(customerResumableStores().find((s) => s.label === 'customer-run')!);
+
+    expect(summary).toMatchObject({ relaunched: 1, failed: 0 });
+    expect(submitted).toHaveLength(1);
+    const after = await prisma.importRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after).toMatchObject({ status: 'RUNNING', bulkOperationId: submitted[0] });
+    expect(after.submitAttemptedAt).toBeInstanceOf(Date);
+    const lock = await prisma.storeLock.findUniqueOrThrow({ where: { storeId: 'store1' } });
+    expect(lock).toMatchObject({ ownerType: 'IMPORT_RUN', ownerId: run.id });
+  });
+
+  it('product: a PENDING legacy single-store run that never attempted its submit is relaunched', async () => {
+    const uploadId = uuidv4();
+    await prisma.productUploadRun.create({
+      data: {
+        id: uploadId,
+        fileName: 'p.csv',
+        productCount: 1,
+        originalRows: { create: [{ id: uuidv4(), rowNumber: 1, data: { Handle: 'alpha', Title: 'Alpha' } }] },
+      },
+    });
+    const run = await prisma.productImportRun.create({
+      data: { uploadId, storeId: 'store1', shopDomain: 'fake.myshopify.com', status: 'PENDING' },
+    });
+
+    storesResolve = true;
+    const summary = await resumeStore(productResumableStores().find((s) => s.label === 'product-run')!);
+
+    expect(summary).toMatchObject({ relaunched: 1, failed: 0 });
+    expect(submitted).toHaveLength(1);
+    const after = await prisma.productImportRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after).toMatchObject({ status: 'RUNNING', bulkOperationId: submitted[0] });
+    expect(after.submitAttemptedAt).toBeInstanceOf(Date);
+    const lock = await prisma.storeLock.findUniqueOrThrow({ where: { storeId: 'store1' } });
+    expect(lock).toMatchObject({ ownerType: 'PRODUCT_IMPORT_RUN', ownerId: run.id });
   });
 
   // ── CLEANUP ───────────────────────────────────────────────────────────────
@@ -244,7 +411,11 @@ runIf('resume-on-boot', () => {
     expect(summary).toMatchObject({ relaunched: 1, failed: 0 });
     expect(attemptSeenAtSubmit[0]).toBeInstanceOf(Date);
     const after = await prisma.cleanupRun.findUniqueOrThrow({ where: { id: run.id } });
-    expect(after).toMatchObject({ status: 'RUNNING', bulkOperationId: submitted[0] });
+    // Relaunched the way the live path launches: as ops.
+    expect(after).toMatchObject({ status: 'RUNNING', bulkOperationId: null });
+    expect(await cleanupOps(run.id)).toMatchObject([
+      { opIndex: 0, opCount: 1, status: 'RUNNING', bulkOperationId: submitted[0] },
+    ]);
   });
 
   it('cleanup: fails an attempted delete rather than guessing its op', async () => {
@@ -299,10 +470,16 @@ runIf('resume-on-boot', () => {
     const after = await prisma.cleanupRun.findUniqueOrThrow({ where: { id: run.id } });
     expect(after).toMatchObject({
       status: 'RUNNING',
-      bulkOperationId: submitted[0],
+      bulkOperationId: null,
       found: 2,
       submittedIds: taggedIds,
     });
+    // Order-free: the ops submit concurrently, so the fake hands out its op ids in
+    // whichever order the submits finish. Each op records the id ITS submit returned.
+    expect((await cleanupOps(run.id)).map((o) => o.bulkOperationId).sort()).toEqual(
+      [...submitted].sort(),
+    );
+    expect(deleteSlices.flat()).toEqual(taggedIds);
   });
 
   it('cleanup: never-listed and genuinely nothing tagged → COMPLETED, store freed', async () => {
@@ -327,6 +504,73 @@ runIf('resume-on-boot', () => {
     expect(tagListings).toBe(0);
     const after = await prisma.cleanupRun.findUniqueOrThrow({ where: { id: run.id } });
     expect(after).toMatchObject({ status: 'COMPLETED', deleted: 0 });
+  });
+
+  // ── CLEANUP OPS ───────────────────────────────────────────────────────────
+  // A crash between the transaction that writes a run's ops and an op's submit
+  // being recorded leaves that op PENDING under a RUNNING run.
+  const ids4 = ['gid://shopify/Product/1', 'gid://shopify/Product/2', 'gid://shopify/Product/3', 'gid://shopify/Product/4'];
+  async function runWithOps(second: { submitAttemptedAt?: Date }) {
+    const run = await prisma.cleanupRun.create({
+      data: {
+        entity: 'PRODUCT',
+        storeId: 'store1',
+        shopDomain: 'fake.myshopify.com',
+        tag: 'qa-import',
+        status: 'RUNNING',
+        found: 4,
+        submittedIds: ids4,
+        ops: {
+          create: [
+            { opIndex: 0, opCount: 2, status: 'COMPLETED', bulkOperationId: 'gid://shopify/BulkOperation/first', deleted: 2 },
+            { opIndex: 1, opCount: 2, status: 'PENDING', submitAttemptedAt: second.submitAttemptedAt ?? null },
+          ],
+        },
+      },
+    });
+    await prisma.storeLock.create({
+      data: {
+        storeId: 'store1',
+        ownerType: 'CLEANUP_RUN',
+        ownerId: run.id,
+        operation: 'a product cleanup',
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000),
+      },
+    });
+    return run;
+  }
+
+  it('cleanup op: relaunches a never-attempted op with its own slice, under its run\'s lock', async () => {
+    const run = await runWithOps({});
+
+    storesResolve = true;
+    const summary = await resumeStore(cleanupOpStore());
+
+    expect(summary).toMatchObject({ relaunched: 1, failed: 0 });
+    expect(deleteSlices).toEqual([ids4.slice(2)]);
+    expect(attemptSeenAtSubmit[0]).toBeInstanceOf(Date);
+    const ops = await cleanupOps(run.id);
+    expect(ops[1]).toMatchObject({ status: 'RUNNING', bulkOperationId: submitted[0] });
+    // Re-entrant: the run's own lock, not a second owner.
+    const lock = await prisma.storeLock.findUniqueOrThrow({ where: { storeId: 'store1' } });
+    expect(lock).toMatchObject({ ownerType: 'CLEANUP_RUN', ownerId: run.id });
+    expect((await prisma.cleanupRun.findUniqueOrThrow({ where: { id: run.id } })).status).toBe('RUNNING');
+  });
+
+  it('cleanup op: an attempted op is failed, the run rolled up, and the store kept', async () => {
+    const run = await runWithOps({ submitAttemptedAt: new Date() });
+
+    storesResolve = true;
+    const summary = await resumeStore(cleanupOpStore());
+
+    expect(summary).toMatchObject({ relaunched: 0, failed: 1 });
+    expect(submitted).toEqual([]);
+    const after = await prisma.cleanupRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after).toMatchObject({ status: 'FAILED', deleted: 2 });
+    expect(after.error).toContain('Interrupted and could not be resumed');
+    // Outcome unknown: the run reads as "FAILED while submitting", the store stays held.
+    expect(after.submitAttemptedAt).not.toBeNull();
+    expect(await prisma.storeLock.findUnique({ where: { storeId: 'store1' } })).not.toBeNull();
   });
 
   // ── THE CLAIM ─────────────────────────────────────────────────────────────

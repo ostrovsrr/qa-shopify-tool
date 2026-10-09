@@ -59,8 +59,16 @@ const { startCustomerImport, startBatchImport } = await import(
   '../../src/services/shopifyImport.service'
 );
 const { startCleanupRun } = await import('../../src/services/cleanupRun.service');
-const { acquireStoreLock, releaseStoreLock, StoreBusyError, busyStores, liveStoreLocks } =
-  await import('../../src/services/storeLock.service');
+const {
+  acquireStoreLock,
+  releaseStoreLock,
+  releaseShareIfDone,
+  shareOwner,
+  parseShareOwner,
+  StoreBusyError,
+  busyStores,
+  liveStoreLocks,
+} = await import('../../src/services/storeLock.service');
 type StoreLockOwner = import('../../src/services/storeLock.service').StoreLockOwner;
 
 // acquire must run inside a transaction: its advisory lock is transaction-scoped.
@@ -200,18 +208,22 @@ runIf('store busy-lock', () => {
 
     expect(batch).toMatchObject({ ok: true });
 
-    // Each JOB owns its own store's lock — the parent owns none, its storeId being
-    // legitimately NULL. If the lock ever collapsed to one-per-batch, the parallel
-    // import (the entire point of the products flow) would serialize.
+    // Each store's SHARE owns that store's lock — the parent owns none, its storeId
+    // being legitimately NULL. If the lock ever collapsed to one-per-batch, the
+    // parallel import (the entire point of the products flow) would serialize.
+    const parentId = (batch as { importRunId: string }).importRunId;
     const locks = await prisma.storeLock.findMany({ orderBy: { storeId: 'asc' } });
-    expect(locks.map((l) => l.storeId)).toEqual(['store1', 'store2']);
-    expect(locks.every((l) => l.ownerType === 'PRODUCT_IMPORT_JOB')).toBe(true);
+    expect(locks.map((l) => [l.storeId, l.ownerType, l.ownerId])).toEqual([
+      ['store1', 'PRODUCT_IMPORT_STORE_SHARE', shareOwner(parentId, 'store1')],
+      ['store2', 'PRODUCT_IMPORT_STORE_SHARE', shareOwner(parentId, 'store2')],
+    ]);
   });
 
-  // A repeated store id used to plan two jobs on ONE shop under ONE lock (the lock
-  // step dedupes, the plan did not). From API 2026-01 Shopify runs both bulk ops at
-  // once, so that was two half-imports interleaving on the same store.
-  it('a batch naming the same store twice plans ONE job for it (products)', async () => {
+  // A repeated store id used to plan two shares of ONE shop under ONE lock (the
+  // lock step dedupes, the plan did not), each sized as if it had the shop to
+  // itself. A store's share may run as several ops on purpose — but as ONE share,
+  // sized for a single store.
+  it('a batch naming the same store twice plans ONE share for it (products)', async () => {
     const uploadId = await seedUpload();
     const batch = await startBatchProductImport(uploadId, ['store1', 'store1']);
     expect(batch).toMatchObject({ ok: true });
@@ -220,11 +232,19 @@ runIf('store busy-lock', () => {
       where: { id: (batch as { importRunId: string }).importRunId },
       include: { batchJobs: true },
     });
-    expect(parent.batchJobs).toHaveLength(1);
-    expect(parent.batchJobs[0]).toMatchObject({ storeId: 'store1', batchCount: 1, productCount: 2 });
+    // Two products → two ops on store1 (one product each), never four.
+    expect(parent.batchJobs).toHaveLength(2);
+    expect(
+      parent.batchJobs.every((j) => j.storeId === 'store1' && j.batchCount === 2 && j.productCount === 1),
+    ).toBe(true);
+    const locks = await prisma.storeLock.findMany();
+    expect(locks).toHaveLength(1);
+    expect(locks[0].ownerType).toBe('PRODUCT_IMPORT_STORE_SHARE');
   });
 
-  it('a batch naming the same store twice plans ONE job for it (customers)', async () => {
+  // Customers split one store's share across several ops on purpose — but as ONE
+  // share of ONE store, sized for a single store, never as two shares of it.
+  it('a batch naming the same store twice plans ONE share for it (customers)', async () => {
     const validationId = await seedValidation();
     const batch = await startBatchImport(validationId, ['store1', 'store1']);
     expect(batch).toMatchObject({ ok: true });
@@ -233,8 +253,12 @@ runIf('store busy-lock', () => {
       where: { id: (batch as { importRunId: string }).importRunId },
       include: { batchJobs: true },
     });
+    // One row → one op; a doubled store id must not make that two.
     expect(parent.batchJobs).toHaveLength(1);
     expect(parent.batchJobs[0]).toMatchObject({ storeId: 'store1', batchCount: 1 });
+    const locks = await prisma.storeLock.findMany();
+    expect(locks).toHaveLength(1);
+    expect(locks[0].ownerType).toBe('IMPORT_STORE_SHARE');
   });
 
   it('an import into a DIFFERENT store is unaffected', async () => {
@@ -269,8 +293,14 @@ runIf('store busy-lock', () => {
     // transitions across the two flows plus cleanup, and forgetting one must not
     // wedge a store until the TTL expires. An acquirer that finds a lock held by an
     // already-terminal row simply takes it.
+    // The store is held by the run's share of it, so "the run finished" means every
+    // job of that share did.
     await prisma.productImportRun.update({
       where: { id: runId },
+      data: { status: 'COMPLETED' },
+    });
+    await prisma.productImportJob.updateMany({
+      where: { importRunId: runId },
       data: { status: 'COMPLETED' },
     });
     expect(await prisma.storeLock.findUnique({ where: { storeId: 'store1' } })).not.toBeNull();
@@ -435,6 +465,114 @@ runIf('store busy-lock', () => {
     // No submitAttemptedAt: provably nothing reached Shopify.
     await cleanupHolder({ status: 'FAILED' });
     await expect(lockStore('store1', anImport())).resolves.toBeUndefined();
+  });
+
+  // ── a store's SHARE of a batch run: several sibling jobs, ONE lock ────────
+  // Up to five jobs of one batch run on the same store at once. If the first to
+  // finish released the store, its siblings would still be running on an "idle" store.
+  async function seedShare(
+    flow: 'customer' | 'product',
+    jobs: { status: string; submitAttemptedAt?: Date; bulkOperationId?: string }[],
+  ) {
+    const parentId = uuidv4();
+    const base = { storeId: 'store1', shopDomain: 'fake.myshopify.com', batchCount: jobs.length };
+    if (flow === 'customer') {
+      const validationId = await seedValidation();
+      await prisma.importRun.create({
+        data: { id: parentId, validationId, shopDomain: 'fake.myshopify.com', status: 'RUNNING' },
+      });
+      for (const [i, j] of jobs.entries()) {
+        await prisma.importBatchJob.create({
+          data: { id: uuidv4(), importRunId: parentId, batchIndex: i, ...base, ...j },
+        });
+      }
+    } else {
+      const uploadId = await seedUpload();
+      await prisma.productImportRun.create({
+        data: { id: parentId, uploadId, shopDomain: 'fake.myshopify.com', status: 'RUNNING' },
+      });
+      for (const [i, j] of jobs.entries()) {
+        await prisma.productImportJob.create({
+          data: { id: uuidv4(), importRunId: parentId, batchIndex: i, ...base, ...j },
+        });
+      }
+    }
+    const ownerType =
+      flow === 'customer' ? ('IMPORT_STORE_SHARE' as const) : ('PRODUCT_IMPORT_STORE_SHARE' as const);
+    await lockStore('store1', {
+      ownerType,
+      ownerId: shareOwner(parentId, 'store1'),
+      operation: 'an import',
+    });
+    return parentId;
+  }
+
+  describe.each(['customer', 'product'] as const)('store share (%s)', (flow) => {
+    const lockHeld = async () => (await prisma.storeLock.findUnique({ where: { storeId: 'store1' } })) !== null;
+    const jobsOf = (parentId: string) =>
+      flow === 'customer'
+        ? prisma.importBatchJob.findMany({ where: { importRunId: parentId }, orderBy: { batchIndex: 'asc' } })
+        : prisma.productImportJob.findMany({ where: { importRunId: parentId }, orderBy: { batchIndex: 'asc' } });
+    const setStatus = (id: string, status: string) =>
+      flow === 'customer'
+        ? prisma.importBatchJob.update({ where: { id }, data: { status } })
+        : prisma.productImportJob.update({ where: { id }, data: { status } });
+
+    it('is live while ANY sibling job is non-terminal', async () => {
+      await seedShare(flow, [{ status: 'COMPLETED' }, { status: 'RUNNING' }, { status: 'PENDING' }]);
+      expect((await busyStores()).map((b) => b.storeId)).toEqual(['store1']);
+      await expect(lockStore('store1', anImport())).rejects.toThrow(StoreBusyError);
+    });
+
+    it('is outcome-unknown when a sibling FAILED mid-submit and the rest are terminal', async () => {
+      await seedShare(flow, [
+        { status: 'COMPLETED', bulkOperationId: 'gid://x/1' },
+        { status: 'FAILED', submitAttemptedAt: new Date() },
+      ]);
+      await expect(lockStore('store1', anImport())).rejects.toThrow(/may still be busy/);
+    });
+
+    it('is finished (stealable) when every job is terminal and none is ambiguous', async () => {
+      await seedShare(flow, [{ status: 'COMPLETED' }, { status: 'FAILED' }]);
+      expect(await busyStores()).toEqual([]);
+      await expect(lockStore('store1', anImport())).resolves.toBeUndefined();
+    });
+
+    it('releaseShareIfDone refuses while a sibling runs, then releases after the last', async () => {
+      const parentId = await seedShare(flow, [{ status: 'RUNNING' }, { status: 'RUNNING' }]);
+      const [a, b] = await jobsOf(parentId);
+
+      await setStatus(a.id, 'COMPLETED');
+      expect(await releaseShareIfDone(flow, parentId, 'store1')).toBe(false);
+      expect(await lockHeld()).toBe(true);
+
+      await setStatus(b.id, 'COMPLETED');
+      expect(await releaseShareIfDone(flow, parentId, 'store1')).toBe(true);
+      expect(await lockHeld()).toBe(false);
+    });
+
+    it('releaseShareIfDone refuses with an outcome-unknown sibling', async () => {
+      const parentId = await seedShare(flow, [
+        { status: 'COMPLETED' },
+        { status: 'FAILED', submitAttemptedAt: new Date() },
+      ]);
+      expect(await releaseShareIfDone(flow, parentId, 'store1')).toBe(false);
+      expect(await lockHeld()).toBe(true);
+    });
+  });
+
+  it('a share with no jobs is judged finished', async () => {
+    await lockStore('store1', {
+      ownerType: 'IMPORT_STORE_SHARE',
+      ownerId: shareOwner(uuidv4(), 'store1'),
+      operation: 'an import',
+    });
+    expect(await busyStores()).toEqual([]);
+  });
+
+  it('parseShareOwner round-trips, even for a store id containing a colon', () => {
+    const run = uuidv4();
+    expect(parseShareOwner(shareOwner(run, 'a:b'))).toEqual({ parentRunId: run, storeId: 'a:b' });
   });
 
   // ── liveStoreLocks: one query per owner table, not one per lock ───────────

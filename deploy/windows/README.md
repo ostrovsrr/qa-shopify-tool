@@ -109,6 +109,11 @@ That is forced: Windows will not let `npm ci` replace
 has that engine mapped, so the processes must stop before the build, not after it.
 Tell people before you run it.
 
+Never restart instances one by one onto new code: every instance must come up on
+the same build together (`Deploy-QaTool.ps1` already does this), because an instance
+still on older code reads a store-lock owner type it does not know (such as
+`IMPORT_STORE_SHARE`) as a finished owner and would take that store from a live run.
+
 ## Ports
 
 | Instance | Port | Owner | URL for that SE |

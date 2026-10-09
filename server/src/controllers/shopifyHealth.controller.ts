@@ -7,7 +7,11 @@ import {
 } from '../services/shopifyClient';
 import { getStoreCustomerStats, QA_IMPORT_TAG } from '../services/shopifyCleanup.service';
 import { getStoreProductStats } from '../services/productCleanup.service';
-import { reconcileCleanupRun, startCleanupRun } from '../services/cleanupRun.service';
+import {
+  reconcileCleanupRun,
+  startCleanupRun,
+  toCleanupRunView,
+} from '../services/cleanupRun.service';
 import { recordAction } from '../services/actionLog.service';
 import { busyStores } from '../services/storeLock.service';
 
@@ -134,7 +138,7 @@ export async function cleanupQaProductsHandler(
       storeId: req.params.storeId,
       detail: { tag: QA_IMPORT_TAG, cleanupRunId: run.id, found: run.found },
     });
-    res.status(202).json(run);
+    res.status(202).json(toCleanupRunView(run));
   } catch (err) {
     if (err instanceof ShopifyConfigError) {
       res.status(503).json({ error: err.message });
@@ -164,7 +168,7 @@ export async function cleanupQaCustomersHandler(
       storeId: req.params.storeId,
       detail: { tag: QA_IMPORT_TAG, cleanupRunId: run.id, found: run.found },
     });
-    res.status(202).json(run);
+    res.status(202).json(toCleanupRunView(run));
   } catch (err) {
     if (err instanceof ShopifyConfigError) {
       res.status(503).json({ error: err.message });
@@ -192,7 +196,7 @@ export async function getCleanupRunHandler(
       res.status(404).json({ error: 'Cleanup run not found.' });
       return;
     }
-    res.json(run);
+    res.json(toCleanupRunView(run));
   } catch (err) {
     if (err instanceof ShopifyConfigError) {
       res.status(503).json({ error: err.message });

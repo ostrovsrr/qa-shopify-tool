@@ -8,6 +8,7 @@ import {
   fetchBulkOperationState,
   resolveLineNumberBase,
   runBulkMutation,
+  splitIntoBatches,
 } from '../src/services/shopifyBulk';
 import {
   ShopifyApiError,
@@ -256,5 +257,28 @@ describe('handlesInOrder', () => {
     );
     expect(handlesInOrder(data.map((d) => d.Handle ?? null))).toEqual(groups.map((g) => g.handle));
     expect(handlesInOrder(['alpha', null, 'beta'])).toEqual(['alpha', 'beta']);
+  });
+
+  // The launch splits the GROUPS into stores × k slices; finalizeJob recomputes a
+  // job's refs by splitting the flat Handle list by the same count. Products span
+  // a varying number of rows, so this only holds because the split counts PRODUCTS,
+  // never rows — a row-based split would cut a group and shift every later ref.
+  it('splitting the Handles agrees with splitting the groups, for every slice count', () => {
+    const data: Record<string, string>[] = [];
+    // 13 products of 1-4 rows each (variants / images continue the group).
+    for (let p = 0; p < 13; p++) {
+      data.push({ Handle: `h${p}`, Title: `P${p}` });
+      for (let extra = 0; extra < p % 4; extra++) {
+        data.push(extra % 2 ? { Handle: '', 'Image Src': `https://example.com/${p}-${extra}.png` } : { Handle: `h${p}` });
+      }
+    }
+    const groups = groupByHandle(
+      data.map((d, i) => ({ rowNumber: i + 1, original: d, normalized: normalizeRecord(d) })),
+    );
+    const handles = handlesInOrder(data.map((d) => d.Handle ?? null));
+    for (let n = 1; n <= 20; n++) {
+      const launched = splitIntoBatches(groups, n).map((slice) => slice.map((g) => g.handle));
+      expect(splitIntoBatches(handles, n)).toEqual(launched);
+    }
   });
 });
