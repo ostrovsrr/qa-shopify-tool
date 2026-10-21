@@ -32,6 +32,7 @@ const validateWithMappingSchema = z.object({
   columnMapping: z.record(z.string(), z.string()),
   heliosMigratedTag: z.boolean().default(true),
   moveDuplicatesToNotes: z.boolean().default(false),
+  subaddressDuplicateEmails: z.boolean().default(false),
   mergeMatchingDuplicates: z.boolean().default(false),
   // Both default OFF: each one edits the data the operator is about to hand to
   // Shopify, so it happens only when they ask for it.
@@ -78,6 +79,7 @@ const previewEffectsSchema = z.object({
   columnMapping: z.record(z.string(), z.string()),
   heliosMigratedTag: z.boolean().default(false),
   moveDuplicatesToNotes: z.boolean().default(false),
+  subaddressDuplicateEmails: z.boolean().default(false),
   mergeMatchingDuplicates: z.boolean().default(false),
   moveInvalidContactToNotes: z.boolean().default(false),
   fillMissingContactName: z.boolean().default(false),
@@ -130,6 +132,7 @@ export async function validateWithMappingHandler(
       {
         heliosMigratedTag: parsed.data.heliosMigratedTag,
         moveDuplicatesToNotes: parsed.data.moveDuplicatesToNotes,
+        subaddressDuplicateEmails: parsed.data.subaddressDuplicateEmails,
         mergeMatchingDuplicates: parsed.data.mergeMatchingDuplicates,
         moveInvalidContactToNotes: parsed.data.moveInvalidContactToNotes,
         fillMissingContactName: parsed.data.fillMissingContactName,

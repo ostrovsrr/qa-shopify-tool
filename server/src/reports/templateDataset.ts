@@ -17,7 +17,8 @@ export interface DuplicateGroups {
 
 /** The final customer dataset a validation run produces: column mapping,
  *  auto-fixes, optional same-person merging, optional move-invalid-to-Notes,
- *  optional move-duplicates-to-Notes, optional placeholder names, and the
+ *  optional move-duplicates-to-Notes, optional sub-addressing of duplicate
+ *  emails (name+dupN@domain), optional placeholder names, and the
  *  HeliosMigrated tag all applied to each surviving row's record.
  *  Both the Excel "Shopify Template" sheet and the test-store import build from
  *  this, so what gets imported is exactly what the template shows. */
@@ -32,6 +33,9 @@ export interface TemplateDataset {
   invalidMoved: Set<number>;
   /** Rows whose DUPLICATED Email/Phone was stripped into Note. */
   duplicatesMoved: Set<number>;
+  /** Rows whose DUPLICATED Email was rewritten to a unique sub-address
+   *  (name+dupN@domain) instead of being stripped. */
+  duplicatesSubaddressed: Set<number>;
   /** Rows given a placeholder First Name so Shopify would accept them. */
   namesFilled: Set<number>;
   /** Blank lines removed from the dataset entirely (not customers at all). */
@@ -44,6 +48,7 @@ export interface TemplateDatasetOptions {
   autoFixes?: AutoFixEntry[];
   heliosMigratedTag?: boolean;
   moveDuplicatesToNotes?: boolean;
+  subaddressDuplicateEmails?: boolean;
   mergeMatchingDuplicates?: boolean;
   moveInvalidContactToNotes?: boolean;
   fillMissingContactName?: boolean;
@@ -104,6 +109,52 @@ function buildDuplicateGroups(
   return { groups, repeats };
 }
 
+/** `local@domain` → `local+dupN@domain`, keeping the local part (including any
+ *  existing +tag) and the case exactly as written. */
+function subaddress(email: string, n: number): string {
+  const at = email.lastIndexOf('@');
+  return `${email.slice(0, at)}+dup${n}${email.slice(at)}`;
+}
+
+/**
+ * The sub-address each email repeat (every group row but the keeper — the same
+ * keeper moveDuplicatesToNotes picks) would get, in row order: +dup1, +dup2, ...
+ * per group, bumped past any value that would collide (case-insensitively) with
+ * an email already in the dataset or one assigned earlier. `null` means the new
+ * address would fail emailProblem (local part or total too long), and the row
+ * falls back to having its email moved to Note. Pure: same rows, same answer —
+ * the import's reconcile rebuilds this to map result lines back to CSV rows.
+ */
+function assignSubaddresses(
+  templateRows: TemplateRow[],
+  emailDupes: DuplicateGroups,
+): Map<number, string | null> {
+  const taken = new Set<string>();
+  for (const row of templateRows) {
+    const email = (row.record['Email'] ?? '').trim().toLowerCase();
+    if (email) taken.add(email);
+  }
+  const nextByGroup = new Map<number, number>();
+  const assigned = new Map<number, string | null>();
+  for (const row of templateRows) {
+    if (!emailDupes.repeats.has(row.rowNumber)) continue;
+    const email = (row.record['Email'] ?? '').trim();
+    if (!email) continue;
+    const group = emailDupes.groups.get(row.rowNumber)!;
+    let n = nextByGroup.get(group) ?? 1;
+    while (taken.has(subaddress(email, n).toLowerCase())) n++;
+    nextByGroup.set(group, n + 1);
+    const candidate = subaddress(email, n);
+    if (emailProblem(candidate)) {
+      assigned.set(row.rowNumber, null);
+      continue;
+    }
+    taken.add(candidate.toLowerCase());
+    assigned.set(row.rowNumber, candidate);
+  }
+  return assigned;
+}
+
 /** The order Postgres jsonb stores object keys in: shorter first (by UTF-8 byte
  *  length), then bytewise. A mapping read back from the database is already in
  *  this order, so sorting by it gives every caller the same order whether its
@@ -120,6 +171,7 @@ export function buildTemplateDataset(options: TemplateDatasetOptions): TemplateD
     autoFixes = [],
     heliosMigratedTag = false,
     moveDuplicatesToNotes = false,
+    subaddressDuplicateEmails = false,
     mergeMatchingDuplicates = false,
     moveInvalidContactToNotes = false,
     fillMissingContactName = false,
@@ -245,6 +297,11 @@ export function buildTemplateDataset(options: TemplateDatasetOptions): TemplateD
   );
   const phoneDupes = buildDuplicateGroups(templateRows, completeness, 'Phone', canonicalPhone);
 
+  const subaddresses = subaddressDuplicateEmails
+    ? assignSubaddresses(templateRows, emailDupes)
+    : new Map<number, string | null>();
+  const duplicatesSubaddressed = new Set<number>();
+
   // Apply the row-level transformations directly to the records so every
   // consumer (Excel template sheet, test-store import) sees the same final
   // dataset.
@@ -256,31 +313,49 @@ export function buildTemplateDataset(options: TemplateDatasetOptions): TemplateD
     // customer instead of rejecting it as "taken". Only the duplicated field
     // is stripped — a row that's only an email duplicate keeps its phone, and
     // vice versa.
-    if (moveDuplicatesToNotes) {
+    //
+    // With subaddressDuplicateEmails on, the EMAIL half is handled by giving each
+    // repeat a unique sub-address instead (Shopify accepts name+dup1@domain as a
+    // distinct customer, and mail to it still reaches the original inbox). A
+    // repeat whose sub-address would itself be invalid (too long) falls back to
+    // the Note move, whether or not moveDuplicatesToNotes is on. Phones cannot be
+    // sub-addressed (Shopify normalizes them to E.164 and still says "taken"), so
+    // they stay with moveDuplicatesToNotes alone.
+    if (moveDuplicatesToNotes || subaddressDuplicateEmails) {
       const moved: string[] = [];
       const dupTags: string[] = [];
+      let noteMoved = false;
       if (emailDupes.repeats.has(row.rowNumber)) {
         const email = (record['Email'] ?? '').trim();
-        if (email) {
+        const sub = subaddresses.get(row.rowNumber);
+        if (email && subaddressDuplicateEmails && sub) {
+          moved.push(`Duplicate email: ${email}`);
+          dupTags.push('DuplicateEmailSubaddressed');
+          record['Email'] = sub;
+          duplicatesSubaddressed.add(row.rowNumber);
+        } else if (email) {
+          // Plain move-to-Note, or the sub-address fallback.
           moved.push(`Duplicate email: ${email}`);
           dupTags.push('DuplicateEmailNotes');
           record['Email'] = '';
+          noteMoved = true;
         }
       }
-      if (phoneDupes.repeats.has(row.rowNumber)) {
+      if (moveDuplicatesToNotes && phoneDupes.repeats.has(row.rowNumber)) {
         const phone = (record['Phone'] ?? '').trim();
         if (phone) {
           moved.push(`Duplicate phone: ${phone}`);
           dupTags.push('DuplicatePhoneNotes');
           record['Phone'] = '';
+          noteMoved = true;
         }
       }
       if (moved.length > 0) {
         appendNote(record, moved);
-        // Tag the stripped rows (never the keeper) so they're filterable in
+        // Tag the changed rows (never the keeper) so they're filterable in
         // Shopify admin after import
         appendTags(record, dupTags);
-        duplicatesMoved.add(row.rowNumber);
+        if (noteMoved) duplicatesMoved.add(row.rowNumber);
       }
     }
 
@@ -326,6 +401,7 @@ export function buildTemplateDataset(options: TemplateDatasetOptions): TemplateD
     fixMap,
     invalidMoved,
     duplicatesMoved,
+    duplicatesSubaddressed,
     namesFilled,
     droppedBlank,
   };

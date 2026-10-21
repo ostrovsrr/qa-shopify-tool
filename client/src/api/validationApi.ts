@@ -32,6 +32,7 @@ export async function previewCsv(file: File): Promise<CsvPreview> {
 export interface TemplateFlags {
   heliosMigratedTag: boolean;
   moveDuplicatesToNotes: boolean;
+  subaddressDuplicateEmails: boolean;
   mergeMatchingDuplicates: boolean;
   moveInvalidContactToNotes: boolean;
   fillMissingContactName: boolean;
@@ -43,7 +44,8 @@ export type PreviewableFlag =
   | 'moveInvalidContactToNotes'
   | 'fillMissingContactName'
   | 'mergeMatchingDuplicates'
-  | 'moveDuplicatesToNotes';
+  | 'moveDuplicatesToNotes'
+  | 'subaddressDuplicateEmails';
 
 export interface EffectsPreview {
   current: ValidationSummary;

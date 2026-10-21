@@ -51,6 +51,7 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
   });
   const [heliosMigratedTag, setHeliosMigratedTag] = useState(true);
   const [moveDuplicatesToNotes, setMoveDuplicatesToNotes] = useState(false);
+  const [subaddressDuplicateEmails, setSubaddressDuplicateEmails] = useState(false);
   const [mergeMatchingDuplicates, setMergeMatchingDuplicates] = useState(false);
   // Both off by default: each one edits the data the operator is about to hand
   // to Shopify, so it happens only when they ask for it.
@@ -74,6 +75,7 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
   const flags: TemplateFlags = {
     heliosMigratedTag,
     moveDuplicatesToNotes,
+    subaddressDuplicateEmails,
     mergeMatchingDuplicates,
     moveInvalidContactToNotes,
     fillMissingContactName,
@@ -182,6 +184,7 @@ export function ColumnMappingScreen({ preview, onValidate, onBack, loading }: Pr
         set={{
           heliosMigratedTag: setHeliosMigratedTag,
           moveDuplicatesToNotes: setMoveDuplicatesToNotes,
+          subaddressDuplicateEmails: setSubaddressDuplicateEmails,
           mergeMatchingDuplicates: setMergeMatchingDuplicates,
           moveInvalidContactToNotes: setMoveInvalidContactToNotes,
           fillMissingContactName: setFillMissingContactName,

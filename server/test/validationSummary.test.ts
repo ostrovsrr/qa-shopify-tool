@@ -115,4 +115,29 @@ describe('validation summary', () => {
     expect(summary.blocked).toBe(1);
     expect(summary.errorCount).toBe(2);
   });
+
+  it('counts a sub-addressed repeat as fixed and keeps the invariant', () => {
+    const rows = makeRows([
+      { 'First Name': 'A', Email: 'dup@example.com', Phone: '+1 613 555 0104' }, // row 2, keeper
+      { 'First Name': 'B', Email: 'DUP@example.com', Phone: '+1 613 555 0104' }, // row 3
+      { 'First Name': 'C', Email: 'dup@example.com' }, // row 4
+      { 'First Name': 'D', Email: 'solo@example.com', 'Default Address Country Code': 'NOPE' }, // row 5
+    ]);
+    const { summary, issues } = buildValidationOutcome(rows, {}, { subaddressDuplicateEmails: true });
+    // The email repeats no longer collide, so the rule has nothing to report.
+    expect(issues.some((i) => i.issueType === 'DuplicateEmail')).toBe(false);
+    // Row 3 still shares its phone with row 2 (phones are not sub-addressed), so
+    // BLOCKED WINS for it; row 4 is sub-addressed and fixed; row 5 is blocked.
+    expect(summary).toMatchObject({ totalRows: 4, ready: 1, fixed: 1, blocked: 2, removed: 0 });
+    expect(summary.fixedDuplicates).toBe(1);
+    expect(sums(summary)).toBe(true);
+
+    const both = buildValidationOutcome(rows, {}, {
+      subaddressDuplicateEmails: true,
+      moveDuplicatesToNotes: true,
+    }).summary;
+    expect(both).toMatchObject({ ready: 1, fixed: 2, blocked: 1 });
+    expect(both.fixedDuplicates).toBe(2);
+    expect(sums(both)).toBe(true);
+  });
 });

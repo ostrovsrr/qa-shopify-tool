@@ -57,6 +57,7 @@ export async function streamExcelReport(
     columnMapping: unknown;
     heliosMigratedTag: boolean;
     moveDuplicatesToNotes: boolean;
+    subaddressDuplicateEmails: boolean;
     mergeMatchingDuplicates: boolean;
     moveInvalidContactToNotes: boolean;
     fillMissingContactName: boolean;
@@ -88,6 +89,7 @@ export async function streamExcelReport(
   const flags: CustomerTemplateFlags = {
     heliosMigratedTag: runData.heliosMigratedTag ?? false,
     moveDuplicatesToNotes: runData.moveDuplicatesToNotes ?? false,
+    subaddressDuplicateEmails: runData.subaddressDuplicateEmails ?? false,
     mergeMatchingDuplicates: runData.mergeMatchingDuplicates ?? false,
     moveInvalidContactToNotes: runData.moveInvalidContactToNotes ?? false,
     fillMissingContactName: runData.fillMissingContactName ?? false,
@@ -217,6 +219,7 @@ function addShopifyTemplateSheet(
   const {
     heliosMigratedTag = false,
     moveDuplicatesToNotes = false,
+    subaddressDuplicateEmails = false,
     mergeMatchingDuplicates = false,
     moveInvalidContactToNotes = false,
     fillMissingContactName = false,
@@ -249,6 +252,7 @@ function addShopifyTemplateSheet(
     anyMerges,
     fixMap,
     invalidMoved,
+    duplicatesSubaddressed,
     namesFilled,
   } = buildTemplateDataset({
     originalRows,
@@ -256,6 +260,7 @@ function addShopifyTemplateSheet(
     autoFixes,
     heliosMigratedTag,
     moveDuplicatesToNotes,
+    subaddressDuplicateEmails,
     mergeMatchingDuplicates,
     moveInvalidContactToNotes,
     fillMissingContactName,
@@ -274,7 +279,7 @@ function addShopifyTemplateSheet(
   // column, or the sheet would hide a value the import is going to send. The
   // placeholder name needs First Name in particular — without this the operator
   // hands over a file with no sign of it while the import sends it anyway.
-  if (invalidMoved.size > 0) {
+  if (invalidMoved.size > 0 || duplicatesSubaddressed.size > 0) {
     if (!effectiveColumns.includes('Note')) effectiveColumns.push('Note');
     if (!effectiveColumns.includes('Tags')) effectiveColumns.push('Tags');
   }

@@ -87,6 +87,7 @@ interface ImportSourceRun {
   originalRows: OriginalRowRecord[];
   columnMapping: unknown;
   moveDuplicatesToNotes?: boolean;
+  subaddressDuplicateEmails?: boolean;
   mergeMatchingDuplicates?: boolean;
   moveInvalidContactToNotes?: boolean;
   fillMissingContactName?: boolean;
@@ -104,6 +105,7 @@ function buildImportRows(run: ImportSourceRun): TemplateRow[] {
     originalRows: run.originalRows,
     columnMapping: run.columnMapping as Record<string, string> | null,
     moveDuplicatesToNotes: run.moveDuplicatesToNotes ?? false,
+    subaddressDuplicateEmails: run.subaddressDuplicateEmails ?? false,
     mergeMatchingDuplicates: run.mergeMatchingDuplicates ?? false,
     moveInvalidContactToNotes: run.moveInvalidContactToNotes ?? false,
     fillMissingContactName: run.fillMissingContactName ?? false,
