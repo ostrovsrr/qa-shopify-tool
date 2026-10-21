@@ -58,4 +58,17 @@ describe('per-option effect arithmetic', () => {
       expect(changed, `${flag} had no effect on the fixture`).toBe(true);
     }
   });
+
+  it('subaddressDuplicateEmails is previewable and rescues the email repeat', () => {
+    expect(PREVIEWABLE_FLAGS).toContain('subaddressDuplicateEmails');
+    const dupRows = () =>
+      makeRows([
+        { 'First Name': 'Ann', Email: 'ann@example.com' },
+        { 'First Name': 'Bo', Email: 'ANN@example.com' },
+      ]);
+    const off = buildValidationOutcome(dupRows(), {}).summary;
+    const on = buildValidationOutcome(dupRows(), {}, { subaddressDuplicateEmails: true }).summary;
+    expect(importable(on) - importable(off)).toBe(1);
+    expect(on).toMatchObject({ ready: 1, fixed: 1, blocked: 0 });
+  });
 });

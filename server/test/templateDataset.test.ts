@@ -337,3 +337,139 @@ describe('buildTemplateDataset — both cleanup flags together', () => {
     expect(a.rows.map((r) => r.record)).toEqual(b.rows.map((r) => r.record));
   });
 });
+
+describe('buildTemplateDataset — subaddressDuplicateEmails', () => {
+  const email = (rows: { rowNumber: number; record: Record<string, string> }[], n: number) =>
+    rows.find((r) => r.rowNumber === n)!.record['Email'];
+
+  it('gives each repeat +dup1, +dup2 in row order and keeps the original in Note', () => {
+    const { rows, duplicatesSubaddressed, duplicatesMoved } = buildTemplateDataset({
+      originalRows: [
+        // Row 3 is the most filled → keeper, whatever its position.
+        orig(2, { 'First Name': 'A', Email: 'Pat.Lee@Example.com', Note: '' }),
+        orig(3, { 'First Name': 'B', 'Last Name': 'Lee', Email: 'pat.lee@example.com', Note: 'vip' }),
+        orig(4, { 'First Name': 'C', Email: 'PAT.LEE@example.com', Note: '' }),
+      ],
+      subaddressDuplicateEmails: true,
+    });
+    expect(email(rows, 3)).toBe('pat.lee@example.com');
+    // Original local part and case preserved.
+    expect(email(rows, 2)).toBe('Pat.Lee+dup1@Example.com');
+    expect(email(rows, 4)).toBe('PAT.LEE+dup2@example.com');
+    const two = rows.find((r) => r.rowNumber === 2)!.record;
+    expect(two['Note']).toBe('Duplicate email: Pat.Lee@Example.com');
+    expect(two['Tags']).toBe('DuplicateEmailSubaddressed');
+    expect(rows.find((r) => r.rowNumber === 3)!.record['Tags']).toBeUndefined();
+    expect([...duplicatesSubaddressed]).toEqual([2, 4]);
+    expect(duplicatesMoved.size).toBe(0);
+  });
+
+  it('keeps an existing +tag and appends after it', () => {
+    const { rows } = buildTemplateDataset({
+      originalRows: [
+        orig(2, { 'First Name': 'A', 'Last Name': 'Z', Email: 'a+shop@example.com' }),
+        orig(3, { 'First Name': 'B', Email: 'a+shop@example.com' }),
+      ],
+      subaddressDuplicateEmails: true,
+    });
+    expect(email(rows, 3)).toBe('a+shop+dup1@example.com');
+  });
+
+  it('bumps N past an address already in the file or already assigned', () => {
+    const { rows } = buildTemplateDataset({
+      originalRows: [
+        orig(2, { 'First Name': 'A', 'Last Name': 'Z', Email: 'sam@example.com' }),
+        orig(3, { 'First Name': 'B', Email: 'sam@example.com' }),
+        orig(4, { 'First Name': 'C', Email: 'SAM+DUP1@example.com' }), // taken, case-insensitively
+        orig(5, { 'First Name': 'D', Email: 'sam@example.com' }),
+      ],
+      subaddressDuplicateEmails: true,
+    });
+    expect(email(rows, 3)).toBe('sam+dup2@example.com');
+    expect(email(rows, 4)).toBe('SAM+DUP1@example.com');
+    expect(email(rows, 5)).toBe('sam+dup3@example.com');
+    const all = rows.map((r) => r.record['Email'].toLowerCase());
+    expect(new Set(all).size).toBe(all.length);
+  });
+
+  it('falls back to moving the email to Note when the sub-address would be too long', () => {
+    const longLocal = 'x'.repeat(125); // +dup1 makes it 130 — over the 129 limit
+    const { rows, duplicatesMoved, duplicatesSubaddressed } = buildTemplateDataset({
+      originalRows: [
+        orig(2, { 'First Name': 'A', 'Last Name': 'Z', Email: `${longLocal}@example.com` }),
+        orig(3, { 'First Name': 'B', Email: `${longLocal}@example.com` }),
+      ],
+      subaddressDuplicateEmails: true, // moveDuplicatesToNotes deliberately OFF
+    });
+    const three = rows.find((r) => r.rowNumber === 3)!.record;
+    expect(three['Email']).toBe('');
+    expect(three['Note']).toBe(`Duplicate email: ${longLocal}@example.com`);
+    expect(three['Tags']).toBe('DuplicateEmailNotes');
+    expect([...duplicatesMoved]).toEqual([3]);
+    expect(duplicatesSubaddressed.size).toBe(0);
+  });
+
+  it('with only sub-addressing on, phone duplicates are left alone', () => {
+    const { rows } = buildTemplateDataset({
+      originalRows: [
+        orig(2, { 'First Name': 'A', 'Last Name': 'Z', Email: 'kim@example.com', Phone: '+16135550104' }),
+        orig(3, { 'First Name': 'B', Email: 'kim@example.com', Phone: '+16135550104' }),
+      ],
+      subaddressDuplicateEmails: true,
+    });
+    const three = rows.find((r) => r.rowNumber === 3)!.record;
+    expect(three['Email']).toBe('kim+dup1@example.com');
+    expect(three['Phone']).toBe('+16135550104');
+    expect(three['Tags']).toBe('DuplicateEmailSubaddressed');
+  });
+
+  it('with both options on, emails are sub-addressed and phones moved to Note', () => {
+    const { rows, duplicatesMoved, duplicatesSubaddressed } = buildTemplateDataset({
+      originalRows: [
+        orig(2, { 'First Name': 'A', 'Last Name': 'Z', Email: 'kim@example.com', Phone: '+16135550104' }),
+        orig(3, { 'First Name': 'B', Email: 'kim@example.com', Phone: '+16135550104' }),
+      ],
+      subaddressDuplicateEmails: true,
+      moveDuplicatesToNotes: true,
+    });
+    const three = rows.find((r) => r.rowNumber === 3)!.record;
+    expect(three['Email']).toBe('kim+dup1@example.com');
+    expect(three['Phone']).toBe('');
+    expect(three['Note']).toBe('Duplicate email: kim@example.com | Duplicate phone: +16135550104');
+    expect(three['Tags']).toBe('DuplicateEmailSubaddressed,DuplicatePhoneNotes');
+    expect([...duplicatesSubaddressed]).toEqual([3]);
+    expect([...duplicatesMoved]).toEqual([3]);
+  });
+
+  it('runs after the invalid strip: a cleared invalid email forms no group', () => {
+    const { rows, duplicatesSubaddressed } = buildTemplateDataset({
+      originalRows: [
+        orig(2, { 'First Name': 'A', Email: 'bad..x@example.com' }),
+        orig(3, { 'First Name': 'B', Email: 'bad..x@example.com' }),
+      ],
+      subaddressDuplicateEmails: true,
+      moveInvalidContactToNotes: true,
+    });
+    expect(rows.every((r) => r.record['Email'] === '')).toBe(true);
+    expect(duplicatesSubaddressed.size).toBe(0);
+  });
+
+  it('is deterministic: two runs over the same input produce identical rows', () => {
+    const opts = {
+      originalRows: [
+        orig(2, { 'First Name': 'A', Email: 'lee@example.com' }),
+        orig(3, { 'First Name': 'B', Email: 'LEE@example.com' }),
+        orig(4, { 'First Name': 'C', Email: 'lee+dup1@example.com' }),
+        orig(5, { 'First Name': 'D', Email: 'lee@example.com' }),
+      ],
+      subaddressDuplicateEmails: true,
+      moveDuplicatesToNotes: true,
+      fillMissingContactName: true,
+    };
+    const a = buildTemplateDataset(opts);
+    const b = buildTemplateDataset(opts);
+    expect(a.rows.map((r) => r.record)).toEqual(b.rows.map((r) => r.record));
+    expect([...a.duplicatesSubaddressed]).toEqual([...b.duplicatesSubaddressed]);
+    expect(email(a.rows, 3)).toBe('LEE+dup2@example.com');
+  });
+});

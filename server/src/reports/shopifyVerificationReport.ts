@@ -132,6 +132,7 @@ type SentRun = {
   originalRows: OriginalRow[];
   columnMapping: unknown;
   moveDuplicatesToNotes?: boolean | null;
+  subaddressDuplicateEmails?: boolean | null;
   mergeMatchingDuplicates?: boolean | null;
   moveInvalidContactToNotes?: boolean | null;
   fillMissingContactName?: boolean | null;
@@ -145,6 +146,7 @@ function sentDataset(run: SentRun): TemplateDataset {
     originalRows: run.originalRows,
     columnMapping: run.columnMapping as Record<string, string> | null,
     moveDuplicatesToNotes: run.moveDuplicatesToNotes ?? false,
+    subaddressDuplicateEmails: run.subaddressDuplicateEmails ?? false,
     mergeMatchingDuplicates: run.mergeMatchingDuplicates ?? false,
     moveInvalidContactToNotes: run.moveInvalidContactToNotes ?? false,
     fillMissingContactName: run.fillMissingContactName ?? false,
@@ -177,6 +179,7 @@ export function notImportedReasons(run: {
   originalRows: OriginalRow[];
   columnMapping: unknown;
   moveDuplicatesToNotes?: boolean | null;
+  subaddressDuplicateEmails?: boolean | null;
   mergeMatchingDuplicates?: boolean | null;
   moveInvalidContactToNotes?: boolean | null;
   fillMissingContactName?: boolean | null;
@@ -340,7 +343,7 @@ function addShopifyTemplateSheet(
   const ensure = (...cols: string[]) => {
     for (const col of cols) if (!shopifyColumns.includes(col)) shopifyColumns.push(col);
   };
-  if (sent.invalidMoved.size > 0 || sent.duplicatesMoved.size > 0) ensure('Note', 'Tags');
+  if (sent.invalidMoved.size > 0 || sent.duplicatesMoved.size > 0 || sent.duplicatesSubaddressed.size > 0) ensure('Note', 'Tags');
   if (sent.namesFilled.size > 0) ensure('First Name', 'Tags');
 
   // "Keep" columns pass through as trailing columns under their original names

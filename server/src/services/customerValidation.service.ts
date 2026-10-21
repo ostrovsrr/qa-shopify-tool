@@ -25,6 +25,7 @@ import { deletePreview, getPreview } from './previewStore';
 export interface CustomerTemplateFlags {
   heliosMigratedTag?: boolean;
   moveDuplicatesToNotes?: boolean;
+  subaddressDuplicateEmails?: boolean;
   mergeMatchingDuplicates?: boolean;
   moveInvalidContactToNotes?: boolean;
   fillMissingContactName?: boolean;
@@ -73,6 +74,7 @@ export function buildValidationOutcome(
     columnMapping,
     heliosMigratedTag: options.heliosMigratedTag ?? false,
     moveDuplicatesToNotes: options.moveDuplicatesToNotes ?? false,
+    subaddressDuplicateEmails: options.subaddressDuplicateEmails ?? false,
     mergeMatchingDuplicates: options.mergeMatchingDuplicates ?? false,
     moveInvalidContactToNotes: options.moveInvalidContactToNotes ?? false,
     fillMissingContactName: options.fillMissingContactName ?? false,
@@ -101,7 +103,12 @@ export function buildValidationOutcome(
   const blocked = new Set(errorIssues.map((i) => i.rowNumber));
 
   const fixed = new Set<number>();
-  for (const set of [dataset.invalidMoved, dataset.duplicatesMoved, dataset.namesFilled]) {
+  for (const set of [
+    dataset.invalidMoved,
+    dataset.duplicatesMoved,
+    dataset.duplicatesSubaddressed,
+    dataset.namesFilled,
+  ]) {
     for (const rowNumber of set) if (!blocked.has(rowNumber)) fixed.add(rowNumber);
   }
 
@@ -133,7 +140,8 @@ export function buildValidationOutcome(
     removed,
 
     fixedInvalidContact: countWithout(dataset.invalidMoved),
-    fixedDuplicates: countWithout(dataset.duplicatesMoved),
+    // Moved to Note or sub-addressed: either way the repeat now imports.
+    fixedDuplicates: countWithout(new Set([...dataset.duplicatesMoved, ...dataset.duplicatesSubaddressed])),
     fixedNamed: countWithout(dataset.namesFilled),
 
     removedBlank,
@@ -171,6 +179,7 @@ export async function validateCustomerCsv(
   const {
     heliosMigratedTag = false,
     moveDuplicatesToNotes = false,
+    subaddressDuplicateEmails = false,
     mergeMatchingDuplicates = false,
     moveInvalidContactToNotes = false,
     fillMissingContactName = false,
@@ -184,6 +193,7 @@ export async function validateCustomerCsv(
   const { issues: allIssues, summary, droppedBlankRows } = buildValidationOutcome(rawRows, columnMapping, {
     heliosMigratedTag,
     moveDuplicatesToNotes,
+    subaddressDuplicateEmails,
     mergeMatchingDuplicates,
     moveInvalidContactToNotes,
     fillMissingContactName,
@@ -219,6 +229,7 @@ export async function validateCustomerCsv(
             : undefined,
           heliosMigratedTag,
           moveDuplicatesToNotes,
+          subaddressDuplicateEmails,
           mergeMatchingDuplicates,
           moveInvalidContactToNotes,
           fillMissingContactName,
@@ -276,6 +287,7 @@ export const PREVIEWABLE_FLAGS = [
   'fillMissingContactName',
   'mergeMatchingDuplicates',
   'moveDuplicatesToNotes',
+  'subaddressDuplicateEmails',
 ] as const;
 
 export type PreviewableFlag = (typeof PREVIEWABLE_FLAGS)[number];

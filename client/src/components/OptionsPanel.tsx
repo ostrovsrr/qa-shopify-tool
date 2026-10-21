@@ -79,6 +79,12 @@ const GROUPS: { title: string; hint: (e: ValidationSummary | null) => string; op
         desc: 'For whatever is still duplicated, one row keeps the value and the rest stash it in Note.',
         previewable: true,
       },
+      {
+        key: 'subaddressDuplicateEmails',
+        name: 'Make duplicate emails unique (name+dup1@…)',
+        desc: 'For whatever is still duplicated by email, one row keeps the address and each repeat gets name+dupN@domain — Shopify accepts it and mail still reaches the original inbox. Phones are not changed.',
+        previewable: true,
+      },
     ],
   },
   {
