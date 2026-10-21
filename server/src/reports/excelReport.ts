@@ -252,6 +252,7 @@ function addShopifyTemplateSheet(
     anyMerges,
     fixMap,
     invalidMoved,
+    duplicatesMoved,
     duplicatesSubaddressed,
     namesFilled,
   } = buildTemplateDataset({
@@ -279,7 +280,7 @@ function addShopifyTemplateSheet(
   // column, or the sheet would hide a value the import is going to send. The
   // placeholder name needs First Name in particular — without this the operator
   // hands over a file with no sign of it while the import sends it anyway.
-  if (invalidMoved.size > 0 || duplicatesSubaddressed.size > 0) {
+  if (invalidMoved.size > 0 || duplicatesMoved.size > 0 || duplicatesSubaddressed.size > 0) {
     if (!effectiveColumns.includes('Note')) effectiveColumns.push('Note');
     if (!effectiveColumns.includes('Tags')) effectiveColumns.push('Tags');
   }
